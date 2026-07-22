@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# lua-odin .gitattributes
+#
+# Two jobs here. First, keep line endings sane across Windows/macOS/Linux so a
+# checkout on one OS doesn't show the whole tree as "modified" on another.
+# Second, tell Git which files are binary so it never tries to diff or munge
+# their bytes -- that matters a lot for us because our bytecode dumps must stay
+# byte-for-byte identical to reference Lua.
+# ---------------------------------------------------------------------------
+
+# Default: let Git decide text vs binary, and normalize to LF in the repo.
+* text=auto eol=lf
+
+# --- Force LF for all text source (repo-canonical line ending) --------------
+*.odin   text eol=lf
+*.c      text eol=lf
+*.h      text eol=lf
+*.hpp    text eol=lf
+*.lua    text eol=lf
+*.sh     text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.json   text eol=lf
+Makefile text eol=lf
+
+# --- Force CRLF for Windows-native scripts ----------------------------------
+# PowerShell and batch files are happiest with CRLF on their home turf.
+*.ps1    text eol=crlf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+
+# --- Binary: never diff, never touch bytes ----------------------------------
+# Precompiled Lua chunks are the important one -- byte-exact dumps are a project
+# goal, so Git must treat them as opaque blobs.
+*.luac   binary
+*.out    binary
+*.png    binary
+*.jpg    binary
+*.gif    binary
+*.ico    binary
+*.bin    binary
+*.o      binary
+*.obj    binary
+*.a      binary
+*.lib    binary
+*.exe    binary
+*.dll    binary
+*.so     binary
+*.dylib  binary
+*.pdb    binary
+
+# --- Linguist hints ---------------------------------------------------------
+# The reference C source under lua/ is vendored for reference and differential
+# testing, not authored here -- mark it so it doesn't skew language stats, and
+# so it's collapsed as "vendored" in diffs.
+lua/**    linguist-vendored
+tests/puc/** linguist-vendored

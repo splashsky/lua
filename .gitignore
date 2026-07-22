@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# lua-odin .gitignore
+#
+# The rule of thumb here: we track SOURCE and SCRIPTS, never build ARTIFACTS.
+# Everything the compiler or a build script spits out lives under build/out or
+# is a stray binary next to the source, and none of that belongs in history.
+# We also sweep up the usual OS/editor junk so no one accidentally commits it.
+# ---------------------------------------------------------------------------
+
+# --- Our own build output ---------------------------------------------------
+# The build/ directory is where we drop compiled binaries and intermediates.
+# We keep the scripts (build/*.ps1, build/*.sh) but ignore everything they emit.
+/build/out/
+/build/**/*.exe
+/build/**/*.pdb
+
+# --- Compiled Odin / native artifacts anywhere in the tree ------------------
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.dll
+*.so
+*.dylib
+
+# --- Standalone binaries built at the repo root -----------------------------
+# Our own `lua` and `luac` (and the classic luac.out dump) if built in place.
+/lua
+/luac
+luac.out
+
+# --- Reference Lua build artifacts under lua/ -------------------------------
+# We keep the pristine reference C SOURCE, but its Makefile produces objects and
+# binaries we never want to track. These are used only for differential testing.
+/lua/src/lua
+/lua/src/luac
+/lua/src/liblua.a
+/lua/src/*.o
+
+# --- Odin-native dynamic modules built for `require` testing ----------------
+# Our package library loads Odin-built shared modules (a documented deviation
+# from reference Lua's C modules); those compiled modules are artifacts too.
+/tests/**/*.dll
+/tests/**/*.so
+/tests/**/*.dylib
+
+# --- OS junk ----------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- Editor / IDE junk ------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+
+# --- Ols (Odin language server) local cache ---------------------------------
+.ols-cache/
