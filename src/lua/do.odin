@@ -12,6 +12,10 @@ package lua
 //   * driving coroutine resume/yield as transitions over that frame stack,
 //   * growing the value stack (by index-safe reallocation).
 //
+// Errors themselves unwind via a faithful setjmp/longjmp (see control.odin's
+// `throw`/`run_protected`); the explicit frame stack here is what makes
+// coroutine yield -- which longjmp cannot express -- resumable.
+//
 // This file and `vm` together *are* the interpreter's spine, tied together by
 // the `Exec_Outcome` from control.odin.
 //

@@ -79,65 +79,113 @@ Exec_Outcome :: struct {
 }
 
 // ---------------------------------------------------------------------------
-// Protected boundaries without setjmp/longjmp
+// Protected boundaries with setjmp/longjmp
 // ---------------------------------------------------------------------------
 
 // Reference Lua unwinds errors with `longjmp`, jumping straight from the point
-// of failure back to the matching `luaD_rawrunprotected`. Odin has no safe
-// equivalent (a `longjmp` would skip `defer`s and leave the runtime in an
-// undefined state), so we make the unwinding *explicit*: an operation that fails
-// returns an error `Thread_Status`, and every caller in the chain propagates it
-// upward by returning it too. `run_protected` is the one place that *stops* the
-// propagation and reports the status as a caught result.
+// of failure back to the matching `luaD_rawrunprotected`. It turns out Odin's
+// standard library *does* expose these -- `core:c/libc` binds `setjmp`/`longjmp`
+// (and on Windows the binding deliberately picks UCRT's *non-unwinding* variant,
+// which is exactly the plain register-restoring jump Lua wants). So we model the
+// error path faithfully rather than threading an error status back by hand
+// through every frame.
 //
-// A protected computation is any procedure with this shape. The `ud` pointer is
-// an opaque payload (an argument bundle), exactly like reference Lua's `Pfunc`.
-Protected_Proc :: #type proc(L: ^Lua_State, ud: rawptr) -> Thread_Status
+// One subtlety worth stating up front: `longjmp` only solves *error escape*. It
+// cannot resume a stack it already unwound, so coroutine `yield` still rides the
+// explicit heap frame-stack + trampoline (see docs/ARCHITECTURE.md, Decision 2).
+// Reference Lua uses *both* mechanisms together -- an explicit `CallInfo` list
+// AND `longjmp` -- so adopting the jump for errors while keeping the frame stack
+// for yields is more faithful, not a contradiction.
+//
+// Because a `longjmp` skips every intervening `defer`, kernel and compiler code
+// must never park cleanup of a *raw* (non-GC) allocation in a `defer` that a
+// throw could leap over. Anything heap-allocated outside the GC (the parser's
+// `Dyndata`/`Mbuffer`, say) is freed explicitly by the protected wrapper that
+// owns it, on both the success and the error path -- exactly as reference Lua
+// frees them after `luaD_pcall`.
 
-// Run `f` under a fresh protected boundary and return whatever status it yields.
-// This is our analogue of `luaD_rawrunprotected`, minus the longjmp. We bump a
-// depth counter so a `throw` deeper in the call chain knows *some* handler is
-// active (and therefore that it may simply return an error status rather than
-// panic). We save and restore the C-call count around the boundary just as
-// reference Lua does, so a caught error doesn't leak a bumped `nCcalls`.
-//
-// Note the depth counter is deliberately just "a raw protected scope exists" --
-// it is NOT the model for Lua-level `pcall`, continuations, or coroutine unwind,
-// which (Phase 5) need indexed frame/top/errfunc records. Keeping it minimal now
-// avoids a boundary stack that could itself fail to allocate while handling OOM.
-run_protected :: proc(L: ^Lua_State, f: Protected_Proc, ud: rawptr) -> Thread_Status {
-	old_ccalls := L.n_ccalls
-	old_depth := L.error_boundary_depth
-	L.error_boundary_depth += 1
-	status := f(L, ud)
-	L.error_boundary_depth = old_depth
-	L.n_ccalls = old_ccalls
-	return status
+// `Lua_Longjmp` is our analogue of reference Lua's `struct lua_longjmp`: one
+// node of the per-thread chain of active protected scopes. It parks the machine
+// state to jump back to and the error code being carried out. It lives on the
+// native stack of whichever `run_protected` created it -- never on the heap --
+// so nothing here can itself fail to allocate while we're handling an error.
+Lua_Longjmp :: struct {
+	previous: ^Lua_Longjmp,  // the enclosing protected scope, if any
+	b:        libc.jmp_buf,  // saved machine state (the `setjmp` target)
+	status:   Thread_Status, // error code in flight; set by `throw`, read on catch
 }
 
-// Raise an error of the given code. Our analogue of `luaD_throw` -- but since we
-// can't jump, this cannot itself unwind: it records what's needed and returns the
-// code so the caller can propagate it. Two cases mirror reference Lua:
+// A protected computation is any procedure with this shape. The `ud` pointer is
+// an opaque payload (an argument bundle), exactly like reference Lua's `Pfunc`.
 //
-//   * A protected boundary is active (`error_boundary_depth > 0`): return the
-//     code. Crucially we do NOT touch `L.status` here -- a thread whose error is
+// Contract: `f` reports normal completion or a coroutine yield by *returning*
+// (`.Ok` / `.Yield`); a genuine error is raised through `throw`, which longjmps
+// back to `run_protected` and never returns. `f` must never *return* an
+// `.Err_*` status -- if it does, a throw site was missed, and `run_protected`
+// asserts to catch that during development.
+Protected_Proc :: #type proc(L: ^Lua_State, ud: rawptr) -> Thread_Status
+
+// Run `f` under a fresh protected boundary and report the caught status. This is
+// our analogue of `luaD_rawrunprotected`. We push a `Lua_Longjmp` onto the
+// thread's `errorJmp` chain, `setjmp` a landing pad, and run `f`; a `throw`
+// anywhere inside `f` longjmps straight back here. We save and restore the
+// C-call count around the boundary just as reference Lua does, so a caught error
+// doesn't leak a bumped `n_ccalls`.
+//
+// This routine restores ONLY `errorJmp` and `n_ccalls` -- deliberately the same
+// minimal set reference `luaD_rawrunprotected` touches. Full Lua-level `pcall`
+// recovery (rewinding the frame index, closing open upvalues and to-be-closed
+// slots, restoring `errfunc`/`allowhook`, installing the error object, shrinking
+// the stack) is a *separate* layer built on top of this in Phase 5; keeping it
+// out of here mirrors reference Lua's split and avoids conflating the two.
+run_protected :: proc(L: ^Lua_State, f: Protected_Proc, ud: rawptr) -> Thread_Status {
+	old_ccalls := L.n_ccalls
+	lj: Lua_Longjmp
+	lj.status = .Ok
+	lj.previous = L.errorJmp // chain onto any enclosing boundary
+	L.errorJmp = &lj
+	// `setjmp` returns 0 on the initial call and (here) 1 when reached via a
+	// `longjmp` from `throw`. On the initial pass we run the computation; on
+	// the error return we skip straight past it, leaving in place the status
+	// that `throw` already stored on `lj`.
+	if libc.setjmp(&lj.b) == 0 {
+		st := f(L, ud)
+		assert(!is_error_status(st), "protected proc returned an error status instead of throwing it")
+		lj.status = st
+	}
+	L.errorJmp = lj.previous // unlink this boundary
+	L.n_ccalls = old_ccalls
+	return lj.status
+}
+
+// Raise an error of the given code. Our analogue of `luaD_throw`, and now a
+// faithful one: it does not return to its caller. Two cases mirror reference Lua:
+//
+//   * A protected boundary is active (`errorJmp != nil`): stash the code on the
+//     innermost boundary and `longjmp` back to its `setjmp` in `run_protected`.
+//     We deliberately do NOT touch `L.status` here -- a thread whose error is
 //     about to be caught by `pcall` must remain observably fine afterward. (The
-//     review specifically caught that clobbering `L.status` would leave a
-//     recovered thread looking errored.)
+//     review that vetted this specifically caught that clobbering `L.status`
+//     would leave a recovered thread looking errored.)
 //   * No boundary at all: this is unrecoverable. Set `L.status`, invoke the
-//     panic function if the embedder installed one, and abort -- reference Lua
-//     calls `abort()` here too. (Re-throwing into the main thread from a
-//     coroutine is a Phase-5 concern once real threads/frames exist.)
+//     panic function if the embedder installed one, and `abort()` -- reference
+//     Lua does the same. (Re-throwing into the main thread from a coroutine is a
+//     Phase-5 concern once real threads/frames exist.)
+//
+// The declared return type stays `Thread_Status` purely so the ~20 existing
+// `return throw(L, .Err_*)` propagation sites keep compiling unchanged. Both
+// branches below diverge (`longjmp` and `abort` are both `-> !`), so there is no
+// reachable `return` and Odin is happy; the type is never actually produced.
 throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
-	if L.error_boundary_depth > 0 {
-		return errcode
+	if L.errorJmp != nil {
+		L.errorJmp.status = errcode
+		libc.longjmp(&L.errorJmp.b, 1)
 	}
 	g := L.g
 	L.status = errcode
-	if g.panic != nil {
+	if g != nil && g.panic != nil {
 		g.panic(L)
 	}
-	// TODO(phase-5): faithful main-thread re-throw before aborting.
 	libc.abort()
 }
 

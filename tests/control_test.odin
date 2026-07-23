@@ -2,11 +2,12 @@ package tests
 
 // control_test.odin -- Phase 2 tests for the control/error protocol (control.odin).
 //
-// Odin has no setjmp/longjmp, so we unwind errors by returning statuses and
-// catching them at protected boundaries. These tests prove that boundary behaves
-// like reference Lua's pcall boundary observably: it catches a raised error,
-// reports the right status, does NOT leave the thread looking broken afterward,
-// nests correctly, and relocates the error object to where the caller wants it.
+// Errors unwind via a faithful setjmp/longjmp: `throw` jumps back to the nearest
+// `run_protected`, which catches the status. These tests prove that boundary
+// behaves like reference Lua's pcall boundary observably: it catches a raised
+// error, reports the right status, does NOT leave the thread looking broken
+// afterward, nests correctly, unlinks its boundary from the `errorJmp` chain,
+// and relocates the error object to where the caller wants it.
 
 import "core:testing"
 import lua "luao:lua"
@@ -41,9 +42,10 @@ error_status_classification :: proc(t: ^testing.T) {
 	testing.expect(t, lua.is_error_status(.Err_Err))
 }
 
-// A protected boundary must catch a raised error, report its status, and restore
-// the boundary depth to what it was. Critically, the thread's own status must be
-// left untouched -- a recovered error must not leave the thread observably broken.
+// A protected boundary must catch a raised error, report its status, and unlink
+// its boundary from the thread's `errorJmp` chain. Critically, the thread's own
+// status must be left untouched -- a recovered error must not leave the thread
+// observably broken.
 @(test)
 protected_boundary_catches_error :: proc(t: ^testing.T) {
 	L := lua.new_state(lua.default_allocator())
@@ -56,7 +58,7 @@ protected_boundary_catches_error :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, status, lua.Thread_Status.Err_Run)
 	testing.expect_value(t, L.status, lua.Thread_Status.Ok) // NOT clobbered
-	testing.expect_value(t, L.error_boundary_depth, 0) // depth restored
+	testing.expect(t, L.errorJmp == nil) // boundary unlinked
 
 	// The error object sits at top-1; relocating it to old_top must land the
 	// exact value we raised and leave top one slot past it.
@@ -65,7 +67,7 @@ protected_boundary_catches_error :: proc(t: ^testing.T) {
 	testing.expect_value(t, L.top, old_top + 1)
 }
 
-// A successful protected call returns Ok and leaves the boundary depth balanced.
+// A successful protected call returns Ok and leaves the boundary chain balanced.
 @(test)
 protected_boundary_success :: proc(t: ^testing.T) {
 	L := lua.new_state(lua.default_allocator())
@@ -74,12 +76,12 @@ protected_boundary_success :: proc(t: ^testing.T) {
 
 	status := lua.run_protected(L, ok_proc, nil)
 	testing.expect_value(t, status, lua.Thread_Status.Ok)
-	testing.expect_value(t, L.error_boundary_depth, 0)
+	testing.expect(t, L.errorJmp == nil)
 }
 
 // Nested boundaries must each catch independently: an inner error swallowed by a
-// middle layer must not escape to the outer boundary, and the depth counter must
-// unwind cleanly to zero.
+// middle layer must not escape to the outer boundary, and the boundary chain must
+// unwind cleanly back to empty.
 @(test)
 protected_boundary_nests :: proc(t: ^testing.T) {
 	L := lua.new_state(lua.default_allocator())
@@ -89,7 +91,7 @@ protected_boundary_nests :: proc(t: ^testing.T) {
 	errval: i64 = 7
 	outer := lua.run_protected(L, nested_outer, &errval)
 	testing.expect_value(t, outer, lua.Thread_Status.Ok)
-	testing.expect_value(t, L.error_boundary_depth, 0)
+	testing.expect(t, L.errorJmp == nil)
 	testing.expect_value(t, L.status, lua.Thread_Status.Ok)
 }
 

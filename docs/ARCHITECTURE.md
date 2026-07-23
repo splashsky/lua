@@ -74,12 +74,12 @@ File-to-origin map (each Odin file corresponds to reference `l*.c`/`l*.h`):
 | `dump.odin`          | `ldump.c`                                  |
 | `undump.odin`        | `lundump.h` / `lundump.c`                 |
 
-## Decision 2 — an explicit-frame-stack VM with a trampoline (no `longjmp`)
+## Decision 2 — an explicit-frame-stack VM with a trampoline (plus real `longjmp` for errors)
 
 This is the single most important design decision, and it was confirmed by reviewing
 the plan before writing any code.
 
-Reference Lua does two things Odin's standard language cannot:
+Reference Lua does two distinct things with the native C stack:
 
 1. It uses `setjmp`/`longjmp` (`luaD_throw` / `luaD_rawrunprotected`) to unwind across
    arbitrarily deep C call frames when an error is raised, snapping the state back to
@@ -87,11 +87,28 @@ Reference Lua does two things Odin's standard language cannot:
 2. Its coroutines suspend execution from deep inside the interpreter and resume later —
    effectively stack switching.
 
-Odin has **no** `setjmp`/`longjmp`, no exceptions, and no way to save/restore a native
-call stack. A naive recursive interpreter (where a Lua call is an Odin function call)
-therefore *cannot* faithfully implement `error`/`pcall` unwinding or `coroutine.yield`,
-because once we return up the Odin stack to propagate a yield/error we've destroyed the
-very frames we'd need to resume.
+These are **not** the same problem, and they do **not** need the same solution.
+
+**Errors (1) use real `setjmp`/`longjmp`.** An earlier revision of this document assumed
+Odin had no access to them; that was wrong. Odin's standard library binds them in
+`core:c/libc`, and on Windows the binding deliberately selects UCRT's *non-unwinding*
+`longjmp` (the plain register-restoring jump Lua wants, no SEH unwind). So `throw` /
+`run_protected` (see `src/lua/control.odin`) model `luaD_throw` / `luaD_rawrunprotected`
+faithfully: `throw` stashes the status on the innermost `Lua_Longjmp` and jumps straight
+back to the matching `run_protected`. `throw` never returns; it keeps a `Thread_Status`
+return type purely so existing `return throw(...)` propagation sites keep compiling, but
+both of its paths diverge (`longjmp` and `abort` are `-> !`). The one discipline this
+imposes: because a `longjmp` skips every intervening `defer`, cleanup of a **raw**
+(non-GC) allocation must never live in a `defer` a throw could leap over — the protected
+wrapper that owns such memory frees it explicitly on both paths, exactly as reference Lua
+frees the parser's `Dyndata`/`Mbuffer` after `luaD_pcall`.
+
+**Coroutines (2) still need the explicit heap frame stack.** `longjmp` only *unwinds* a
+stack; it cannot *resume* one it already left. A naive recursive interpreter (where a Lua
+call is an Odin function call) therefore still cannot implement `coroutine.yield`, because
+once we return up the Odin stack to suspend we've destroyed the frames we'd need to
+resume. Reference Lua handles this with its explicit `CallInfo` list — and, crucially, it
+uses that list *together with* `longjmp`, not instead of it. We do the same.
 
 So we do what reference Lua effectively models with its `CallInfo` list, but make it
 fully explicit:
@@ -113,11 +130,14 @@ fully explicit:
       Out_Of_Memory     -- emergency-collect then retry, or propagate as error
   ```
 
-Error recovery and coroutine suspension become explicit state-machine transitions over
-this frame stack, not native stack unwinding. Crucially, **coroutines force this
-design**: you cannot resume suspended Lua execution after the native frames that ran it
-have returned, so the frames must live in the heap where we can pause and resume them.
-The two hard problems (errors and coroutines) share one solution.
+**Coroutine** suspension becomes an explicit state-machine transition over this frame
+stack rather than native unwinding: you cannot resume suspended Lua execution after the
+native frames that ran it have returned, so the frames must live in the heap where we can
+pause and resume them. **Error** recovery, by contrast, *does* use native unwinding
+(`longjmp`) back to the protected boundary, and then reconciles the explicit frame stack
+at the catch site — restoring the frame index, closing open upvalues and to-be-closed
+slots, and installing the error object. The two hard problems are solved by these two
+mechanisms working together, exactly as in reference Lua.
 
 Host (Odin) callbacks follow the same continuation rules as C functions in reference
 Lua: an ordinary callback is non-yieldable across its native frame, while a yieldable

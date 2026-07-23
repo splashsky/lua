@@ -107,7 +107,7 @@ Lua_State :: struct {
 	n_ccalls:             u32, // nested non-yieldable calls (overflow guard)
 	errfunc:              int, // stack index of the current message handler
 	oldpc:                int, // last program counter (for hooks/line info)
-	error_boundary_depth: int, // >0 while inside a run_protected scope
+	errorJmp:             ^Lua_Longjmp, // innermost active protected boundary (nil if none)
 
 	twups:  ^Lua_State, // link in the list of threads with open upvalues
 	gclist: ^GCObject, // GC gray-list thread (a thread has children to scan)
@@ -226,7 +226,7 @@ preinit_thread :: proc(L: ^Lua_State, g: ^Global_State) {
 	L.n_ccalls = 0
 	L.errfunc = 0
 	L.oldpc = 0
-	L.error_boundary_depth = 0
+	L.errorJmp = nil
 	L.allowhook = 1
 	L.status = .Ok
 }
