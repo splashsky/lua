@@ -172,15 +172,50 @@ grow_size :: proc "contextless" (size: uint, needed: uint, limit: uint) -> (new_
 }
 
 // ---------------------------------------------------------------------------
-// Failure handling (deferred)
+// State-aware allocation (byte accounting)
 // ---------------------------------------------------------------------------
 
-// TODO(phase-2/phase-3): reference Lua's `luaM_realloc_`/`luaM_malloc_` don't
-// merely return nil on failure -- they first ask the collector to run an
-// *emergency* GC and retry the allocation, and only if that also fails do they
-// raise the preallocated ERRMEM error object through the protected-call
-// machinery. Both of those require a live `State` and a running GC, neither of
-// which exists in Phase 1. When they do, wrap the `raw_*` helpers above in a
-// `State`-aware layer that: (1) on nil, calls the emergency-GC hook and retries;
-// (2) on a second failure, throws ERRMEM via the error protocol; and (3) keeps
-// the GC's byte-debt accounting updated with the real (nsize - osize) delta.
+// Once a `Global_State` exists, kernel allocations flow through these wrappers
+// instead of the bare `raw_*` helpers, because reference Lua tracks every byte it
+// hands out so the collector can pace itself. These mirror `luaM_realloc_` and
+// `luaM_free_` (lmem.c): the collector's debt is nudged by the exact
+// `nsize - osize` delta on every successful (re)allocation and credited back on
+// every free. `gettotalbytes` then reports the real live-byte count.
+//
+// The one piece still deferred is the emergency-collect-then-retry dance on
+// failure: that needs a running collector, which is Phase 7. Until then a failed
+// allocation simply returns nil (and, per reference Lua, leaves the debt
+// untouched so accounting stays exact).
+
+// Reference Lua's `gettotalbytes`: bytes actually live right now. `GCtotalbytes`
+// carries "allocated + debt", so subtracting the debt yields the true figure.
+gettotalbytes :: #force_inline proc "contextless" (g: ^Global_State) -> L_Mem {
+	return g.gc_total_bytes - g.gc_debt
+}
+
+// Resize (or allocate, or free) a block on behalf of state `L`, keeping the GC
+// byte accounting exact -- reference Lua's `luaM_realloc_`. Passing `block == nil`
+// with `osize == 0` allocates; passing `nsize == 0` frees. On a genuine failure
+// (nil out with a nonzero request) we return nil *without* touching the debt, so
+// the caller can retry or raise while the numbers stay consistent.
+state_realloc :: proc(L: ^Lua_State, block: rawptr, osize: uint, nsize: uint) -> rawptr {
+	g := L.g
+	newblock := raw_realloc(g.alloc, block, osize, nsize)
+	if newblock == nil && nsize > 0 {
+		// TODO(phase-7): run an emergency GC and retry before giving up.
+		return nil // do not update the debt on failure
+	}
+	g.gc_debt -= L_Mem(nsize) - L_Mem(osize)
+	return newblock
+}
+
+// Free a block of `osize` bytes on behalf of state `L`, crediting the debt --
+// reference Lua's `luaM_free_`.
+state_free :: proc(L: ^Lua_State, block: rawptr, osize: uint) {
+	if block == nil {
+		return
+	}
+	g := L.g
+	raw_free(g.alloc, block, osize)
+	g.gc_debt += L_Mem(osize)
+}
