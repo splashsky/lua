@@ -237,3 +237,61 @@ state_free :: proc(L: ^Lua_State, block: rawptr, osize: uint) {
 	raw_free(g.alloc, block, osize)
 	g.gc_debt += L_Mem(osize)
 }
+
+// ---------------------------------------------------------------------------
+// Growable typed vectors (Proto arrays, parser dynamic arrays)
+// ---------------------------------------------------------------------------
+//
+// The parser and code generator build a `Proto`'s parallel arrays (code, line
+// info, constants, nested protos, locals, upvalues) plus their own scratch
+// arrays (active variables, gotos, labels) by appending one element at a time
+// and growing on demand. Reference Lua expresses this with the `luaM_growvector`
+// macro over `luaM_growaux_`; these two generic helpers are our equivalent.
+//
+// Both take the *address* of the `[^]T` backing pointer and the `int` count/size
+// field so they can update them in place -- exactly the `(&array, &size)` pair
+// reference Lua threads through. Element size is `size_of(T)`, so callers never
+// pass a byte size.
+
+// Ensure the array behind `arr` has room for at least one element beyond the
+// `nelems` already in use, growing (usually doubling) up to `limit`. On success
+// `arr^` and `size^` are updated; if even `limit` cannot hold one more element we
+// raise the same "too many X" error reference Lua's `luaM_growaux_` raises, and
+// an out-of-memory realloc raises `.Err_Mem` like `luaM_saferealloc_`.
+grow_vector :: proc(L: ^Lua_State, arr: ^[^]$T, nelems: int, size: ^int, limit: int, what: string) {
+	if nelems + 1 <= size^ { 	// does one extra element still fit?
+		return // nothing to be done
+	}
+	newsize, ok := grow_size(uint(size^), uint(nelems + 1), uint(limit))
+	if !ok {
+		// The hard limit itself cannot hold what we need: a compile-time "too
+		// many locals/constants/opcodes/..." error. During parsing there is no
+		// running Lua frame, so this is exactly reference `luaG_runerror`'s
+		// no-source path: push the message and throw a runtime error.
+		luaO_pushfstring(L, "too many %s (limit is %d)", what, limit)
+		throw(L, .Err_Run)
+	}
+	oldbytes := uint(size^) * size_of(T)
+	newbytes := uint(newsize) * size_of(T)
+	newblock := state_realloc(L, arr^, oldbytes, newbytes)
+	if newblock == nil && newbytes > 0 { 	// realloc failed outright?
+		throw(L, .Err_Mem)
+	}
+	arr^ = cast([^]T)newblock
+	size^ = int(newsize) // update only once everything else is OK
+}
+
+// Shrink the array behind `arr` to exactly `final_n` elements, releasing the
+// slack -- reference Lua's `luaM_shrinkvector_`. Prototypes reuse the size field
+// as the element count, so `close_func` trims each array to what it actually
+// used. A failed shrink (should never happen when shrinking) raises `.Err_Mem`.
+shrink_vector :: proc(L: ^Lua_State, arr: ^[^]$T, size: ^int, final_n: int) {
+	oldbytes := uint(size^) * size_of(T)
+	newbytes := uint(final_n) * size_of(T)
+	newblock := state_realloc(L, arr^, oldbytes, newbytes)
+	if newblock == nil && newbytes > 0 {
+		throw(L, .Err_Mem)
+	}
+	arr^ = cast([^]T)newblock
+	size^ = final_n
+}

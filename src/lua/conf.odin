@@ -80,3 +80,8 @@ LUA_ENV :: "_ENV"
 // default build does NOT reserve `global`; we match that here. Flip to `false`
 // to enable the 5.5 `global` declaration keyword.
 LUA_COMPAT_GLOBAL :: true
+
+// The "give me all results" sentinel for calls and varargs -- reference Lua's
+// `LUA_MULTRET` (lua.h). A call or vararg asked for `LUA_MULTRET` results returns
+// as many as it produces, adjusting the stack top rather than a fixed count.
+LUA_MULTRET :: -1

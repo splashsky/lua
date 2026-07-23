@@ -444,6 +444,42 @@ to_integer_no_string :: proc "contextless" (o: ^TValue, mode: F2I_Mode) -> (Inte
 	return 0, false
 }
 
+// Raw primitive equality -- reference Lua's `luaV_rawequalobj` (i.e.
+// `luaV_equalobj` with no state, so no `__eq` metamethod is ever consulted). The
+// code generator leans on this to deduplicate numeric constants (see
+// `luaK_numberK`) and to sanity-check the constant cache, so it must faithfully
+// mirror how the VM decides two values are "primitively" equal.
+//
+// The one subtlety: an integer and a float count as equal when the float has an
+// integral value equal to the integer (e.g. `1` and `1.0`). Everything else must
+// share the exact tag-with-variant; strings compare by interned identity (short)
+// or by contents (long), and other collectables compare by pointer.
+raw_equal :: proc "contextless" (t1, t2: ^TValue) -> bool {
+	if type_tag(t1) != type_tag(t2) {
+		// Different variants can still be equal, but only for two numbers where
+		// one is a float carrying an integral value matching the other.
+		if no_variant(t1.tt_) != no_variant(t2.tt_) || no_variant(t1.tt_) != TNUMBER {
+			return false
+		}
+		i1, ok1 := to_integer_no_string(t1, .Eq)
+		i2, ok2 := to_integer_no_string(t2, .Eq)
+		return ok1 && ok2 && i1 == i2
+	}
+	switch type_tag(t1) {
+	case VNIL, VFALSE, VTRUE:
+		return true // nil==nil, false==false, true==true
+	case VNUMINT:
+		return int_value(t1) == int_value(t2)
+	case VNUMFLT:
+		return flt_value(t1) == flt_value(t2)
+	case VSHRSTR, VLNGSTR:
+		return luaS_eqstr(str_value(t1), str_value(t2))
+	case:
+		// Tables, closures, userdata, threads: raw equality is pointer identity.
+		return t1.value_.gc == t2.value_.gc
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ASCII character classes (locale-independent)
 // ---------------------------------------------------------------------------
