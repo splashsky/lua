@@ -346,7 +346,7 @@ f_luaopen :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
 	if status := luaT_init(L); status != .Ok { // interns metamethod names
 		return status
 	}
-	// TODO(phase-4): luaX_init (reserved-word strings) once the lexer exists.
+	luaX_init(L) // intern reserved-word strings and mark them reserved
 	g.gcstp = 0 // construction done: allow the collector to run
 	set_nil(&g.nilvalue) // state is now fully built
 	return .Ok

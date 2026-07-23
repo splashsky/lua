@@ -61,3 +61,22 @@ NUMBER_FMT_N: cstring : "%.17g"
 // mirroring reference Lua's `LUA_N2SBUFFSZ`. Comfortably fits the longest float
 // or integer rendering plus a sign, the appended ".0", and a NUL.
 N2S_BUFF_SZ :: 64
+
+// The maximum length of a "chunk id" -- the short, human-readable source name Lua
+// prints in error messages (`luaO_chunkid` truncates to this). Reference Lua's
+// `LUA_IDSIZE`.
+LUA_IDSIZE :: 60
+
+// The initial size the lexer gives its token-accumulation buffer. Reference Lua's
+// `LUA_MINBUFFER`.
+LUA_MINBUFFER :: 32
+
+// The name of the upvalue that holds the global environment. Reference Lua's
+// `LUA_ENV`.
+LUA_ENV :: "_ENV"
+
+// Whether `global` is treated as a plain identifier rather than a reserved word.
+// Reference luaconf.h defines `LUA_COMPAT_GLOBAL` unconditionally in 5.5, so the
+// default build does NOT reserve `global`; we match that here. Flip to `false`
+// to enable the 5.5 `global` declaration keyword.
+LUA_COMPAT_GLOBAL :: true

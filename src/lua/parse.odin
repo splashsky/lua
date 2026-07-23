@@ -14,3 +14,17 @@ package lua
 //
 // TODO(phase-4): the recursive-descent grammar, scope/local/upvalue management,
 // and Proto construction driving `code`.
+
+// ---------------------------------------------------------------------------
+// Placeholder parser types
+// ---------------------------------------------------------------------------
+//
+// The lexer's `LexState` carries pointers to these two parser-owned structures
+// (reference Lua shares one `LexState` across the scanner and parser). The parser
+// row will flesh them out into the full `Dyndata` (active locals, pending gotos,
+// labels) and `FuncState` (per-function code-generation state) from `lparser.h`.
+// For now they exist only so `LexState`'s pointer fields typecheck; the lexer
+// never dereferences either one.
+Dyndata :: struct {}
+
+FuncState :: struct {}

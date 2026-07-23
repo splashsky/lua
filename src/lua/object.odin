@@ -1010,3 +1010,414 @@ raw_arith :: proc "contextless" (op: Arith_Op, p1, p2: ^TValue) -> (res: TValue,
 	}
 	return res, .No_Number
 }
+
+// ---------------------------------------------------------------------------
+// UTF-8 encoding
+// ---------------------------------------------------------------------------
+//
+// Reference Lua's `luaO_utf8esc`. Encodes the code point `x` (an unsigned 32-bit
+// value, so it accepts the full extended range Lua allows -- up to 6 bytes, wider
+// than the Unicode maximum) into `buff` and returns how many bytes it wrote.
+//
+// The quirk to remember: the bytes are written *right-justified* at the tail of
+// the buffer. The result occupies `buff[UTF8BUFFSZ - n ..< UTF8BUFFSZ]`, not the
+// front. This mirrors the C original exactly (it fills from the low-order
+// continuation byte backwards), and callers slice from the tail accordingly.
+
+// The buffer size `luaO_utf8esc` needs: 8 bytes is enough for the widest (6-byte)
+// encoding with room to spare. Reference Lua's `UTF8BUFFSZ`.
+UTF8BUFFSZ :: 8
+
+luaO_utf8esc :: proc "contextless" (buff: []byte, x: u32) -> int {
+	n := 1 // number of bytes emitted so far
+	if x < 0x80 {
+		// Plain ASCII: a single byte, dropped at the very end of the buffer.
+		buff[UTF8BUFFSZ - 1] = byte(x)
+	} else {
+		mfb: u32 = 0x3f // "maximum that fits" in the first byte, shrinks each round
+		xx := x
+		for {
+			// Emit one 6-bit continuation byte (10xxxxxx), filling from the tail
+			// backwards. Post-increment `n` mirrors the C `buff[UTF8BUFFSZ-(n++)]`.
+			buff[UTF8BUFFSZ - n] = byte(0x80 | (xx & 0x3f))
+			n += 1
+			xx >>= 6
+			mfb >>= 1
+			if xx <= mfb {
+				break
+			}
+		}
+		// The leading byte carries the length in its high bits (~mfb<<1) plus the
+		// remaining payload.
+		buff[UTF8BUFFSZ - n] = byte((~mfb << 1) | xx)
+	}
+	return n
+}
+
+// ---------------------------------------------------------------------------
+// Formatted string building: luaO_pushvfstring / luaO_pushfstring
+// ---------------------------------------------------------------------------
+//
+// Reference Lua's `luaO_pushvfstring`/`luaO_pushfstring`. These build a Lua string
+// from a restricted printf-style format and push it on the stack. Lua only uses a
+// tiny subset of conversions internally -- %s %d %I %f %p %c %U %% -- so we
+// implement exactly those, faithfully, and keep any unrecognized `%x` literally
+// (which is what the reference does with its final `default` case).
+//
+// The tricky part faithful reproduction demands is memory safety: growing the
+// accumulation buffer can trigger an allocation, which can fail. Reference Lua
+// handles this without longjmp inside the formatter by recording an error flag and
+// then materializing the final string under a *nested* protected call in
+// `clearbuff`. We mirror that precisely so an out-of-memory mid-format frees the
+// dynamic buffer and reports `.Err_Mem` to the enclosing boundary rather than
+// leaking or corrupting the stack.
+
+// The size of the on-stack scratch space inside `Buff_FS`. Reference Lua's
+// `BUFVFS = LUA_IDSIZE + N2S_BUFF_SZ + 95`.
+BUFVFS :: LUA_IDSIZE + N2S_BUFF_SZ + 95
+
+// The formatting buffer. It starts life pointing at its own inline `space`; only
+// if the result outgrows that does it switch to a heap block via the allocator.
+Buff_FS :: struct {
+	L:        ^Lua_State,
+	b:        [^]u8, // current buffer (either &space[0] or a heap block)
+	buffsize: uint, // capacity of `b`
+	blen:     uint, // bytes used so far
+	err:      int, // 0 = ok, 1 = allocation failed, 2 = length overflow
+	space:    [BUFVFS]u8,
+}
+
+@(private = "file")
+buff_init :: proc(L: ^Lua_State, buff: ^Buff_FS) {
+	buff.L = L
+	buff.b = ([^]u8)(&buff.space[0])
+	buff.buffsize = BUFVFS
+	buff.blen = 0
+	buff.err = 0
+}
+
+// Append `length` bytes from `src` to the buffer, growing it if needed. On growth
+// failure it sets `err` and stops appending -- it never throws, so the format loop
+// can run to completion before the error is surfaced (exactly as reference Lua
+// tolerates a failed `getbuff`).
+@(private = "file")
+buff_add :: proc(buff: ^Buff_FS, src: [^]u8, length: uint) {
+	if buff.err != 0 || length == 0 {
+		return
+	}
+	if buff.blen + length > buff.buffsize {
+		// Need more room. Double until it fits, guarding against overflow just as
+		// reference Lua does (it aborts with a "buffer too large" style error, which
+		// we model with err == 2).
+		newsize := buff.buffsize
+		for newsize < buff.blen + length {
+			if newsize >= MAX_SIZE / 2 {
+				buff.err = 2
+				return
+			}
+			newsize *= 2
+		}
+		L := buff.L
+		is_static := buff.b == ([^]u8)(&buff.space[0])
+		newblock: rawptr
+		if is_static {
+			// First move off the inline space: allocate fresh and copy what we have.
+			newblock = state_realloc(L, nil, 0, newsize)
+			if newblock == nil {
+				buff.err = 1
+				return
+			}
+			if buff.blen > 0 {
+				libc.memcpy(newblock, rawptr(buff.b), buff.blen)
+			}
+		} else {
+			// Already on the heap: a plain resize preserving the contents.
+			newblock = state_realloc(L, rawptr(buff.b), buff.buffsize, newsize)
+			if newblock == nil {
+				buff.err = 1
+				return
+			}
+		}
+		buff.b = ([^]u8)(newblock)
+		buff.buffsize = newsize
+	}
+	libc.memcpy(rawptr(&buff.b[buff.blen]), rawptr(src), length)
+	buff.blen += length
+}
+
+// Append the decimal/float rendering of a single TValue via `number_to_str`,
+// which routes through the platform C library for byte-identical output.
+@(private = "file")
+buff_add_num :: proc(buff: ^Buff_FS, o: ^TValue) {
+	tmp: [N2S_BUFF_SZ]u8
+	n := number_to_str(o, tmp[:])
+	buff_add(buff, ([^]u8)(&tmp[0]), uint(n))
+}
+
+// The protected body that turns the finished buffer into an interned Lua string
+// and pushes it. It runs under `run_protected` because `luaS_newlstr` can raise on
+// OOM; catching it here lets `buff_clear` still free the dynamic buffer.
+@(private = "file")
+buff_push :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
+	buff := (^Buff_FS)(ud)
+	if buff.err == 1 {
+		// Allocation failed mid-format: surface a memory error to this boundary.
+		return throw(L, .Err_Mem)
+	}
+	if buff.err == 2 {
+		// Length overflow: reference Lua appends "..." and carries on with a
+		// truncated-but-valid string rather than failing outright.
+		dots := "..."
+		buff_add(buff, ([^]u8)(raw_data(dots)), 3)
+	}
+	ts := luaS_newlstr(L, buff.b, buff.blen)
+	set_string(stack_value(L, L.top), ts)
+	L.top += 1
+	return .Ok
+}
+
+// Finalize the buffer: push the string under protection, then unconditionally free
+// any heap block. Returns the pushed `^TString`, or nil if the protected push
+// failed (memory error), matching reference `clearbuff`'s behavior.
+@(private = "file")
+buff_clear :: proc(buff: ^Buff_FS) -> ^TString {
+	L := buff.L
+	status := run_protected(L, buff_push, rawptr(buff))
+	// Free the dynamic buffer if we ever left the inline space. This must happen
+	// whether or not the push succeeded, so an OOM does not leak it.
+	if buff.b != ([^]u8)(&buff.space[0]) {
+		state_free(L, rawptr(buff.b), buff.buffsize)
+	}
+	if status != .Ok {
+		return nil
+	}
+	return str_value(stack_value(L, L.top - 1))
+}
+
+// Coerce a format argument to the various primitive shapes the conversions need.
+// Lua's C `va_arg` is untyped; Odin's `any` is typed, so we accept the handful of
+// concrete types our call sites actually pass and fall back gracefully otherwise.
+@(private = "file")
+fmt_arg_to_string :: proc(a: any) -> string {
+	switch v in a {
+	case string:
+		return v
+	case cstring:
+		return string(v)
+	case ^TString:
+		return string(str_slice(v))
+	case []u8:
+		return string(v)
+	case:
+		return "(null)" // reference Lua prints "(null)" for a NULL %s
+	}
+}
+
+@(private = "file")
+fmt_arg_to_int :: proc(a: any) -> i64 {
+	switch v in a {
+	case i64:
+		return v
+	case int:
+		return i64(v)
+	case i32:
+		return i64(v)
+	case u32:
+		return i64(v)
+	case u64:
+		return i64(v)
+	case u16:
+		return i64(v)
+	case i16:
+		return i64(v)
+	case u8:
+		return i64(v)
+	case i8:
+		return i64(v)
+	case rune:
+		return i64(v)
+	case:
+		return 0
+	}
+}
+
+@(private = "file")
+fmt_arg_to_flt :: proc(a: any) -> f64 {
+	switch v in a {
+	case f64:
+		return v
+	case f32:
+		return f64(v)
+	case:
+		return 0
+	}
+}
+
+@(private = "file")
+fmt_arg_to_ptr :: proc(a: any) -> rawptr {
+	switch v in a {
+	case rawptr:
+		return v
+	case:
+		// Any typed pointer erases to its raw address in `any.data`.
+		return a.data
+	}
+}
+
+// The formatter proper. Scans `fmt`, copying literal runs verbatim and expanding
+// each recognized `%` conversion by consuming the next positional argument.
+luaO_pushvfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> ^TString {
+	buff: Buff_FS
+	buff_init(L, &buff)
+	ai := 0 // next argument index
+	i := 0
+	n := len(fmt)
+	for i < n {
+		// Copy the literal run up to the next '%'.
+		j := i
+		for j < n && fmt[j] != '%' {
+			j += 1
+		}
+		if j > i {
+			buff_add(&buff, ([^]u8)(raw_data(fmt[i:j])), uint(j - i))
+		}
+		if j >= n {
+			break
+		}
+		// fmt[j] == '%'. A trailing lone '%' is kept literally.
+		if j + 1 >= n {
+			buff_add(&buff, ([^]u8)(raw_data(fmt[j:j + 1])), 1)
+			break
+		}
+		spec := fmt[j + 1]
+		switch spec {
+		case 's':
+			s := fmt_arg_to_string(args[ai]);ai += 1
+			buff_add(&buff, ([^]u8)(raw_data(s)), uint(len(s)))
+		case 'd', 'I':
+			o: TValue
+			set_int(&o, Integer(fmt_arg_to_int(args[ai])));ai += 1
+			buff_add_num(&buff, &o)
+		case 'f':
+			o: TValue
+			set_float(&o, Number(fmt_arg_to_flt(args[ai])));ai += 1
+			buff_add_num(&buff, &o)
+		case 'c':
+			cbuf := [1]u8{byte(fmt_arg_to_int(args[ai]))};ai += 1
+			buff_add(&buff, ([^]u8)(&cbuf[0]), 1)
+		case 'p':
+			p := fmt_arg_to_ptr(args[ai]);ai += 1
+			pbuf: [N2S_BUFF_SZ]u8
+			w := libc.snprintf(([^]libc.char)(&pbuf[0]), len(pbuf), "%p", p)
+			if w > 0 {
+				buff_add(&buff, ([^]u8)(&pbuf[0]), uint(w))
+			}
+		case 'U':
+			x := u32(fmt_arg_to_int(args[ai]));ai += 1
+			ubuf: [UTF8BUFFSZ]u8
+			ln := luaO_utf8esc(ubuf[:], x)
+			buff_add(&buff, ([^]u8)(&ubuf[UTF8BUFFSZ - ln]), uint(ln))
+		case '%':
+			pct := [1]u8{'%'}
+			buff_add(&buff, ([^]u8)(&pct[0]), 1)
+		case:
+			// Unknown conversion: keep the two characters literally, exactly as
+			// reference Lua's default branch does.
+			buff_add(&buff, ([^]u8)(raw_data(fmt[j:j + 2])), 2)
+		}
+		i = j + 2
+	}
+	return buff_clear(&buff)
+}
+
+// The convenience wrapper. Reference Lua's `luaO_pushfstring` asserts the result is
+// non-nil, but that assertion only holds because a failed format has already
+// longjmp'd. Since our `luaO_pushvfstring` returns nil on a caught memory error, we
+// re-raise it to the enclosing boundary here so callers see faithful error
+// propagation.
+luaO_pushfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> ^TString {
+	ts := luaO_pushvfstring(L, fmt, ..args)
+	if ts == nil {
+		throw(L, .Err_Mem)
+	}
+	return ts
+}
+
+// ---------------------------------------------------------------------------
+// Chunk identifiers: luaO_chunkid
+// ---------------------------------------------------------------------------
+//
+// Reference Lua's `luaO_chunkid`. Turns a source name into the short label Lua puts
+// in error messages, honoring the leading marker byte:
+//   '='  -> use the rest verbatim (a caller-supplied name), truncated if too long
+//   '@'  -> a file name; too-long names are shown as "...<tail>"
+//   else -> a literal chunk of source; shown as [string "first line..."]
+// It writes into `out` (capacity should be `LUA_IDSIZE`) and returns the number of
+// bytes written (no NUL is required by our callers, which slice by the return).
+luaO_chunkid :: proc(out: []u8, source: string) -> int {
+	RETS :: "..."
+	PRE :: "[string \""
+	POS :: "\"]"
+	bufflen := len(out) // reference starts at LUA_IDSIZE
+	srclen := len(source)
+	w := 0 // bytes written into `out`
+
+	// Small local helper to copy bytes into `out`, advancing `w`.
+	put := proc(out: []u8, w: ^int, s: string) {
+		for k in 0 ..< len(s) {
+			out[w^] = s[k]
+			w^ += 1
+		}
+	}
+
+	if srclen == 0 {
+		return 0
+	}
+	marker := source[0]
+	body := source[1:] // everything after the marker byte
+	bodylen := srclen - 1
+
+	if marker == '=' { // literal, verbatim source name
+		if bodylen < bufflen { // small enough: copy it all
+			put(out, &w, body)
+		} else { // truncate to fit
+			put(out, &w, body[:bufflen - 1])
+		}
+	} else if marker == '@' { // a file name
+		if bodylen <= bufflen - 1 { // (srclen-1 <= LUA_IDSIZE-1) small enough
+			put(out, &w, body)
+		} else { // add "..." before rendering the last part
+			put(out, &w, RETS)
+			bufflen -= len(RETS)
+			keep := bufflen - 1 // keep the last (bufflen - 1) chars of the body
+			put(out, &w, body[bodylen - keep:])
+		}
+	} else { // a chunk of literal source: [string "..."]
+		// Find the first newline (Lua shows only the first line).
+		nl := -1
+		for k in 0 ..< srclen {
+			if source[k] == '\n' {
+				nl = k
+				break
+			}
+		}
+		put(out, &w, PRE)
+		bufflen -= len(PRE) + len(RETS) + len(POS) + 1
+		if srclen < bufflen && nl == -1 { // whole thing fits on one line
+			put(out, &w, source)
+		} else {
+			// Show up to `bufflen` bytes, stopping at the first newline, then "...".
+			limit := srclen
+			if nl >= 0 && nl < limit {
+				limit = nl
+			}
+			if bufflen < limit {
+				limit = bufflen
+			}
+			put(out, &w, source[:limit])
+			put(out, &w, RETS)
+		}
+		put(out, &w, POS)
+	}
+	return w
+}
