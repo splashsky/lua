@@ -195,17 +195,35 @@ gettotalbytes :: #force_inline proc "contextless" (g: ^Global_State) -> L_Mem {
 
 // Resize (or allocate, or free) a block on behalf of state `L`, keeping the GC
 // byte accounting exact -- reference Lua's `luaM_realloc_`. Passing `block == nil`
-// with `osize == 0` allocates; passing `nsize == 0` frees. On a genuine failure
-// (nil out with a nonzero request) we return nil *without* touching the debt, so
-// the caller can retry or raise while the numbers stay consistent.
+// with `osize == 0` allocates; passing `nsize == 0` frees. On a first failure we
+// try an emergency collection (if one is safe right now) to reclaim memory, then
+// retry once. If it still fails we return nil *without* touching the debt, so the
+// caller can raise while the numbers stay consistent.
 state_realloc :: proc(L: ^Lua_State, block: rawptr, osize: uint, nsize: uint) -> rawptr {
 	g := L.g
 	newblock := raw_realloc(g.alloc, block, osize, nsize)
 	if newblock == nil && nsize > 0 {
-		// TODO(phase-7): run an emergency GC and retry before giving up.
-		return nil // do not update the debt on failure
+		// Emergency collection is only safe once the state is fully built and the
+		// collector is neither stopped nor already running; otherwise we would
+		// re-enter construction or the collector itself. When safe, free what we
+		// can and retry exactly once -- reference Lua's `luaM_realloc_` fallback.
+		if completestate(g) && g.gcstp == 0 && !g.gcrunning {
+			gc_full(L, true) // emergency: reclaim unreachable objects
+			newblock = raw_realloc(g.alloc, block, osize, nsize)
+		}
+		if newblock == nil {
+			return nil // still no luck: do not update the debt on failure
+		}
 	}
-	g.gc_debt -= L_Mem(nsize) - L_Mem(osize)
+	// Accounting subtlety mirrored from reference Lua's split between
+	// `luaM_malloc_` and `luaM_realloc_`: for a *fresh* allocation (`block == nil`)
+	// the `osize` argument does NOT carry a byte count -- it carries the object's
+	// type tag (see `raw_alloc`/`luaC_newobj`, which ride the tag through to the
+	// allocator callback in that slot). The real previous size is therefore zero,
+	// and the debt must grow by the whole `nsize`. Only genuine reallocations of an
+	// existing block treat `osize` as the old byte count.
+	old_bytes := block == nil ? uint(0) : osize
+	g.gc_debt -= L_Mem(nsize) - L_Mem(old_bytes)
 	return newblock
 }
 

@@ -146,15 +146,19 @@ throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
 // the error object to land at; afterward `top` sits one slot past it.
 //
 //   * `Err_Mem`: reference Lua reuses the preallocated "not enough memory"
-//     string. That string is a `TString`, which doesn't exist until Phase 3, so
-//     for now we leave a nil placeholder there. No Phase-2 path builds an ERRMEM
-//     error object on a completed state, so this stays honest.
+//     string so that reporting an out-of-memory error never itself allocates.
+//     We do the same, pointing the error slot at `g.memerrmsg`. On the rare path
+//     where the state isn't complete yet (memerrmsg not interned), we fall back
+//     to nil rather than dereference a null string.
 //   * any other error: the raiser left the error object at `top-1`; slide it down
 //     to `old_top`.
 set_error_object :: proc(L: ^Lua_State, errcode: Thread_Status, old_top: int) {
 	if errcode == .Err_Mem {
-		// TODO(phase-3): copy G(L).memerrmsg once interned strings exist.
-		set_nil(stack_value(L, old_top))
+		if L.g.memerrmsg != nil {
+			set_string(stack_value(L, old_top), L.g.memerrmsg)
+		} else {
+			set_nil(stack_value(L, old_top))
+		}
 	} else {
 		stack_value(L, old_top)^ = stack_value(L, L.top - 1)^
 	}

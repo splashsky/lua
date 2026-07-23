@@ -235,6 +235,15 @@ is_strict_nil :: #force_inline proc "contextless" (o: ^TValue) -> bool {
 	return o.tt_ == VNIL
 }
 
+// A table slot with no value carries the VEMPTY tag; reading it as a Lua value
+// yields nil. `is_empty` mirrors reference Lua's `isempty`, which -- like us --
+// simply tests the base type, so it accepts every nil variant. Kept as a named
+// predicate because the table and GC code read far more clearly asking "is this
+// slot empty?" than "is this value nil?".
+is_empty :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return no_variant(o.tt_) == TNIL
+}
+
 is_boolean :: #force_inline proc "contextless" (o: ^TValue) -> bool {
 	return no_variant(o.tt_) == TBOOLEAN
 }
@@ -359,6 +368,14 @@ set_gc :: #force_inline proc "contextless" (o: ^TValue, obj: ^GCObject) {
 set_obj :: #force_inline proc "contextless" (dst: ^TValue, src: ^TValue) {
 	dst.value_ = src.value_
 	dst.tt_ = src.tt_
+}
+
+// Collapse a pointer to a 32-bit unsigned integer for hashing -- reference Lua's
+// `point2uint`. We only ever feed the result into a hash function, so truncating
+// the low 32 bits of the address is fine; it need not round-trip back to a
+// pointer. (Reference masks with UINT_MAX for exactly the same reason.)
+point2uint :: #force_inline proc "contextless" (p: rawptr) -> u32 {
+	return u32(uintptr(p))
 }
 
 // ---------------------------------------------------------------------------

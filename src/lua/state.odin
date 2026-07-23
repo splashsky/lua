@@ -55,7 +55,7 @@ CIST_C :: u32(1) << (12 + 3)
 // the bucket array is typed as `^GCObject` and the table simply starts empty.
 // Phase 3 fills this in; `close_state` already knows to free the bucket array.
 String_Table :: struct {
-	hash: [^]^GCObject, // TODO(phase-3): array of ^TString buckets
+	hash: [^]^TString, // array of ^TString buckets (open hashing with chains)
 	nuse: int, // number of strings currently interned
 	size: int, // number of buckets
 }
@@ -101,7 +101,7 @@ Lua_State :: struct {
 
 	// to-be-closed variables + open upvalues ---------------------------
 	tbclist:   int, // stack index of the newest to-be-closed slot
-	openupval: ^GCObject, // TODO(phase-3): list head of open ^UpVal
+	openupval: ^UpVal, // list head of this thread's open upvalues (by index)
 
 	// control ----------------------------------------------------------
 	n_ccalls:             u32, // nested non-yieldable calls (overflow guard)
@@ -109,7 +109,8 @@ Lua_State :: struct {
 	oldpc:                int, // last program counter (for hooks/line info)
 	error_boundary_depth: int, // >0 while inside a run_protected scope
 
-	twups: ^Lua_State, // link in the list of threads with open upvalues
+	twups:  ^Lua_State, // link in the list of threads with open upvalues
+	gclist: ^GCObject, // GC gray-list thread (a thread has children to scan)
 }
 
 // The GC-punning promise: a `^Lua_State` must be reinterpretable as a
@@ -154,12 +155,19 @@ Global_State :: struct {
 
 	// GC mode + roots (inert scaffold until the collector lands) --------
 	allgc:        ^GCObject, // list of all collectable objects
-	currentwhite: u8, // TODO(phase-7): current "white" GC color
+	fixedgc:      ^GCObject, // objects never collected (fixed strings)
+	gray:         ^GCObject, // the mark phase's gray worklist (threaded gclists)
+	currentwhite: u8, // current "white" GC color (see gc.odin)
 	gc_state:     u8, // TODO(phase-7): incremental GC phase
 	gc_kind:      u8, // KGC_INC / generational
 	gcstp:        u8, // GC-stopped flags
+	gcrunning:    bool, // true while gc_full is mid-collection (Phase 3)
 
 	strt:     String_Table, // interned short strings
+	strcache: [STRCACHE_N][STRCACHE_M]^TString, // address-keyed string cache
+	memerrmsg: ^TString, // preallocated "not enough memory" message
+	tmname:   [TM_N]^TString, // interned metamethod names, by event id
+	mt:       [NUM_TYPES]^Table, // per-base-type metatables (nil until set)
 	registry: TValue, // reference l_registry (the registry table)
 	nilvalue: TValue, // "state complete" sentinel (see completestate)
 	seed:     u32, // hash seed for strings
@@ -213,6 +221,7 @@ preinit_thread :: proc(L: ^Lua_State, g: ^Global_State) {
 	L.nci = 0
 	L.tbclist = 0
 	L.openupval = nil
+	L.gclist = nil
 	L.twups = L // a lone thread points its upvalue-thread link at itself
 	L.n_ccalls = 0
 	L.errfunc = 0
@@ -272,19 +281,74 @@ stack_init :: proc(L: ^Lua_State) -> Thread_Status {
 	return .Ok
 }
 
+// Registry index constants -- reference Lua's `LUA_RIDX_*`. The registry is a
+// plain table the implementation uses for a few well-known slots: slot 1 is
+// reserved (a `false` placeholder), slot 2 is the globals table, slot 3 is the
+// main thread. `LUA_RIDX_LAST` is the highest predefined slot.
+LUA_RIDX_GLOBALS :: 2
+LUA_RIDX_MAINTHREAD :: 3
+LUA_RIDX_LAST :: 3
+
+// Build the registry table and populate its predefined slots -- reference Lua's
+// `init_registry`. The registry is where the implementation (and later the C-API)
+// stashes globally reachable values: the globals table, the main thread, and
+// user-held references. Any allocation here can fail, so we thread the status out.
+init_registry :: proc(L: ^Lua_State) -> Thread_Status {
+	g := L.g
+	registry := luaH_new(L)
+	if registry == nil {
+		return throw(L, .Err_Mem)
+	}
+	set_gc(&g.registry, &registry.header)
+	if luaH_resize(L, registry, LUA_RIDX_LAST, 0) != .Ok {
+		return .Err_Mem
+	}
+
+	aux: TValue
+	// registry[1] = false (a reserved placeholder slot).
+	set_bool(&aux, false)
+	if luaH_setint(L, registry, 1, &aux) != .Ok {
+		return .Err_Mem
+	}
+	// registry[LUA_RIDX_MAINTHREAD] = the main thread.
+	set_gc(&aux, &L.header)
+	if luaH_setint(L, registry, LUA_RIDX_MAINTHREAD, &aux) != .Ok {
+		return .Err_Mem
+	}
+	// registry[LUA_RIDX_GLOBALS] = a fresh table (the globals `_G`).
+	globals := luaH_new(L)
+	if globals == nil {
+		return throw(L, .Err_Mem)
+	}
+	set_gc(&aux, &globals.header)
+	if luaH_setint(L, registry, LUA_RIDX_GLOBALS, &aux) != .Ok {
+		return .Err_Mem
+	}
+	return .Ok
+}
+
 // The allocation-heavy half of state creation, run *under* a protected boundary
 // so any failure becomes a clean `Err_Mem` rather than a crash -- reference Lua's
-// `f_luaopen`. Once the stack is up and (Phase 3) the registry/strings/metamethod
-// tables are initialized, the final act is to nil the sentinel, announcing that
-// the state is complete.
+// `f_luaopen`. It brings up the stack, the registry, the string subsystem, and the
+// metamethod-name table (in that dependency order), re-enables the collector, and
+// finally nils the sentinel to announce the state is complete.
 f_luaopen :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
-	status := stack_init(L)
-	if status != .Ok {
+	g := L.g
+	if status := stack_init(L); status != .Ok {
 		return status
 	}
-	// TODO(phase-3): init_registry, luaS_init (interns memerrmsg),
-	// luaT_init (metamethod names), luaX_init (reserved words).
-	set_nil(&L.g.nilvalue) // state is now fully built
+	if status := init_registry(L); status != .Ok {
+		return status
+	}
+	if status := luaS_init(L); status != .Ok { // interns memerrmsg, fills cache
+		return status
+	}
+	if status := luaT_init(L); status != .Ok { // interns metamethod names
+		return status
+	}
+	// TODO(phase-4): luaX_init (reserved-word strings) once the lexer exists.
+	g.gcstp = 0 // construction done: allow the collector to run
+	set_nil(&g.nilvalue) // state is now fully built
 	return .Ok
 }
 
@@ -305,22 +369,31 @@ new_state :: proc(alloc: Allocator) -> ^Lua_State {
 
 	L := &g.main_thread.l
 	L.tt = VTHREAD
-	L.marked = 0 // TODO(phase-7): luaC_white(g)
 	preinit_thread(L, g)
+
+	// Establish the GC color scheme before any object is born: the current white
+	// is WHITE0, and the main thread is painted that white like any other object.
+	g.currentwhite = 1 << WHITE0BIT
+	L.marked = luaC_white(g)
+
 	g.allgc = &L.header // the main thread is (so far) the only object
 	L.next = nil
 	// TODO(phase-5): mark the main thread non-yieldable (reference incnny sets
 	// the high half of nCcalls) once the yieldability model exists.
 
-	g.currentwhite = 0 // TODO(phase-7): bitmask(WHITE0BIT)
+	g.gray = nil
+	g.fixedgc = nil
+	g.gcrunning = false
 	g.gc_kind = KGC_INC
 	g.gc_state = 0
-	g.gcstp = 0
+	// Stop the collector for the whole of construction: no automatic or emergency
+	// collection may run until `f_luaopen` finishes and clears this.
+	g.gcstp = GCSTPGC
 	g.strt = {}
 	set_nil(&g.registry)
 	set_int(&g.nilvalue, 0) // non-nil: signals "not yet built"
 	g.panic = nil
-	g.seed = 0 // TODO(phase-3): randomized hash seed
+	g.seed = make_seed(g) // randomized hash seed (see string.odin)
 
 	// Establish the accounting baseline exactly as reference Lua does: the
 	// whole global block counts as allocated, with zero debt. Subsequent
@@ -348,8 +421,14 @@ new_state :: proc(alloc: Allocator) -> ^Lua_State {
 close_state :: proc(L: ^Lua_State) {
 	g := L.g
 
-	// TODO(phase-7): if completestate(g), close upvalues + run finalizers +
-	// free all collectable objects before releasing the raw arrays.
+	// If the state got fully built, tear down the object graph first: close the
+	// main thread's open upvalues and free every collectable object (all but the
+	// embedded main-thread struct, which is part of this block). A half-built
+	// state also has whatever objects f_luaopen managed to allocate before failing
+	// on its `allgc` list, so we free unconditionally -- luaC_freeallobjects
+	// handles both cases and leaves only the main-thread struct behind.
+	luaF_closeupval(L, 0) // close any open upvalues on the main thread
+	luaC_freeallobjects(L)
 
 	if L.frames != nil {
 		state_free(L, L.frames, uint(L.frames_capacity) * size_of(Call_Info))
@@ -362,7 +441,7 @@ close_state :: proc(L: ^Lua_State) {
 		L.stack_size = 0
 	}
 	if g.strt.hash != nil {
-		state_free(L, g.strt.hash, uint(g.strt.size) * size_of(^GCObject))
+		state_free(L, g.strt.hash, uint(g.strt.size) * size_of(^TString))
 		g.strt.hash = nil
 	}
 
