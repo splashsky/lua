@@ -41,3 +41,23 @@ AUTHORS :: "R. Ierusalimschy, L. H. de Figueiredo, W. Celes"
 // relevant -- number/integer type selection, buffer sizes, stack limits, the
 // bytecode ABI config (little-endian, 32-bit Instruction/int, 64-bit integer,
 // IEEE-754 binary64), path separators, etc.
+
+// ---------------------------------------------------------------------------
+// Numeric formatting (float <-> string boundary)
+// ---------------------------------------------------------------------------
+
+// The printf-style formats reference Lua uses to render floats, straight from
+// luaconf.h's 64-bit (double) configuration:
+//   NUMBER_FMT   ("%.15g")  -- normal precision; keeps 1.1 from becoming noise
+//   NUMBER_FMT_N ("%.17g")  -- full precision, used only when %.15g fails to
+//                              round-trip the exact double
+// These are typed as `cstring` because they are handed directly to the C
+// library's `snprintf` (see object.odin's float formatting, and the note there on
+// why we match C's `%g` by using C's `%g`).
+NUMBER_FMT: cstring : "%.15g"
+NUMBER_FMT_N: cstring : "%.17g"
+
+// The scratch-buffer size for converting any single number to a string,
+// mirroring reference Lua's `LUA_N2SBUFFSZ`. Comfortably fits the longest float
+// or integer rendering plus a sign, the appended ".0", and a NUL.
+N2S_BUFF_SZ :: 64

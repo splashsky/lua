@@ -25,7 +25,15 @@ $TestsDir = Join-Path $RepoRoot 'tests'
 
 $Collection = "-collection:luao=$SrcDir"
 
-$Args = @($TestsDir, $Collection)
+# Odin's `test` command compiles the test binary and then runs it. If the output
+# path contains a space (as this repo's "OneDrive - Microsoft" path does), Odin's
+# internal run step mis-tokenizes it and dies with "Unknown argument encountered
+# '-'". We dodge that by writing the test binary to a space-free temp location.
+$OutDir  = Join-Path $env:TEMP 'luao-tests'
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+$OutPath = Join-Path $OutDir 'tests.exe'
+
+$Args = @($TestsDir, $Collection, "-out:$OutPath")
 if ($Name -ne '') {
     # Odin filters tests by fully-qualified name via -define:ODIN_TEST_NAMES.
     $Args += "-define:ODIN_TEST_NAMES=tests.$Name"

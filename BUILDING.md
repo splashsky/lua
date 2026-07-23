@@ -86,6 +86,13 @@ Windows (PowerShell):
 Running one test by name uses Odin's `-define:ODIN_TEST_NAMES=tests.<name>` filter
 under the hood.
 
+> **Note (Windows, spaces in the repo path):** `odin test` compiles the test binary
+> and then runs it; if the output path contains a space (e.g. an `OneDrive - Microsoft`
+> path), Odin mis-tokenizes it and fails with `Unknown argument encountered '-'`.
+> `build/test.ps1` avoids this by writing the test binary to a space-free temp
+> directory (`%TEMP%\luao-tests`). If you invoke `odin test` by hand from such a path,
+> pass `-out:` to a space-free location yourself.
+
 ## Building the reference Lua (for differential tests)
 
 The vendored source under `lua/` builds with its own Makefile:
