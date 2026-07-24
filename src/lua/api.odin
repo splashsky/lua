@@ -1153,14 +1153,22 @@ lua_load :: proc(
 }
 
 // Serialize the function at the top of the stack to bytecode via `writer` --
-// reference `lua_dump`. Reference does *not* pop the function, and neither do we.
+// reference `lua_dump`. Reference does *not* pop the function itself, but it *does*
+// save and restore `top` around the call so that the auxiliary de-duplication
+// table `luaU_dump` anchors on the stack is cleaned up on return (leaving the
+// stack exactly the size it came in at, with the function still on top). We
+// mirror that save/restore precisely; forgetting it leaves the aux table dangling
+// above the function.
 lua_dump :: proc(L: ^Lua_State, writer: Lua_Writer, data: rawptr, strip: bool) -> i32 {
 	api_checknelems(L, 1)
+	otop := L.top // original top, restored after the dump
 	o := stack_value(L, L.top - 1)
+	status: i32 = 1 // not a Lua function: nothing dumped
 	if is_lua_closure(o) {
-		return luaU_dump(L, lua_closure_value(o).p, writer, data, strip)
+		status = luaU_dump(L, lua_closure_value(o).p, writer, data, strip)
 	}
-	return 1 // not a Lua function: nothing dumped
+	L.top = otop // drop the aux table luaU_dump anchored
+	return status
 }
 
 // ---------------------------------------------------------------------------
