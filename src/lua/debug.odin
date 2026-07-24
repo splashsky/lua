@@ -239,10 +239,8 @@ luaG_errormsg :: proc(L: ^Lua_State) {
 
 // Raise a runtime error with a printf-style formatted message -- reference Lua's
 // `luaG_runerror`. When the erroring frame is Lua code we prepend `source:line`
-// and drop the raw message, mirroring the reference exactly. (Reference also paces
-// the GC here via `luaC_checkGC`; that stepping arrives with the full collector in
-// Phase 7, so we omit it for now -- it has no bearing on the error's observable
-// behavior.)
+// and drop the raw message, mirroring the reference exactly. We also pace the GC
+// via `luaC_checkGC` before building the message, as reference does.
 luaG_runerror :: proc(L: ^Lua_State, fmt: string, args: ..any) {
 	ci := &L.frames[L.ci]
 	luaC_checkGC(L) // the error message about to be built uses memory

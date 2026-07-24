@@ -261,9 +261,9 @@ luaX_setinput :: proc(L: ^Lua_State, ls: ^LexState, z: ^Zio, source: ^TString, f
 // The one memory-safety subtlety: before storing the string we push it on the Lua
 // stack. That matters because `luaH_set` can trigger an allocation, which can
 // trigger an emergency collection -- and the freshly created, not-yet-stored
-// string is reachable only through the stack at that instant. (Reference also
-// calls `luaC_checkGC` here to pace the incremental collector; that stepping lands
-// in Phase 7, so we omit it deliberately for now.)
+// string is reachable only through the stack at that instant. We also call
+// `luaC_checkGC` here (as reference does) to pace the incremental collector while
+// the new string is still anchored on the stack.
 @(private = "file")
 anchorstr :: proc(ls: ^LexState, ts: ^TString) -> ^TString {
 	L := ls.L

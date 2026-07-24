@@ -674,9 +674,8 @@ float_to_integer :: proc "contextless" (n: Number, mode: F2I_Mode) -> (Integer, 
 
 // Try to read a value as a float WITHOUT string coercion. Integers convert
 // exactly (well, as exactly as double allows for huge magnitudes, matching C).
-// Reference Lua's `tonumberns` minus the string case (strings need interning,
-// which arrives in a later phase).
-// TODO(phase-4+): add string coercion once TString exists.
+// Reference Lua's `luaV_tonumberns` -- the string-coercing variant is `vm_tonumber`
+// (vm.odin), which parses numeric strings via `l_strton` before delegating here.
 to_number_no_string :: proc "contextless" (o: ^TValue) -> (Number, bool) {
 	if is_integer(o) {
 		return Number(o.value_.i), true
