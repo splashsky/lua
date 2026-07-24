@@ -118,26 +118,35 @@ fully explicit:
 - Each frame records everything needed to resume it: program counter, stack base/top,
   expected result count, call kind, protected-call recovery info, any continuation
   (`callk`/`pcallk`), hook/finalizer state, and any partially-completed operation.
-- The interpreter is a **trampoline**: a loop that steps the current frame and reacts
-  to a single unified outcome:
+- The interpreter (`luaV_execute` in `vm.odin`) is a **trampoline**, but an *in-place*
+  one rather than an outcome-returning one. It is a single labeled loop (`newframe`)
+  that reloads its per-frame locals (closure, constants, code, base, pc) from the
+  current frame. Ordinary Lua→Lua calls, tail calls, and returns never grow the native
+  Odin stack: `OP_CALL` pushes a frame and does `continue newframe`; a return pops the
+  frame index and `continue newframe`s back into the caller — unless the returning
+  frame was entered *fresh* from C (the `CIST_FRESH` bit), in which case `luaV_execute`
+  returns to whoever invoked it. Only metamethods, iterators, and `pcall` re-enter
+  `luaV_execute` recursively (through `luaD_call`), and each such callee is marked
+  fresh so it returns cleanly.
 
-  ```
-  Exec_Outcome ::
-      Continue          -- keep stepping the current frame
-      Returned          -- current frame finished; pop and resume caller
-      Yielded           -- unwind to the resuming boundary, staying resumable
-      Errored(status,v) -- unwind to the nearest protected boundary
-      Out_Of_Memory     -- emergency-collect then retry, or propagate as error
-  ```
+  The unified `Exec_Signal`/`Exec_Outcome` vocabulary still lives in `control.odin` and
+  names these transitions for documentation and for the host-callback contract, but the
+  hot path expresses *Continue/Returned* as loop control and *Errored/Yielded* as a
+  `longjmp` (see below) rather than as a returned tagged value — this is both faster and
+  a closer match to reference Lua's own `lvm.c`.
 
-**Coroutine** suspension becomes an explicit state-machine transition over this frame
-stack rather than native unwinding: you cannot resume suspended Lua execution after the
-native frames that ran it have returned, so the frames must live in the heap where we can
-pause and resume them. **Error** recovery, by contrast, *does* use native unwinding
-(`longjmp`) back to the protected boundary, and then reconciles the explicit frame stack
-at the catch site — restoring the frame index, closing open upvalues and to-be-closed
-slots, and installing the error object. The two hard problems are solved by these two
-mechanisms working together, exactly as in reference Lua.
+**Both errors and yields unwind with `longjmp`; coroutines resume over the heap frame
+stack.** `throw` long-jumps to the nearest protected boundary for a real error, and
+`lua_yieldk` long-jumps out with a `Yield` status for a suspension. What makes the yield
+*resumable* is that the coroutine's frames are heap arrays that are left intact: the
+resuming `lua_resume` walks back into them via `resume`/`unroll`/`precover` (in `do.odin`),
+finishing the interrupted instruction (`luaV_finishOp`) or running the C continuation, and
+then trampolines onward. You cannot resume suspended Lua execution after the native frames
+that ran it have returned, so the frames must live in the heap where we can pause and
+resume them. Error recovery, by contrast, reconciles the explicit frame stack at the catch
+site — restoring the frame index, closing open upvalues and to-be-closed slots, and
+installing the error object (`luaD_pcall`/`luaD_closeprotected`). The two hard problems are
+solved by these two mechanisms working together, exactly as in reference Lua.
 
 Host (Odin) callbacks follow the same continuation rules as C functions in reference
 Lua: an ordinary callback is non-yieldable across its native frame, while a yieldable
