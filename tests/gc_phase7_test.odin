@@ -1,0 +1,195 @@
+package tests
+
+// gc_phase7_test.odin -- Phase 7 tests for the full incremental + generational
+// collector (gc.odin + gc_run.odin) and the `lua_gc` control surface (api.odin).
+//
+// Phase 3 proved the stop-the-world foundation; Phase 7 replaced it with the real
+// pacing-driven state machine plus weak tables, ephemerons, finalizers, and the
+// generational/incremental mode switch. These tests exercise the *new* observable
+// promises the reference collector makes, always through honest, black-box checks:
+// we drive collection, then read back what the collector decided (a cleared weak
+// entry, a survived strong entry, a finalizer that ran, a mode value handed back,
+// a parameter that round-trips). No test asserts on incidental collector internals.
+
+import "core:testing"
+import lua "luao:lua"
+
+// A full collection must reclaim a batch of unreferenced objects: after creating
+// several tables that nothing roots, driving `lua_gc` COLLECT brings the live
+// population back to where it started. This proves the incremental state machine,
+// run to completion, sweeps everything the foundation used to sweep.
+@(test)
+gc_phase7_collect_reclaims_batch :: proc(t: ^testing.T) {
+	L := lua.new_state(lua.default_allocator())
+	testing.expect(t, L != nil)
+	defer lua.close_state(L)
+
+	base := count_allgc(L)
+	for _ in 0 ..< 8 {
+		_ = lua.luaH_new(L) // created, never rooted
+	}
+	testing.expect(t, count_allgc(L) >= base + 8, "the batch is live before collecting")
+
+	lua.lua_gc(L, lua.LUA_GCCOLLECT)
+	testing.expect_value(t, count_allgc(L), base)
+}
+
+// `lua_gc` COUNT reports the live heap size in Kbytes, and STOP/RESTART toggle
+// whether the collector is running. We check the observable state transitions:
+// a fresh state reports "running", COUNT is a sane positive size, STOP turns
+// ISRUNNING off, and RESTART turns it back on.
+@(test)
+gc_phase7_api_count_and_running :: proc(t: ^testing.T) {
+	L := lua.new_state(lua.default_allocator())
+	testing.expect(t, L != nil)
+	defer lua.close_state(L)
+
+	// A living state holds some bytes; COUNT is #bytes >> 10, so it is >= 0 and
+	// COUNTB (the low 10 bits) is always in range.
+	testing.expect(t, lua.lua_gc(L, lua.LUA_GCCOUNT) >= 0, "COUNT is non-negative")
+	countb := lua.lua_gc(L, lua.LUA_GCCOUNTB)
+	testing.expect(t, 0 <= countb && countb < 1024, "COUNTB is the low 10 bits")
+
+	testing.expect_value(t, lua.lua_gc(L, lua.LUA_GCISRUNNING), 1)
+	lua.lua_gc(L, lua.LUA_GCSTOP)
+	testing.expect_value(t, lua.lua_gc(L, lua.LUA_GCISRUNNING), 0)
+	lua.lua_gc(L, lua.LUA_GCRESTART)
+	testing.expect_value(t, lua.lua_gc(L, lua.LUA_GCISRUNNING), 1)
+}
+
+// Switching collection mode returns the *previous* mode and installs the new one,
+// exactly as reference `lua_gc(LUA_GCGEN/LUA_GCINC)` does. A fresh state is
+// incremental, so GEN returns INC (and switches to generational); INC then
+// returns GEN (and switches back).
+@(test)
+gc_phase7_api_mode_switch :: proc(t: ^testing.T) {
+	L := lua.new_state(lua.default_allocator())
+	testing.expect(t, L != nil)
+	defer lua.close_state(L)
+
+	// Fresh states run the incremental collector.
+	prev := lua.lua_gc(L, lua.LUA_GCGEN)
+	testing.expect_value(t, prev, lua.LUA_GCINC)
+
+	prev2 := lua.lua_gc(L, lua.LUA_GCINC)
+	testing.expect_value(t, prev2, lua.LUA_GCGEN)
+}
+
+// A GC parameter must round-trip through `lua_gc` PARAM: reading returns the
+// current (percentage-applied) value, and writing a new value is visible on the
+// next read. We use the pause parameter and confirm the write took.
+@(test)
+gc_phase7_api_param_roundtrip :: proc(t: ^testing.T) {
+	L := lua.new_state(lua.default_allocator())
+	testing.expect(t, L != nil)
+	defer lua.close_state(L)
+
+	// Set the pause parameter to 300 and read it straight back. The read applies
+	// the coded value at 100%, recovering (approximately) what we stored; the
+	// float-coding is lossy at the low bits, so we assert it is in the right
+	// neighborhood rather than bit-exact.
+	_ = lua.lua_gc(L, lua.LUA_GCPARAM, lua.LUA_GCPPAUSE, 300)
+	got := lua.lua_gc(L, lua.LUA_GCPARAM, lua.LUA_GCPPAUSE, -1)
+	testing.expect(t, 290 <= got && got <= 310, "the pause parameter round-trips")
+}
+
+// A weak-*valued* table drops entries whose value is otherwise unreachable, but
+// keeps entries whose value is still rooted elsewhere. We build a table with
+// `__mode = "v"`, put an unrooted table under key 1 and a rooted string under
+// key 2, collect, and confirm key 1 was cleared while key 2 survived.
+@(test)
+gc_phase7_weak_value_cleared :: proc(t: ^testing.T) {
+	L := lua.new_state(lua.default_allocator())
+	testing.expect(t, L != nil)
+	defer lua.close_state(L)
+
+	weak := lua.luaH_new(L)
+	push_root(L, &weak.header)
+	mt := lua.luaH_new(L)
+	push_root(L, &mt.header)
+
+	// Install __mode = "v" on the weak table's metatable.
+	modekey := lua.luaS_new(L, "__mode")
+	mk: lua.TValue
+	lua.set_string(&mk, modekey)
+	mv: lua.TValue
+	lua.set_string(&mv, lua.luaS_new(L, "v"))
+	testing.expect(t, lua.luaH_set(L, mt, &mk, &mv) == .Ok)
+	weak.metatable = mt
+
+	// key 1 -> a table nothing else references (weakly held, must be cleared).
+	orphan := lua.luaH_new(L)
+	ov: lua.TValue
+	lua.set_gc(&ov, &orphan.header)
+	testing.expect(t, lua.luaH_setint(L, weak, 1, &ov) == .Ok)
+
+	// key 2 -> a string we root on the stack (strongly held, must survive).
+	kept := lua.luaS_new(L, "kept-weak-value")
+	push_root(L, &kept.header)
+	kv: lua.TValue
+	lua.set_string(&kv, kept)
+	testing.expect(t, lua.luaH_setint(L, weak, 2, &kv) == .Ok)
+
+	lua.lua_gc(L, lua.LUA_GCCOLLECT)
+
+	// The orphaned value is gone; the rooted value is intact.
+	r1: lua.TValue
+	lua.luaH_getint(weak, 1, &r1)
+	testing.expect(t, lua.is_nil(&r1), "weak value with no other reference was cleared")
+
+	r2: lua.TValue
+	lua.luaH_getint(weak, 2, &r2)
+	testing.expect(t, lua.is_collectable(&r2), "rooted weak value survived")
+	testing.expect_value(t, str_contents(lua.str_value(&r2)), "kept-weak-value")
+}
+
+// The count of finalizer invocations, bumped by `phase7_finalizer` below. A
+// package-level counter is the honest, observable signal that a `__gc` handler
+// actually ran during collection.
+@(private = "file")
+phase7_final_count: int
+
+// A minimal `__gc` finalizer: it ignores its argument and records that it ran.
+// The "c" calling convention matches the kernel's `C_Function` type, so the call
+// protocol can invoke it directly.
+@(private = "file")
+phase7_finalizer :: proc "c" (L: rawptr) -> i32 {
+	phase7_final_count += 1
+	return 0
+}
+
+// An object whose metatable carries `__gc` must have that finalizer run exactly
+// once when the object becomes unreachable and is collected. We give a table such
+// a metatable (enrolling it via `luaC_checkfinalizer`), never root the table,
+// collect, and confirm the finalizer fired a single time.
+@(test)
+gc_phase7_finalizer_runs :: proc(t: ^testing.T) {
+	L := lua.new_state(lua.default_allocator())
+	testing.expect(t, L != nil)
+	defer lua.close_state(L)
+
+	phase7_final_count = 0
+
+	// Root the metatable for as long as we are wiring it up; the finalizable
+	// table itself is deliberately left unrooted.
+	mt := lua.luaH_new(L)
+	push_root(L, &mt.header)
+
+	gckey := lua.luaS_new(L, "__gc")
+	gk: lua.TValue
+	lua.set_string(&gk, gckey)
+	gv: lua.TValue
+	lua.set_c_function(&gv, phase7_finalizer)
+	testing.expect(t, lua.luaH_set(L, mt, &gk, &gv) == .Ok)
+
+	victim := lua.luaH_new(L)
+	victim.metatable = mt
+	lua.luaC_checkfinalizer(L, &victim.header, mt)
+
+	// The victim is unreachable: collecting must separate it, resurrect it for
+	// the finalizer, and run `__gc` once.
+	lua.lua_gc(L, lua.LUA_GCCOLLECT)
+	testing.expect_value(t, phase7_final_count, 1)
+
+	pop_root(L) // drop the metatable root
+}
