@@ -368,7 +368,7 @@ createvarargtab :: proc(L: ^Lua_State, f: int, n: int) {
 	for i in 0 ..< n {
 		luaH_setint(L, t, Integer(i + 1), stack_value(L, f + i))
 	}
-	// TODO(phase-7): luaC_checkGC once the incremental collector paces here.
+	luaC_checkGC(L) // the vararg table just allocated; pace the collector
 }
 
 // Move fixed parameters above a copy of the function so the extra (vararg)

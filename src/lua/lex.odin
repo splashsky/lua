@@ -277,6 +277,7 @@ anchorstr :: proc(ls: ^LexState, ts: ^TString) -> ^TString {
 	set_string(stv, ts) // push (anchor) the string on the stack
 	L.top += 1
 	luaH_set(L, ls.h, stv, stv)
+	luaC_checkGC(L) // pace the collector while the string is still anchored
 	L.top -= 1 // remove the string from the stack
 	return ts
 }

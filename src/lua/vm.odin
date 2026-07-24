@@ -835,7 +835,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				if b != 0 || c != 0 {
 					luaH_resize(L, t, c, b)
 				}
-				// TODO(phase-7): checkGC pacing here.
+				luaC_checkGC(L) // pace the collector (table anchored at ra)
 
 			case .SELF:
 				ra := base + getarg_A(i)
@@ -1042,7 +1042,8 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				L.top = ra + n // mark the end of the operand run
 				L.frames[ci_idx].u.l.savedpc = pc
 				luaV_concat(L, n)
-				// TODO(phase-7): checkGC pacing here.
+				L.top = ra + 1 // result at ra; anchor it for the GC
+				luaC_checkGC(L)
 
 			case .CLOSE:
 				ra := base + getarg_A(i)
@@ -1342,7 +1343,8 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				p := cl.p.p[getarg_Bx(i)]
 				L.frames[ci_idx].u.l.savedpc = pc
 				pushclosure(L, p, cl.upvals, base, ra)
-				// TODO(phase-7): checkGC pacing here.
+				L.top = ra + 1 // closure at ra; anchor it for the GC
+				luaC_checkGC(L)
 
 			case .VARARG:
 				ra := base + getarg_A(i)

@@ -245,6 +245,7 @@ luaG_errormsg :: proc(L: ^Lua_State) {
 // behavior.)
 luaG_runerror :: proc(L: ^Lua_State, fmt: string, args: ..any) {
 	ci := &L.frames[L.ci]
+	luaC_checkGC(L) // the error message about to be built uses memory
 	msg := luaO_pushfstring(L, fmt, ..args)
 	if is_lua_frame(ci) {
 		// Decorate with position, then collapse the two top slots into one.

@@ -1097,9 +1097,7 @@ close_func :: proc(ls: ^LexState) {
 	shrink_vector(L, &f.upvalues, &f.sizeupvalues, fs.nups)
 	ls.fs = fs.prev
 	L.top -= 1 // pop the constant-cache table
-	// NOTE: reference Lua calls luaC_checkGC(L) here to pace the incremental
-	// collector. The pacing machinery lands in Phase 7 (full GC); until then
-	// there is nothing to step, so this is intentionally omitted.
+	luaC_checkGC(L) // a completed prototype is a good pacing point
 }
 
 // ===========================================================================

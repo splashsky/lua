@@ -297,9 +297,13 @@ newupval :: proc(L: ^Lua_State, level: int, prev: ^^UpVal) -> ^UpVal {
 		next.open_prev = &uv.open_next
 	}
 	prev^ = uv
-	// TODO(phase-7): link L onto the global `twups` list so the incremental GC
-	// can find open upvalues of otherwise-unreached threads. With only the main
-	// thread (a permanent root) in Phase 3, its stack is always traversed anyway.
+	// Link this thread onto the global `twups` list so the incremental collector
+	// can find the open upvalues of an otherwise-unreached thread (reference Lua's
+	// `newupval` tail). A thread not in the list self-loops its `twups` link.
+	if L.twups == L {
+		L.twups = L.g.twups
+		L.g.twups = L
+	}
 	return uv
 }
 
