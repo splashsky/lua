@@ -193,6 +193,19 @@ gettotalbytes :: #force_inline proc "contextless" (g: ^Global_State) -> L_Mem {
 	return g.gc_total_bytes - g.gc_debt
 }
 
+// Set the collector's debt to `debt`, keeping `GCtotalbytes = live + debt` --
+// reference Lua's `luaE_setdebt`. The debt is clamped so total bytes never
+// overflows `MAX_LMEM`. A negative-or-zero debt means "a collection is due".
+luaE_setdebt :: proc "contextless" (g: ^Global_State, debt: L_Mem) {
+	tb := gettotalbytes(g)
+	d := debt
+	if d > MAX_LMEM - tb {
+		d = MAX_LMEM - tb // saturate: total bytes hits MAX_LMEM
+	}
+	g.gc_total_bytes = tb + d
+	g.gc_debt = d
+}
+
 // Resize (or allocate, or free) a block on behalf of state `L`, keeping the GC
 // byte accounting exact -- reference Lua's `luaM_realloc_`. Passing `block == nil`
 // with `osize == 0` allocates; passing `nsize == 0` frees. On a first failure we
@@ -204,11 +217,11 @@ state_realloc :: proc(L: ^Lua_State, block: rawptr, osize: uint, nsize: uint) ->
 	newblock := raw_realloc(g.alloc, block, osize, nsize)
 	if newblock == nil && nsize > 0 {
 		// Emergency collection is only safe once the state is fully built and the
-		// collector is neither stopped nor already running; otherwise we would
-		// re-enter construction or the collector itself. When safe, free what we
-		// can and retry exactly once -- reference Lua's `luaM_realloc_` fallback.
-		if completestate(g) && g.gcstp == 0 && !g.gcrunning {
-			gc_full(L, true) // emergency: reclaim unreachable objects
+		// collector isn't temporarily forbidding it (during a finalizer, or while
+		// already inside an emergency step). Reference Lua's `cantryagain`:
+		// `completestate(g) && !g->gcstopem`.
+		if completestate(g) && g.gcstopem == 0 {
+			luaC_fullgc(L, true) // emergency: reclaim unreachable objects
 			newblock = raw_realloc(g.alloc, block, osize, nsize)
 		}
 		if newblock == nil {

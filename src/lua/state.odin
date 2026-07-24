@@ -201,6 +201,12 @@ String_Table :: struct {
 // written in C must be able to supply one.
 Panic_Proc :: #type proc "c" (L: ^Lua_State) -> i32
 
+// A warning handler -- reference Lua's `lua_WarnFunction`. The collector routes
+// finalizer errors here; with no handler installed (the default), warnings are
+// silently dropped, exactly like reference Lua before `lua_setwarnf`. `tocont`
+// signals that another message fragment follows.
+Warn_Proc :: #type proc "c" (ud: rawptr, msg: cstring, tocont: i32)
+
 // ---------------------------------------------------------------------------
 // A thread of execution
 // ---------------------------------------------------------------------------
@@ -294,18 +300,39 @@ Global_State :: struct {
 
 	// GC byte accounting (see mem.odin's state_realloc / state_free) ----
 	gc_total_bytes: L_Mem, // reference GCtotalbytes (allocated + debt)
-	gc_debt:        L_Mem, // reference GCdebt
-	gc_marked:      L_Mem, // reference GCmarked
+	gc_debt:        L_Mem, // reference GCdebt (bytes counted but not yet allocated)
+	gc_marked:      L_Mem, // reference GCmarked (bytes marked this cycle)
+	gc_majorminor:  L_Mem, // reference GCmajorminor (major<->minor shift control)
 
-	// GC mode + roots (inert scaffold until the collector lands) --------
-	allgc:        ^GCObject, // list of all collectable objects
-	fixedgc:      ^GCObject, // objects never collected (fixed strings)
-	gray:         ^GCObject, // the mark phase's gray worklist (threaded gclists)
+	// GC mode + state machine ------------------------------------------
+	gcstate:      u8, // current incremental phase (GCSpause..GCScallfin)
+	gckind:       u8, // KGC_INC / KGC_GENMINOR / KGC_GENMAJOR
+	gcstp:        u8, // GC-stopped flags (GCSTP* bitset)
+	gcemergency:  bool, // true during an emergency (out-of-memory) collection
+	gcstopem:     u8, // nonzero: no emergency collections (mid-step / building)
 	currentwhite: u8, // current "white" GC color (see gc.odin)
-	gc_state:     u8, // TODO(phase-7): incremental GC phase
-	gc_kind:      u8, // KGC_INC / generational
-	gcstp:        u8, // GC-stopped flags
-	gcrunning:    bool, // true while gc_full is mid-collection (Phase 3)
+	gcparams:     [LUA_GCPN]u8, // float-coded GC tuning parameters
+
+	// The object lists the collector threads its work through ----------
+	allgc:     ^GCObject, // every collectable object not on another list
+	fixedgc:   ^GCObject, // objects never collected (fixed strings)
+	sweepgc:   ^^GCObject, // current position of the incremental sweep
+	gray:      ^GCObject, // the mark phase's gray worklist (threaded gclists)
+	grayagain: ^GCObject, // objects to be revisited in the atomic phase
+	weak:      ^GCObject, // tables with weak values
+	ephemeron: ^GCObject, // ephemeron tables (weak keys, strong values)
+	allweak:   ^GCObject, // tables with weak keys and weak values
+	finobj:    ^GCObject, // objects with finalizers (__gc)
+	tobefnz:   ^GCObject, // objects queued to have their finalizer run
+	// Generational-mode cursors into `allgc` / `finobj` (reference lstate) --
+	survival:   ^GCObject, // first object that survived one cycle
+	old1:       ^GCObject, // first OLD1 object (old, may point to survivals)
+	reallyold:  ^GCObject, // first really-old object (never revisited)
+	firstold1:  ^GCObject, // first OLD1 object among the young ones (or nil)
+	finobjsur:  ^GCObject, // survival cursor within `finobj`
+	finobjold1: ^GCObject, // old1 cursor within `finobj`
+	finobjrold: ^GCObject, // reallyold cursor within `finobj`
+	twups:      ^Lua_State, // list of threads with open upvalues
 
 	strt:     String_Table, // interned short strings
 	strcache: [STRCACHE_N][STRCACHE_M]^TString, // address-keyed string cache
@@ -316,13 +343,53 @@ Global_State :: struct {
 	nilvalue: TValue, // "state complete" sentinel (see completestate)
 	seed:     u32, // hash seed for strings
 	panic:    Panic_Proc, // last-resort unhandled-error hook
+	warnf:    Warn_Proc, // warning handler (nil = drop warnings), reference `warnf`
+	ud_warn:  rawptr, // opaque data for the warning handler
 
 	main_thread: LX, // the main thread, embedded in this block
 }
 
-// The incremental GC kind, reference `KGC_INC`. Named so the scaffold reads
-// truthfully even though the collector itself is Phase 7.
+// The GC "kind" -- reference Lua's `KGC_*`. `KGC_INC` is the plain incremental
+// collector; the two generational kinds distinguish a minor (nursery-only) cycle
+// from a major (full incremental) cycle while generational mode is active.
 KGC_INC :: 0
+KGC_GENMINOR :: 1
+KGC_GENMAJOR :: 2
+
+// The incremental collector's state-machine phases -- reference Lua's `GCS*`
+// (lgc.h). A cycle walks pause -> propagate -> (enter)atomic -> the three sweep
+// phases -> end -> call-finalizers -> back to pause.
+GCSpropagate :: 0
+GCSenteratomic :: 1
+GCSatomic :: 2
+GCSswpallgc :: 3
+GCSswpfinobj :: 4
+GCSswptobefnz :: 5
+GCSswpend :: 6
+GCScallfin :: 7
+GCSpause :: 8
+
+// True while the collector must keep the main invariant (no black->white edge):
+// during marking and the atomic phase, but not during sweep. Reference
+// `keepinvariant`.
+keepinvariant :: #force_inline proc "contextless" (g: ^Global_State) -> bool {
+	return g.gcstate <= GCSatomic
+}
+
+// True while sweeping any of the three object lists. Reference `issweepphase`.
+issweepphase :: #force_inline proc "contextless" (g: ^Global_State) -> bool {
+	return GCSswpallgc <= g.gcstate && g.gcstate <= GCSswpend
+}
+
+// GC-stopped flags -- reference `GCSTP*`. The collector runs only when `gcstp`
+// is zero (reference `gcrunning`).
+GCSTPUSR :: 1 // stopped by the user (collectgarbage("stop"))
+GCSTPGC :: 2 // stopped by the implementation (e.g. during construction)
+GCSTPCLS :: 4 // stopped because the state is closing
+
+gcrunning :: #force_inline proc "contextless" (g: ^Global_State) -> bool {
+	return g.gcstp == 0
+}
 
 // A state is *fully built* exactly when its `nilvalue` sentinel is nil. During
 // construction we park a non-nil value there (an integer 0); the final step of
@@ -574,9 +641,33 @@ new_state :: proc(alloc: Allocator) -> ^Lua_State {
 
 	g.gray = nil
 	g.fixedgc = nil
-	g.gcrunning = false
-	g.gc_kind = KGC_INC
-	g.gc_state = 0
+	g.grayagain = nil
+	g.weak = nil
+	g.ephemeron = nil
+	g.allweak = nil
+	g.finobj = nil
+	g.tobefnz = nil
+	g.sweepgc = nil
+	g.survival = nil
+	g.old1 = nil
+	g.reallyold = nil
+	g.firstold1 = nil
+	g.finobjsur = nil
+	g.finobjold1 = nil
+	g.finobjrold = nil
+	g.twups = nil
+	g.gcemergency = false
+	g.gcstopem = 0
+	g.gckind = KGC_INC
+	g.gcstate = GCSpause
+	g.gc_majorminor = 0
+	// Install the reference default GC parameters (float-coded percentages).
+	g.gcparams[LUA_GCPPAUSE] = luaO_codeparam(LUAI_GCPAUSE)
+	g.gcparams[LUA_GCPSTEPMUL] = luaO_codeparam(LUAI_GCMUL)
+	g.gcparams[LUA_GCPSTEPSIZE] = luaO_codeparam(LUAI_GCSTEPSIZE_PCT)
+	g.gcparams[LUA_GCPMINORMUL] = luaO_codeparam(LUAI_GENMINORMUL)
+	g.gcparams[LUA_GCPMINORMAJOR] = luaO_codeparam(LUAI_MINORMAJOR)
+	g.gcparams[LUA_GCPMAJORMINOR] = luaO_codeparam(LUAI_MAJORMINOR)
 	// Stop the collector for the whole of construction: no automatic or emergency
 	// collection may run until `f_luaopen` finishes and clears this.
 	g.gcstp = GCSTPGC
@@ -584,6 +675,8 @@ new_state :: proc(alloc: Allocator) -> ^Lua_State {
 	set_nil(&g.registry)
 	set_int(&g.nilvalue, 0) // non-nil: signals "not yet built"
 	g.panic = nil
+	g.warnf = nil
+	g.ud_warn = nil
 	g.seed = make_seed(g) // randomized hash seed (see string.odin)
 
 	// Establish the accounting baseline exactly as reference Lua does: the
@@ -651,7 +744,7 @@ close_state :: proc(L: ^Lua_State) {
 // `L`'s protected boundary. Returns the new thread, or never returns on OOM.
 luaE_newthread :: proc(L: ^Lua_State) -> ^Lua_State {
 	g := L.g
-	// TODO(phase-7): luaC_checkGC(L) -- a new thread is a good GC step point.
+	luaC_checkGC(L) // a new thread is a good pacing point (reference lua_newthread)
 
 	// Allocate the LX block and register its inner Lua_State as a GC object. We
 	// mirror luaC_newobj by hand because the collectable header lives at offset

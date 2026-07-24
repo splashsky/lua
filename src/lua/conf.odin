@@ -153,6 +153,27 @@ LUA_GCSTEP :: 5
 LUA_GCISRUNNING :: 6
 LUA_GCGEN :: 7
 LUA_GCINC :: 8
+LUA_GCPARAM :: 9 // adjust a GC parameter (reference LUA_GCPARAM)
+
+// The tunable GC parameters, indices into `Global_State.gcparams` -- reference
+// Lua's `LUA_GCP*` (lua.h). Each is stored float-coded (see luaO_codeparam).
+LUA_GCPMINORMUL :: 0 // % new bytes that triggers a minor collection
+LUA_GCPMAJORMINOR :: 1 // % that shifts a major cycle back to minor
+LUA_GCPMINORMAJOR :: 2 // % old bytes that shifts minor -> major
+LUA_GCPPAUSE :: 3 // % heap growth before the next incremental cycle
+LUA_GCPSTEPMUL :: 4 // GC "speed": work units per allocated word
+LUA_GCPSTEPSIZE :: 5 // GC granularity, in bytes per step
+LUA_GCPN :: 6 // number of GC parameters
+
+// The reference default values for those parameters (lgc.h). Percentages are
+// fed through `luaO_codeparam`; STEPSIZE is a byte count recovered by applying
+// the coded value to 100.
+LUAI_GCPAUSE :: 250
+LUAI_GCMUL :: 200
+LUAI_GCSTEPSIZE_PCT :: 200 * size_of(Table)
+LUAI_GENMINORMUL :: 20
+LUAI_MINORMAJOR :: 70
+LUAI_MAJORMINOR :: 50
 // The public type selectors returned by `lua_type` and passed to `lua_typename`
 // -- reference Lua's `LUA_TNONE` / `LUA_T*` (lua.h). These are just re-exports of
 // the kernel's base tags under their public API spelling, so the standard library

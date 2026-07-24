@@ -542,8 +542,89 @@ luaO_arith :: proc(L: ^Lua_State, op: int, p1, p2: ^TValue, res: int) {
 }
 
 
-// Collapse a pointer to a 32-bit unsigned integer for hashing -- reference Lua's
-// `point2uint`. We only ever feed the result into a hash function, so truncating
+// ---------------------------------------------------------------------------
+// GC parameter codec (float-coded bytes)
+// ---------------------------------------------------------------------------
+//
+// Lua 5.5 stores each tunable GC parameter as a single "floating-point byte":
+// four exponent bits and four mantissa bits, excess-7, IEEE-754-style with an
+// implicit leading one when normalized. This lets a percentage as large as a few
+// thousand fit in a byte with enough precision for pacing. `luaO_codeparam`
+// encodes a raw value; `luaO_applyparam` computes `p% * x` for a coded `p`. The
+// three routines are transcribed verbatim from reference Lua's lobject.c so the
+// pacing arithmetic matches bit for bit.
+
+// ceil(log2(x)): the smallest n with x <= (1 << n). Reference `luaO_ceillog2`.
+luaO_ceillog2 :: proc "contextless" (x: u32) -> u8 {
+	// log_2[i-1] = ceil(log2(i)) for i in 1..256.
+	@(static, rodata)
+	log_2 := [256]u8 {
+		0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4,
+		5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+		6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+		6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+		7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+		7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+		7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+		7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+		8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+		8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+		8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+		8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+		8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+		8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+		8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+		8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+	}
+	l := 0
+	v := x - 1
+	for v >= 256 {
+		l += 8
+		v >>= 8
+	}
+	return u8(l) + log_2[v]
+}
+
+// Encode a value as a floating-point byte (eeeexxxx). Reference `luaO_codeparam`.
+luaO_codeparam :: proc "contextless" (p: uint) -> u8 {
+	// The overflow ceiling from reference: 0x1F << (0xF - 7 - 1), times 100.
+	if p >= (uint(0x1F) << (0xF - 7 - 1)) * 100 {
+		return 0xFF // saturate to the maximum representable value
+	}
+	q := (u32(p) * 128 + 99) / 100 // round the /100 up
+	if q < 0x10 {
+		return u8(q) // subnormal: exponent bits already zero
+	}
+	log := u32(luaO_ceillog2(q + 1)) - 5 // q >= 0x10 => ceil(log2(q+1)) >= 5
+	return u8(((q >> log) - 0x10) | ((log + 1) << 4))
+}
+
+// Compute `p% * x` for a float-coded `p`, saturating at MAX_LMEM. Reference
+// `luaO_applyparam`.
+luaO_applyparam :: proc "contextless" (p: u8, x: L_Mem) -> L_Mem {
+	m := L_Mem(p & 0xF) // mantissa
+	e := int(p >> 4) // exponent
+	if e > 0 { // normalized?
+		e -= 1 // correct the excess used to flag normalization
+		m += 0x10 // restore the implicit leading one (max 0x1F)
+	}
+	e -= 7 // remove the excess-7 bias
+	if e >= 0 {
+		if x < (MAX_LMEM / 0x1F) >> uint(e) { // no overflow?
+			return (x * m) << uint(e)
+		}
+		return MAX_LMEM
+	}
+	e = -e
+	if x < MAX_LMEM / 0x1F { // multiply first for more precision
+		return (x * m) >> uint(e)
+	} else if (x >> uint(e)) < MAX_LMEM / 0x1F {
+		return (x >> uint(e)) * m
+	}
+	return MAX_LMEM
+}
+
+
 // the low 32 bits of the address is fine; it need not round-trip back to a
 // pointer. (Reference masks with UINT_MAX for exactly the same reason.)
 point2uint :: #force_inline proc "contextless" (p: rawptr) -> u32 {
