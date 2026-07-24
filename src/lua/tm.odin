@@ -162,19 +162,20 @@ luaT_gettm :: proc "contextless" (events: ^Table, event: int, ename: ^TString) -
 }
 
 // Find event `event`'s metamethod for value `o` -- reference Lua's
-// `luaT_gettmbyobj`. Tables (and, later, full userdata) carry their own
-// metatable; every other type shares a single per-type metatable held on the
-// global state. When there is no metatable at all we return the state's shared nil
-// sentinel rather than a null pointer, so callers can always dereference the
-// result. Note this uses a *raw* lookup (no `__index` chaining) -- metamethods are
-// always fetched raw.
+// `luaT_gettmbyobj`. Tables and full userdata carry their own metatable; every
+// other type shares a single per-type metatable held on the global state. When
+// there is no metatable at all we return the state's shared nil sentinel rather
+// than a null pointer, so callers can always dereference the result. Note this
+// uses a *raw* lookup (no `__index` chaining) -- metamethods are always fetched
+// raw.
 luaT_gettmbyobj :: proc "contextless" (L: ^Lua_State, o: ^TValue, event: int) -> ^TValue {
 	g := L.g
 	mt: ^Table
 	switch no_variant(o.tt_) {
 	case TTABLE:
 		mt = (^Table)(o.value_.gc).metatable
-	// TODO(phase-6): case TUSERDATA -> the userdata's own metatable.
+	case TUSERDATA:
+		mt = udata_value(o).metatable
 	case:
 		mt = g.mt[no_variant(o.tt_)]
 	}
@@ -185,16 +186,17 @@ luaT_gettmbyobj :: proc "contextless" (L: ^Lua_State, o: ^TValue, event: int) ->
 }
 
 // The type name to show for a value in an error message -- reference Lua's
-// `luaT_objtypename`. A table (later, a full userdata) with a `__name` string in
-// its metatable reports that custom name; everything else falls back to the
-// standard type name. This is what makes "attempt to index a Point value" possible
-// for a tagged userdata/table.
+// `luaT_objtypename`. A table or full userdata with a `__name` string in its
+// metatable reports that custom name; everything else falls back to the standard
+// type name. This is what makes "attempt to index a Point value" possible for a
+// tagged userdata/table.
 luaT_objtypename :: proc(L: ^Lua_State, o: ^TValue) -> string {
 	mt: ^Table
 	if base_type(o) == TTABLE {
 		mt = (^Table)(o.value_.gc).metatable
+	} else if base_type(o) == TUSERDATA {
+		mt = udata_value(o).metatable
 	}
-	// TODO(phase-6): full userdata carries its own metatable too.
 	if mt != nil {
 		name := luaH_Hgetshortstr(mt, luaS_new(L, "__name"))
 		if base_type(name) == TSTRING {

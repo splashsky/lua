@@ -255,14 +255,22 @@ luaV_equalobj :: proc(L: ^Lua_State, t1, t2: ^TValue) -> bool {
 	if raw_equal(t1, t2) {
 		return true
 	}
-	// Only tables (and, later, full userdata) with distinct identity may still be
-	// equal through an `__eq` metamethod.
-	if base_type(t1) != TTABLE {
+	// Only tables and full userdata with distinct identity may still be equal
+	// through an `__eq` metamethod; every other type's raw result was final.
+	mt1, mt2: ^Table
+	switch base_type(t1) {
+	case TTABLE:
+		mt1 = (^Table)(t1.value_.gc).metatable
+		mt2 = (^Table)(t2.value_.gc).metatable
+	case TUSERDATA:
+		mt1 = udata_value(t1).metatable
+		mt2 = udata_value(t2).metatable
+	case:
 		return false
 	}
-	tm := fasttm(L, (^Table)(t1.value_.gc).metatable, TM_EQ)
+	tm := fasttm(L, mt1, TM_EQ)
 	if tm == nil {
-		tm = fasttm(L, (^Table)(t2.value_.gc).metatable, TM_EQ)
+		tm = fasttm(L, mt2, TM_EQ)
 	}
 	if tm == nil {
 		return false
