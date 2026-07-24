@@ -370,6 +370,178 @@ set_obj :: #force_inline proc "contextless" (dst: ^TValue, src: ^TValue) {
 	dst.tt_ = src.tt_
 }
 
+// ---------------------------------------------------------------------------
+// Full userdata
+// ---------------------------------------------------------------------------
+//
+// Reference Lua's `Udata` (lobject.h). Full userdata is a GC-managed block of raw
+// bytes the host allocates through the API (`lua_newuserdatauv`) to hold a C/Odin
+// object -- a file handle, a socket, whatever. Unlike *light* userdata (a bare
+// pointer that is not collectable and carries no metatable), full userdata is a
+// first-class collectable object with its own metatable and an optional set of
+// associated *user values* (arbitrary Lua values the host can stash alongside the
+// bytes, indexed 1..nuvalue).
+//
+// The layout matches reference Lua's single-allocation trick: the fixed header is
+// immediately followed, inline, by `nuvalue` user-value slots and then the `len`
+// raw data bytes -- one allocation holds everything. We compute those trailing
+// offsets by hand (Odin has no C flexible-array member), which also lets us avoid
+// reference Lua's separate `Udata0` variant: because we never materialize a `uv[1]`
+// array in the struct, the `nuvalue == 0` case needs no special offset.
+
+// A single user-value slot. Reference Lua wraps the `TValue` in a union with a
+// max-alignment member so the raw data bytes that follow are always suitably
+// aligned; our `TValue` is already 16 bytes and 8-aligned, which covers every
+// scalar Odin/C type, so the plain `TValue` *is* that maximally-aligned slot.
+UValue :: TValue
+
+Udata :: struct {
+	using header: GCObject, // MUST be first: enables ^GCObject punning
+	nuvalue:      u16, // number of trailing user-value slots
+	len:          uint, // number of raw data bytes
+	metatable:    ^Table, // this userdata's own metatable (nil if none)
+	gclist:       ^GCObject, // GC gray-list thread
+	// Inline after this header: `nuvalue` UValue slots, then `len` data bytes.
+}
+
+#assert(offset_of(Udata, header) == 0)
+
+// The byte size of a full-userdata block carrying `nuvalue` user values and `size`
+// data bytes -- reference Lua's `sizeudata`. Header + inline user values + data.
+size_udata :: #force_inline proc "contextless" (nuvalue: int, size: uint) -> uint {
+	return size_of(Udata) + uint(nuvalue) * size_of(UValue) + size
+}
+
+// A pointer to user-value slot `i` (0-based internally; the API exposes 1-based) --
+// reference Lua's `getusedvalue`/`&u->uv[i]`. The slots begin immediately after the
+// header.
+udata_uv :: #force_inline proc "contextless" (u: ^Udata, i: int) -> ^TValue {
+	base := uintptr(u) + uintptr(size_of(Udata))
+	return (^TValue)(base + uintptr(i) * size_of(UValue))
+}
+
+// A multipointer to the raw data bytes -- reference Lua's `getudatamem`. They sit
+// just past the user-value slots.
+udata_mem :: #force_inline proc "contextless" (u: ^Udata) -> [^]u8 {
+	base := uintptr(u) + uintptr(size_of(Udata)) + uintptr(u.nuvalue) * size_of(UValue)
+	return ([^]u8)(base)
+}
+
+// Point a value at a full userdata -- reference Lua's `setuvalue`. Full userdata is
+// collectable, so `set_gc` tags the value with the userdata variant plus the
+// collectable bit.
+set_userdata :: #force_inline proc "contextless" (o: ^TValue, u: ^Udata) {
+	set_gc(o, &u.header)
+}
+
+// Recover the `^Udata` a value points at -- reference Lua's `uvalue`.
+udata_value :: #force_inline proc "contextless" (o: ^TValue) -> ^Udata {
+	return (^Udata)(o.value_.gc)
+}
+
+// ---------------------------------------------------------------------------
+// The remaining `ttis*` type predicates and value accessors
+// ---------------------------------------------------------------------------
+//
+// The number/nil/boolean predicates live above; these cover the collectable and
+// function variants the embedding API and standard libraries lean on. Each mirrors
+// a reference Lua `ttis*` macro. `type_tag` drops the collectable bit, so comparing
+// against the bare variant tag is exact.
+
+is_string :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return no_variant(o.tt_) == TSTRING
+}
+
+is_table :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return type_tag(o) == VTABLE
+}
+
+is_thread :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return type_tag(o) == VTHREAD
+}
+
+// Full (collectable) userdata only -- reference Lua's `ttisfulluserdata`.
+is_full_userdata :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return type_tag(o) == VUSERDATA
+}
+
+// Light userdata (a bare, non-collectable pointer) -- reference `ttislightuserdata`.
+is_light_userdata :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return type_tag(o) == VLIGHTUSERDATA
+}
+
+// Any function: a Lua closure, a C closure, or a light C function -- `ttisfunction`.
+is_function :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return no_variant(o.tt_) == TFUNCTION
+}
+
+// A light (upvalue-less) C function value -- reference Lua's `ttislcf`.
+is_light_cfunction :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return o.tt_ == VLCF
+}
+
+// A C/Odin closure (native function + captured values) -- reference `ttisCclosure`.
+is_c_closure :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return type_tag(o) == VCCL
+}
+
+// A Lua closure (prototype + shared upvalues) -- reference Lua's `ttisLclosure`.
+is_lua_closure :: #force_inline proc "contextless" (o: ^TValue) -> bool {
+	return type_tag(o) == VLCL
+}
+
+// Value accessors: recover the typed object pointer behind a collectable value.
+// Reference Lua's `hvalue` / `thvalue` / `clLvalue` / `clCvalue` / `fvalue`.
+table_value :: #force_inline proc "contextless" (o: ^TValue) -> ^Table {
+	return (^Table)(o.value_.gc)
+}
+
+thread_value :: #force_inline proc "contextless" (o: ^TValue) -> ^Lua_State {
+	return (^Lua_State)(o.value_.gc)
+}
+
+lua_closure_value :: #force_inline proc "contextless" (o: ^TValue) -> ^LClosure {
+	return (^LClosure)(o.value_.gc)
+}
+
+c_closure_value :: #force_inline proc "contextless" (o: ^TValue) -> ^CClosure {
+	return (^CClosure)(o.value_.gc)
+}
+
+// The light C function pointer inside a VLCF value -- reference Lua's `fvalue`.
+cfunction_value :: #force_inline proc "contextless" (o: ^TValue) -> C_Function {
+	return o.value_.f
+}
+
+
+// ---------------------------------------------------------------------------
+// Full arithmetic with metamethod fallback (for the embedding API)
+// ---------------------------------------------------------------------------
+
+// Perform `op` on `p1`/`p2`, storing the result at stack index `res` -- reference
+// Lua's `luaO_arith`. The state-free `raw_arith` handles the numeric domains; on a
+// non-numeric operand we fall back to the corresponding binary metamethod (which is
+// how `"10" + 5` and userdata operators work), and on integer division/modulo by
+// zero we raise the same runtime error the VM does. `lua_arith` is the public
+// entry point that reaches this.
+luaO_arith :: proc(L: ^Lua_State, op: int, p1, p2: ^TValue, res: int) {
+	r, st := raw_arith(Arith_Op(op), p1, p2)
+	switch st {
+	case .Ok:
+		set_obj(stack_value(L, res), &r)
+	case .Div_By_Zero:
+		if Arith_Op(op) == .IDiv {
+			luaG_runerror(L, "attempt to perform 'n//0'")
+		} else {
+			luaG_runerror(L, "attempt to perform 'n%%0'")
+		}
+	case .No_Number:
+		// Map the operator selector onto its metamethod event (they share order).
+		luaT_trybinTM(L, p1, p2, res, (op - LUA_OPADD) + TM_ADD)
+	}
+}
+
+
 // Collapse a pointer to a 32-bit unsigned integer for hashing -- reference Lua's
 // `point2uint`. We only ever feed the result into a hash function, so truncating
 // the low 32 bits of the address is fine; it need not round-trip back to a

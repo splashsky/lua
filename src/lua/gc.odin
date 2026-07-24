@@ -260,6 +260,21 @@ reallymarkobject :: proc(g: ^Global_State, o: ^GCObject) {
 	case VTABLE, VLCL, VCCL, VPROTO, VTHREAD:
 		link_gray(g, o) // has children: scan later
 
+	case VUSERDATA:
+		// Full userdata carries a metatable and (optionally) user values. With no
+		// user values there is nothing to revisit, so we mark the metatable and
+		// blacken in place; otherwise defer to a gray-list scan. Reference Lua's
+		// `reallymarkobject` LUA_VUSERDATA case.
+		u := (^Udata)(o)
+		if u.nuvalue == 0 {
+			if u.metatable != nil {
+				mark_object_n(g, &u.metatable.header)
+			}
+			set2black(o)
+		} else {
+			link_gray(g, o)
+		}
+
 	case:
 		assert(false, "reallymarkobject: not a markable object")
 	}
@@ -289,6 +304,8 @@ get_gclist :: proc(o: ^GCObject) -> ^^GCObject {
 		return &(^Proto)(o).gclist
 	case VTHREAD:
 		return &(^Lua_State)(o).gclist
+	case VUSERDATA:
+		return &(^Udata)(o).gclist
 	}
 	assert(false, "get_gclist: object never lives on the gray list")
 	return nil
@@ -323,8 +340,21 @@ traverse :: proc(g: ^Global_State, o: ^GCObject) {
 		traverse_proto(g, (^Proto)(o))
 	case VTHREAD:
 		traverse_thread(g, (^Lua_State)(o))
+	case VUSERDATA:
+		traverse_udata(g, (^Udata)(o))
 	case:
 		assert(false, "traverse: unexpected gray object")
+	}
+}
+
+// Scan a full userdata (only those with user values reach here): its metatable and
+// every user value. Reference Lua's `traverseudata`.
+traverse_udata :: proc(g: ^Global_State, u: ^Udata) {
+	if u.metatable != nil {
+		mark_object_n(g, &u.metatable.header)
+	}
+	for i in 0 ..< int(u.nuvalue) {
+		mark_value(g, udata_uv(u, i))
 	}
 }
 
@@ -466,6 +496,9 @@ freeobj :: proc(L: ^Lua_State, o: ^GCObject) {
 		luaF_freeproto(L, (^Proto)(o))
 	case VTHREAD:
 		free_thread(L, (^Lua_State)(o))
+	case VUSERDATA:
+		u := (^Udata)(o)
+		state_free(L, u, size_udata(int(u.nuvalue), u.len))
 	case:
 		assert(false, "freeobj: unknown object type")
 	}

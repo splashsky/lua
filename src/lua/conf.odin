@@ -85,3 +85,85 @@ LUA_COMPAT_GLOBAL :: true
 // `LUA_MULTRET` (lua.h). A call or vararg asked for `LUA_MULTRET` results returns
 // as many as it produces, adjusting the stack top rather than a fixed count.
 LUA_MULTRET :: -1
+
+// ---------------------------------------------------------------------------
+// Embedding-API constants (reference `lua.h`)
+// ---------------------------------------------------------------------------
+// These belong to the public C-API surface that Phase 6 (`api.odin`) implements.
+// They live here alongside the other `luaconf`/`lua.h` tunables so the whole
+// kernel can see them without a cross-file import (Odin packages share one
+// namespace anyway).
+
+// The registry's pseudo-index -- reference Lua's `LUA_REGISTRYINDEX`. The C API
+// addresses a handful of "not really on the stack" locations with fixed negative
+// indices well below any legal stack slot: the registry itself sits here, and the
+// running C function's upvalues sit just below it (`lua_upvalueindex`). Reference
+// derives the base from `INT_MAX/2` (not `LUAI_MAXSTACK`) precisely so it can never
+// collide with a real negative (top-relative) index, whose magnitude is bounded by
+// the far smaller `LUAI_MAXSTACK`.
+LUA_REGISTRYINDEX :: -(2147483647 / 2 + 1000)
+
+// The pseudo-index of the `i`-th upvalue of the running C function -- reference
+// Lua's `lua_upvalueindex` macro. Upvalue 1 is `LUA_REGISTRYINDEX - 1`, and so on
+// downward, so `index2value` recognizes any `idx < LUA_REGISTRYINDEX` as an upvalue.
+lua_upvalueindex :: #force_inline proc "contextless" (i: int) -> int {
+	return LUA_REGISTRYINDEX - i
+}
+
+// The magic prefix of a precompiled (binary) chunk -- reference Lua's
+// `LUA_SIGNATURE`. `lua_load` peeks the first byte: an ESC (0x1b) means "binary,
+// hand off to the undumper"; anything else means "source text, hand off to the
+// parser".
+LUA_SIGNATURE :: "\x1bLua"
+
+// The arithmetic operator selectors accepted by `lua_arith` -- reference Lua's
+// `LUA_OPADD` .. `LUA_OPBNOT`. Their integer values deliberately match our internal
+// `Arith_Op` enum (0..13) *and* the `TM_ADD`-relative metamethod order, so the API
+// can pass them straight through.
+LUA_OPADD :: 0
+LUA_OPSUB :: 1
+LUA_OPMUL :: 2
+LUA_OPMOD :: 3
+LUA_OPPOW :: 4
+LUA_OPDIV :: 5
+LUA_OPIDIV :: 6
+LUA_OPBAND :: 7
+LUA_OPBOR :: 8
+LUA_OPBXOR :: 9
+LUA_OPSHL :: 10
+LUA_OPSHR :: 11
+LUA_OPUNM :: 12
+LUA_OPBNOT :: 13
+
+// The comparison selectors accepted by `lua_compare` -- reference Lua's `LUA_OPEQ`
+// / `LUA_OPLT` / `LUA_OPLE`.
+LUA_OPEQ :: 0
+LUA_OPLT :: 1
+LUA_OPLE :: 2
+
+// The `what` selectors for `lua_gc` -- reference Lua's `LUA_GC*`. Phase 6 wires the
+// ones the current (deterministic, Phase-3-foundation) collector can honor; the
+// incremental/generational knobs land with the full collector in Phase 7.
+LUA_GCSTOP :: 0
+LUA_GCRESTART :: 1
+LUA_GCCOLLECT :: 2
+LUA_GCCOUNT :: 3
+LUA_GCCOUNTB :: 4
+LUA_GCSTEP :: 5
+LUA_GCISRUNNING :: 6
+LUA_GCGEN :: 7
+LUA_GCINC :: 8
+// The public type selectors returned by `lua_type` and passed to `lua_typename`
+// -- reference Lua's `LUA_TNONE` / `LUA_T*` (lua.h). These are just re-exports of
+// the kernel's base tags under their public API spelling, so the standard library
+// (a separate package) can name types without reaching into `object.odin`.
+LUA_TNONE :: TNONE
+LUA_TNIL :: TNIL
+LUA_TBOOLEAN :: TBOOLEAN
+LUA_TLIGHTUSERDATA :: TLIGHTUSERDATA
+LUA_TNUMBER :: TNUMBER
+LUA_TSTRING :: TSTRING
+LUA_TTABLE :: TTABLE
+LUA_TFUNCTION :: TFUNCTION
+LUA_TUSERDATA :: TUSERDATA
+LUA_TTHREAD :: TTHREAD

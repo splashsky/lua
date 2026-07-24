@@ -374,6 +374,33 @@ luaS_new :: proc(L: ^Lua_State, s: string) -> ^TString {
 	return row[0]
 }
 
+// Allocate a fresh full userdata with `size` raw data bytes and `nuvalue` user-value
+// slots -- reference Lua's `luaS_newudata` (which, like us, lives beside the string
+// allocator because both are single-block, header-plus-trailing-bytes objects). The
+// data bytes are left uninitialized (the host fills them); the metatable starts nil
+// and every user value starts nil so a GC that runs before the host populates them
+// never scans garbage. Returns nil on allocation failure (the caller raises).
+luaS_newudata :: proc(L: ^Lua_State, size: uint, nuvalue: int) -> ^Udata {
+	// Guard the trailing-block arithmetic against wrapping past the address space --
+	// reference Lua's `luaM_toobig` check. `size_udata` would otherwise overflow.
+	if size > MAX_SIZE - size_udata(nuvalue, 0) {
+		luaG_runerror(L, "memory allocation error: block too big")
+	}
+	o := luaC_newobj(L, VUSERDATA, size_udata(nuvalue, size))
+	if o == nil {
+		return nil
+	}
+	u := (^Udata)(o)
+	u.len = size
+	u.nuvalue = u16(nuvalue)
+	u.metatable = nil
+	u.gclist = nil
+	for i in 0 ..< nuvalue {
+		set_nil(udata_uv(u, i))
+	}
+	return u
+}
+
 // ---------------------------------------------------------------------------
 // Table maintenance the GC drives
 // ---------------------------------------------------------------------------

@@ -652,6 +652,108 @@ luaD_pcall :: proc(L: ^Lua_State, func: Protected_Proc, ud: rawptr, old_top: int
 }
 
 // ---------------------------------------------------------------------------
+// Protected parsing (compile a chunk under a protected boundary)
+// ---------------------------------------------------------------------------
+//
+// `lua_load` turns a stream of source (or precompiled bytecode) into a callable
+// closure. Parsing can raise -- a syntax error, a mode mismatch, or an OOM -- so it
+// runs inside `luaD_pcall`. Crucially, the parser's scratch buffers (`Mbuffer` and
+// the `Dyndata` arrays) are *not* GC-managed, so they must be freed on BOTH the
+// success and error paths; a naive `run_protected` wrapper would leak them when a
+// syntax error longjmps out. This mirrors reference Lua's `luaD_protectedparser`
+// exactly, including forbidding yields for the duration.
+
+// Does `mode` contain byte `ch`? Reference Lua uses `strchr`; our mode is a short
+// Odin string, so a linear scan is faithful and clear.
+@(private = "file")
+mode_has :: proc(mode: string, ch: u8) -> bool {
+	for i in 0 ..< len(mode) {
+		if mode[i] == ch {
+			return true
+		}
+	}
+	return false
+}
+
+// Raise a syntax error when the chunk's kind is not permitted by `mode` -- reference
+// Lua's `checkmode`. The message is left as the error object at the top of the stack
+// and we longjmp with `Err_Syntax`.
+@(private = "file")
+checkmode :: proc(L: ^Lua_State, mode: string, x: string) {
+	if !mode_has(mode, x[0]) {
+		luaO_pushfstring(L, "attempt to load a %s chunk (mode is '%s')", x, mode)
+		throw(L, .Err_Syntax)
+	}
+}
+
+// The carrier passed through `luaD_pcall` to `f_parser` -- reference Lua's
+// `struct SParser`. It owns the parser's non-GC scratch structures so they can be
+// freed after the protected call regardless of how it ended.
+@(private = "file")
+SParser :: struct {
+	z:    ^Zio,
+	buff: Mbuffer,
+	dyd:  Dyndata,
+	name: string,
+	mode: string,
+}
+
+// The protected body: peek the first byte to decide binary vs. text, enforce the
+// mode, run the undumper or the parser, then wire up the closure's upvalues --
+// reference Lua's `f_parser`.
+@(private = "file")
+f_parser :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
+	p := (^SParser)(ud)
+	mode := p.mode if p.mode != "" else "bt"
+	c := zio_getc(p.z) // read the first character
+	cl: ^LClosure
+	if c == int(LUA_SIGNATURE[0]) {
+		// A precompiled (binary) chunk. `B` mode loads it "fixed" (pinned strings)
+		// and skips the plain binary-permission check; otherwise `b` is required.
+		fixed := false
+		if mode_has(mode, 'B') {
+			fixed = true
+		} else {
+			checkmode(L, mode, "binary")
+		}
+		cl = luaU_undump(L, p.z, p.name, fixed)
+	} else {
+		checkmode(L, mode, "text")
+		cl = luaY_parser(L, p.z, &p.buff, &p.dyd, p.name, c)
+	}
+	luaF_initupvals(L, cl)
+	return .Ok
+}
+
+// Compile the chunk read through `z` under full protection, freeing the parser's
+// scratch memory on every exit path -- reference Lua's `luaD_protectedparser`. On
+// success the new closure sits on top of the stack; on failure the error object
+// does. Yields are forbidden while parsing (`incnny`/`decnny`).
+luaD_protectedparser :: proc(L: ^Lua_State, z: ^Zio, name: string, mode: string) -> Thread_Status {
+	p: SParser
+	incnny(L) // parsing cannot yield
+	p.z = z
+	p.name = name
+	p.mode = mode
+	p.dyd = {}
+	mbuffer_init(&p.buff)
+	status := luaD_pcall(L, f_parser, &p, L.top, L.errfunc)
+	mbuffer_free(L, &p.buff)
+	// Free the three dynamic parser arrays (each may be nil if never grown).
+	if p.dyd.actvar.arr != nil {
+		state_free(L, p.dyd.actvar.arr, uint(p.dyd.actvar.size) * size_of(Vardesc))
+	}
+	if p.dyd.gt.arr != nil {
+		state_free(L, p.dyd.gt.arr, uint(p.dyd.gt.size) * size_of(Labeldesc))
+	}
+	if p.dyd.label.arr != nil {
+		state_free(L, p.dyd.label.arr, uint(p.dyd.label.size) * size_of(Labeldesc))
+	}
+	decnny(L)
+	return status
+}
+
+// ---------------------------------------------------------------------------
 // Coroutine resume / yield
 // ---------------------------------------------------------------------------
 //

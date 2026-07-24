@@ -14,3 +14,21 @@ package lua
 //
 // TODO(phase-8): the header writer, and recursive serialization of Proto,
 // constants, upvalues, and (optionally stripped) debug info.
+
+// The sink a `lua_dump` caller supplies -- reference Lua's `lua_Writer`. It is
+// handed each chunk of serialized bytes and returns 0 on success or a non-zero
+// status to abort the dump. `context = runtime.default_context()` is the caller's
+// responsibility inside the callback (it is a "c" proc so it works from host code).
+Lua_Writer :: #type proc "c" (L: rawptr, p: rawptr, sz: uint, ud: rawptr) -> i32
+
+// luaU_dump serializes prototype `f` (and everything it references) through the
+// `writer` sink -- reference Lua's `luaU_dump`. `strip` drops debug info. Returns
+// the writer's last status (0 == success).
+//
+// Like `luaU_undump`, the real serializer is Phase 8's deliverable; the call site
+// (`lua_dump`) is already wired. Until then we raise a truthful error rather than
+// emit a bogus stream.
+luaU_dump :: proc(L: ^Lua_State, f: ^Proto, writer: Lua_Writer, data: rawptr, strip: bool) -> i32 {
+	luaG_runerror(L, "bytecode dumping is not implemented yet (phase 8)")
+	return 0 // unreachable: luaG_runerror never returns
+}
