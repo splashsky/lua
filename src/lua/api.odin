@@ -547,6 +547,7 @@ lua_pushlstring :: proc(L: ^Lua_State, s: []u8) -> string {
 	}
 	set_string(stack_value(L, L.top), ts)
 	api_incr_top(L)
+	luaC_checkGC(L)
 	return string(str_slice(ts))
 }
 
@@ -555,6 +556,7 @@ lua_pushstring :: proc(L: ^Lua_State, s: string) -> string {
 	ts := luaS_new(L, s)
 	set_string(stack_value(L, L.top), ts)
 	api_incr_top(L)
+	luaC_checkGC(L)
 	return string(str_slice(ts))
 }
 
@@ -590,6 +592,7 @@ lua_pushcclosure :: proc(L: ^Lua_State, fn: C_Function, n: int) {
 	}
 	set_c_closure(stack_value(L, L.top), cl)
 	api_incr_top(L)
+	luaC_checkGC(L)
 }
 
 // Convenience: push a light C function (a closure with no upvalues) -- reference
@@ -745,6 +748,7 @@ lua_createtable :: proc(L: ^Lua_State, narray, nrec: int) {
 	if narray > 0 || nrec > 0 {
 		luaH_resize(L, t, u32(narray), u32(nrec))
 	}
+	luaC_checkGC(L)
 }
 
 lua_newtable :: proc(L: ^Lua_State) {
@@ -758,6 +762,7 @@ lua_newuserdatauv :: proc(L: ^Lua_State, size: uint, nuvalue: int) -> rawptr {
 	u := luaS_newudata(L, size, nuvalue)
 	set_userdata(stack_value(L, L.top), u)
 	api_incr_top(L)
+	luaC_checkGC(L)
 	return rawptr(udata_mem(u))
 }
 
@@ -900,10 +905,12 @@ lua_rawsetp :: proc(L: ^Lua_State, idx: int, p: rawptr) {
 // state. A forward barrier keeps the tricolor invariant when a black object
 // starts pointing at a (possibly white) metatable.
 //
-// NOTE(phase-7): reference Lua also calls `luaC_checkfinalizer` here so that
-// giving an object a metatable with `__gc` enrolls it for finalization. We have
-// no finalizer machinery yet, so that is deliberately omitted until Phase 7; the
-// metatable itself is still installed correctly.
+// Set (or clear, with nil) the metatable of the value at `objindex` -- reference
+// `lua_setmetatable`. For tables and userdata the metatable is stored on the
+// object; for every other type it is a per-type default kept in the global
+// state. A forward barrier keeps the tricolor invariant when a black object
+// starts pointing at a (possibly white) metatable. If the new metatable carries a
+// `__gc` field, the object is enrolled for finalization via `luaC_checkfinalizer`.
 lua_setmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
 	api_checknelems(L, 1)
 	o := index2value(L, objindex)
@@ -921,12 +928,14 @@ lua_setmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
 		h.metatable = mt
 		if mt != nil {
 			luaC_barrier(L, &h.header, &mt.header)
+			luaC_checkfinalizer(L, &h.header, mt)
 		}
 	case TUSERDATA:
 		u := udata_value(o)
 		u.metatable = mt
 		if mt != nil {
 			luaC_barrier(L, &u.header, &mt.header)
+			luaC_checkfinalizer(L, &u.header, mt)
 		}
 	case:
 		L.g.mt[base_type(o)] = mt
@@ -951,6 +960,79 @@ lua_setiuservalue :: proc(L: ^Lua_State, idx: int, n: int) -> bool {
 		res = true
 	}
 	L.top -= 1
+	return res
+}
+
+// ---------------------------------------------------------------------------
+// Garbage-collection control -- reference `lua_gc`.
+// ---------------------------------------------------------------------------
+
+// Drive the collector from the embedding side: this is the machinery behind
+// Lua's `collectgarbage`. `what` selects an operation (one of the `LUA_GC*`
+// constants); `args` carries the extra integer arguments a couple of the
+// operations take (the byte count for STEP, and the param index + new value for
+// PARAM). The return value's meaning is per-operation and mirrors reference Lua
+// exactly -- callers pattern-match on `what` to interpret it.
+//
+// When the collector is internally stopped (mid-close or being torn down) every
+// operation is invalid and we hand back -1, just like the reference guard.
+lua_gc :: proc(L: ^Lua_State, what: int, args: ..int) -> int {
+	g := L.g
+	if g.gcstp & (GCSTPGC | GCSTPCLS) != 0 {
+		return -1 // internal stop: all options are invalid
+	}
+	res := 0
+	switch what {
+	case LUA_GCSTOP:
+		g.gcstp = GCSTPUSR // stopped by the user
+	case LUA_GCRESTART:
+		luaE_setdebt(g, 0)
+		g.gcstp = 0 // (other bits must be zero here)
+	case LUA_GCCOLLECT:
+		luaC_fullgc(L, false)
+	case LUA_GCCOUNT:
+		// GC values are expressed in Kbytes: #bytes / 2^10.
+		res = int(gettotalbytes(g) >> 10)
+	case LUA_GCCOUNTB:
+		res = int(gettotalbytes(g) & 0x3ff)
+	case LUA_GCSTEP:
+		oldstp := g.gcstp
+		n: L_Mem = len(args) > 0 ? L_Mem(args[0]) : 0
+		work := false
+		g.gcstp = 0 // allow GC to run (other bits must be zero here)
+		if n <= 0 {
+			n = g.gc_debt // force to run one basic step
+		}
+		luaE_setdebt(g, g.gc_debt - n)
+		// condGC: only steps when the debt has come due, mirroring `luaC_condGC`.
+		if g.gc_debt <= 0 {
+			luaC_step(L)
+			work = true
+		}
+		if work && g.gcstate == GCSpause { // end of cycle?
+			res = 1 // signal it
+		}
+		g.gcstp = oldstp // restore previous state
+	case LUA_GCISRUNNING:
+		res = gcrunning(g) ? 1 : 0
+	case LUA_GCGEN:
+		res = (g.gckind == KGC_INC) ? LUA_GCINC : LUA_GCGEN
+		luaC_changemode(L, KGC_GENMINOR)
+	case LUA_GCINC:
+		res = (g.gckind == KGC_INC) ? LUA_GCINC : LUA_GCGEN
+		luaC_changemode(L, KGC_INC)
+	case LUA_GCPARAM:
+		api_check(len(args) >= 1, "missing GC parameter index")
+		param := args[0]
+		api_check(0 <= param && param < LUA_GCPN, "invalid parameter")
+		res = int(luaO_applyparam(g.gcparams[param], 100))
+		value := len(args) >= 2 ? args[1] : -1
+		if value >= 0 {
+			g.gcparams[param] = luaO_codeparam(uint(value))
+		}
+	case:
+		res = -1 // invalid option
+	}
 	return res
 }
 
@@ -1101,6 +1183,7 @@ lua_concat :: proc(L: ^Lua_State, n: int) {
 		set_string(stack_value(L, L.top), luaS_newlstr(L, raw_data([]u8{0}), 0))
 		api_incr_top(L)
 	}
+	luaC_checkGC(L)
 }
 
 // Push `#v` for the value at `idx`, honoring `__len` -- reference `lua_len`.
