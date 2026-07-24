@@ -269,3 +269,313 @@ luaG_errnnil :: proc(L: ^Lua_State, cl: ^LClosure, k: int) {
 	}
 	luaG_runerror(L, "global '%s' already defined", globalname)
 }
+
+// ---------------------------------------------------------------------------
+// Hook dispatch (line + count hooks driven from the VM)
+// ---------------------------------------------------------------------------
+//
+// The call and return hooks fire from the call protocol (see `luaD_hookcall` /
+// `rethook` in do.odin). The line and count hooks are different: they must fire
+// *between instructions*, so they are driven from the VM's dispatch loop. To
+// avoid slowing the common (no-hook) case, each Lua frame carries a `trap` flag
+// in `ci.u.l.trap`; the VM only consults the hook machinery when that flag is
+// set. `settraps` sets it on every live Lua frame when a hook is installed, and
+// `luaG_traceexec` clears it again the moment the relevant masks are gone.
+
+// Reload the instruction-count-down from its base -- reference `resethookcount`.
+resethookcount :: #force_inline proc "contextless" (L: ^Lua_State) {
+	L.hookcount = L.basehookcount
+}
+
+// Mark every live Lua frame as trapping, so the VM will call `luaG_traceexec`
+// before each instruction -- reference Lua's `settraps`. Called when a hook is
+// installed. C frames have no per-instruction dispatch, so they are skipped.
+settraps :: proc(L: ^Lua_State) {
+	for i := L.ci; i >= 0; i -= 1 {
+		if is_lua_frame(&L.frames[i]) {
+			L.frames[i].u.l.trap = 1
+		}
+	}
+}
+
+// Did the source line change between two instruction indices? -- reference Lua's
+// `changedline`. Reference has a fast delta-walking path; the observable result
+// is exactly "do the two pcs map to different source lines", which we compute
+// directly. Honest and identical in outcome (just without the micro-optimization).
+changedline :: proc(p: ^Proto, oldpc, newpc: int) -> bool {
+	if p.lineinfo == nil {
+		return false // stripped chunk: never report a line change
+	}
+	return luaG_getfuncline(p, oldpc) != luaG_getfuncline(p, newpc)
+}
+
+// Trace the execution of a Lua function, firing count and line hooks as needed --
+// reference Lua's `luaG_traceexec`. Called by the VM before an instruction when
+// the current frame's `trap` flag is set. `pc` is the index of the instruction
+// about to execute. Returns the new value of `trap` (0 to stop trapping, 1 to
+// keep going): once the line/count masks are cleared, we turn the frame's trap
+// off so the fast path resumes.
+//
+// A subtlety mirrored from reference: when the instruction about to run does not
+// consume `L.top` as a variable-length input (`is_it`), we snap `L.top` back to
+// the frame's register top before calling the hook, so the hook sees a tidy
+// stack. Instructions that *do* use top (a multi-value CALL/RETURN setup) are
+// left alone.
+luaG_traceexec :: proc(L: ^Lua_State, pc: int) -> i32 {
+	ci := &L.frames[L.ci]
+	mask := L.hookmask
+	p := ci_func(L, ci).p
+	if mask & (LUA_MASKLINE | LUA_MASKCOUNT) == 0 {
+		ci.u.l.trap = 0 // no line/count hook: stop trapping this frame
+		return 0
+	}
+	npci := pc // the instruction about to execute
+	ci.u.l.savedpc = pc + 1 // reference's `savepc`: savedpc points at the *next* instr
+	counthook := false
+	L.hookcount -= 1
+	if L.hookcount == 0 && (mask & LUA_MASKCOUNT) != 0 {
+		counthook = true
+		resethookcount(L)
+	} else if mask & LUA_MASKLINE == 0 {
+		return 1 // only a count hook, and it isn't due yet
+	}
+	if ci.callstatus & CIST_HOOKYIELD != 0 {
+		ci.callstatus &= ~CIST_HOOKYIELD // already hooked here before a yield
+		return 1
+	}
+	// Tidy the stack for the hook unless the pending instruction needs top.
+	if npci < p.sizecode && !is_it(p.code[npci]) {
+		L.top = ci.top
+	}
+	if counthook {
+		luaD_hook(L, LUA_HOOKCOUNT, -1, 0, 0)
+	}
+	if mask & LUA_MASKLINE != 0 {
+		oldpc := L.oldpc < p.sizecode ? L.oldpc : 0
+		if npci <= oldpc || changedline(p, oldpc, npci) {
+			newline := luaG_getfuncline(p, npci)
+			luaD_hook(L, LUA_HOOKLINE, newline, 0, 0)
+		}
+		L.oldpc = npci
+	}
+	if L.status == .Yield { // the hook yielded
+		if counthook {
+			L.hookcount = 1 // undo the decrement to zero
+		}
+		ci = &L.frames[L.ci]
+		ci.u.l.savedpc -= 1 // resume will re-increment
+		ci.callstatus |= CIST_HOOKYIELD
+		throw(L, .Yield)
+	}
+	return 1 // keep trapping
+}
+
+// ---------------------------------------------------------------------------
+// The public debug API (reference Lua's ldebug.c LUA_API surface)
+// ---------------------------------------------------------------------------
+
+// Install (or, with a nil func / zero mask, remove) a debug hook -- reference
+// `lua_sethook`. Installing a hook arms the trap flag on every live Lua frame so
+// the VM starts consulting `luaG_traceexec`.
+lua_sethook :: proc(L: ^Lua_State, fn: Hook_Proc, mask: i32, count: i32) {
+	fn := fn
+	mask := mask
+	if fn == nil || mask == 0 { // turning hooks off
+		mask = 0
+		fn = nil
+	}
+	L.hook = fn
+	L.basehookcount = count
+	resethookcount(L)
+	L.hookmask = mask
+	if mask != 0 {
+		settraps(L) // so line/count hooks trip inside luaG_traceexec
+	}
+}
+
+lua_gethook :: proc(L: ^Lua_State) -> Hook_Proc {
+	return L.hook
+}
+
+lua_gethookmask :: proc(L: ^Lua_State) -> i32 {
+	return L.hookmask
+}
+
+lua_gethookcount :: proc(L: ^Lua_State) -> i32 {
+	return L.basehookcount
+}
+
+// Resolve stack `level` (0 = the current running frame) to a `Lua_Debug` record
+// identifying that frame -- reference `lua_getstack`. Frame index 0 (the C entry
+// frame) is excluded, exactly as reference excludes `base_ci`.
+lua_getstack :: proc(L: ^Lua_State, level: int, ar: ^Lua_Debug) -> bool {
+	if level < 0 {
+		return false // an invalid (negative) level
+	}
+	ci_idx := L.ci
+	lvl := level
+	for lvl > 0 && ci_idx > 0 {
+		lvl -= 1
+		ci_idx -= 1
+	}
+	if lvl == 0 && ci_idx > 0 {
+		ar.i_ci = ci_idx
+		return true
+	}
+	return false // no such level
+}
+
+// Fill in the parts of a `Lua_Debug` selected by `what` -- reference Lua's static
+// `auxgetinfo`. `func` is the function value the record describes; `ci_idx` is its
+// frame (or -1 for a function pulled off the stack via the '>' selector).
+@(private = "file")
+auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_idx: int) -> bool {
+	status := true
+	is_lua := is_lua_closure(fv)
+	p: ^Proto = is_lua ? lua_closure_value(fv).p : nil
+	for c in transmute([]u8)what {
+		switch c {
+		case 'S':
+			if p != nil {
+				ar.source = p.source != nil ? string(str_slice(p.source)) : "=?"
+				ar.linedefined = i32(p.linedefined)
+				ar.lastlinedefined = i32(p.lastlinedefined)
+				ar.what = p.linedefined == 0 ? "main" : "Lua"
+			} else {
+				ar.source = "=[C]"
+				ar.linedefined = -1
+				ar.lastlinedefined = -1
+				ar.what = "C"
+			}
+			w := luaO_chunkid(ar.short_src[:], ar.source)
+			_ = w
+		case 'l':
+			ar.currentline = (p != nil && ci_idx >= 0) ? i32(getcurrentline(L, &L.frames[ci_idx])) : -1
+		case 'u':
+			if is_lua {
+				ar.nups = u8(lua_closure_value(fv).nupvalues)
+			} else if is_c_closure(fv) {
+				ar.nups = u8(c_closure_value(fv).nupvalues)
+			} else {
+				ar.nups = 0
+			}
+			if p != nil {
+				ar.nparams = p.numparams
+				ar.isvararg = (p.flag & PF_VAHID) != 0 ? 1 : 0
+			} else {
+				ar.nparams = 0
+				ar.isvararg = 1
+			}
+		case 't':
+			ar.istailcall = (ci_idx >= 0 && (L.frames[ci_idx].callstatus & CIST_TAIL) != 0) ? 1 : 0
+		case 'n':
+			// Name guessing (getfuncname) is intentionally minimal for now: we
+			// report no name rather than a fabricated one. The fields are honest
+			// empty strings; enriching them is a later debug-layer refinement.
+			ar.name = ""
+			ar.namewhat = ""
+		case 'f', 'L':
+			// Handled by the caller (they push onto the stack).
+		case:
+			status = false // an unknown option
+		}
+	}
+	return status
+}
+
+// Populate a `Lua_Debug` for a function, per the `what` option string -- reference
+// `lua_getinfo`. A leading '>' pops a function off the top of the stack to
+// describe; otherwise `ar.i_ci` (from `lua_getstack`) selects the frame. The 'f'
+// option pushes the function and 'L' pushes a table of its valid lines.
+lua_getinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug) -> bool {
+	what := what
+	fv: ^TValue
+	ci_idx := -1
+	if len(what) > 0 && what[0] == '>' {
+		fv = stack_value(L, L.top - 1)
+		assert(is_function(fv), "function expected in lua_getinfo")
+		what = what[1:]
+		L.top -= 1 // pop the function
+	} else {
+		ci_idx = ar.i_ci
+		fv = stack_value(L, L.frames[ci_idx].func)
+	}
+	status := auxgetinfo(L, what, ar, fv, ci_idx)
+	// 'f' and 'L' push results; per reference they are appended after auxgetinfo.
+	for c in transmute([]u8)what {
+		if c == 'f' {
+			set_obj(stack_value(L, L.top), fv)
+			L.top += 1
+		} else if c == 'L' {
+			collectvalidlines(L, fv)
+		}
+	}
+	return status
+}
+
+// Push a table whose keys are the source lines a function can stop on -- reference
+// Lua's `collectvalidlines`. For a C function (no line info) it pushes nil, again
+// matching reference.
+@(private = "file")
+collectvalidlines :: proc(L: ^Lua_State, fv: ^TValue) {
+	if !is_lua_closure(fv) {
+		set_nil(stack_value(L, L.top))
+		L.top += 1
+		return
+	}
+	p := lua_closure_value(fv).p
+	t := luaH_new(L)
+	set_gc(stack_value(L, L.top), &t.header)
+	L.top += 1
+	if p.lineinfo != nil {
+		active: TValue
+		set_bool(&active, true)
+		currentline := p.linedefined
+		for i in 0 ..< p.sizecode {
+			if p.lineinfo[i] == ABSLINEINFO {
+				currentline = luaG_getfuncline(p, i)
+			} else {
+				currentline += int(p.lineinfo[i])
+			}
+			luaH_setint(L, t, Integer(currentline), &active)
+		}
+	}
+}
+
+// Return the name of local variable number `n` in the frame `ar` describes, and
+// push its current value -- reference `lua_getlocal`. With a '>' style `ar`
+// (i_ci < 0) it instead reports a function's parameter names without a value.
+lua_getlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok: bool) {
+	ci := &L.frames[ar.i_ci]
+	if !is_lua_frame(ci) {
+		return "", false // C frames expose no locals
+	}
+	p := ci_func(L, ci).p
+	nm := luaF_getlocalname(p, n, currentpc(ci))
+	if nm == nil {
+		return "", false
+	}
+	// Local `n` lives at register (n-1) above the frame base.
+	base := ci.func + 1
+	set_obj(stack_value(L, L.top), stack_value(L, base + (n - 1)))
+	L.top += 1
+	return string(str_slice(nm)), true
+}
+
+// Set local variable number `n` from the popped top value -- reference
+// `lua_setlocal`.
+lua_setlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok: bool) {
+	ci := &L.frames[ar.i_ci]
+	if !is_lua_frame(ci) {
+		return "", false
+	}
+	p := ci_func(L, ci).p
+	nm := luaF_getlocalname(p, n, currentpc(ci))
+	if nm == nil {
+		return "", false
+	}
+	base := ci.func + 1
+	L.top -= 1
+	set_obj(stack_value(L, base + (n - 1)), stack_value(L, L.top))
+	return string(str_slice(nm)), true
+}

@@ -46,7 +46,7 @@ l_strton :: proc (o: ^TValue) -> (TValue, bool) {
 
 // Try to convert a value (including a numeric string) to a float -- reference
 // Lua's `luaV_tonumber_` combined with the `tonumber` macro's float fast path.
-@(private = "file")
+// Package-visible (not file-private) because the C API's `lua_tonumberx` needs it.
 vm_tonumber :: proc (o: ^TValue) -> (Number, bool) {
 	if is_float(o) {
 		return flt_value(o), true
@@ -61,8 +61,7 @@ vm_tonumber :: proc (o: ^TValue) -> (Number, bool) {
 }
 
 // Try to convert a value (including a numeric string) to an integer, rounding per
-// `mode` -- reference Lua's `luaV_tointeger`.
-@(private = "file")
+// `mode` -- reference Lua's `luaV_tointeger`. Package-visible for `lua_tointegerx`.
 vm_tointeger :: proc (o: ^TValue, mode: F2I_Mode) -> (Integer, bool) {
 	if v, ok := l_strton(o); ok {
 		return to_integer_no_string(&v, mode)
@@ -697,11 +696,27 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 		code := cl.p.code
 		base := L.frames[ci_idx].func + 1 // stack index of R[0]
 		pc := L.frames[ci_idx].u.l.savedpc
+		trap := L.frames[ci_idx].u.l.trap // nonzero while tracing lines/counts
+		// Reference Lua's `startfunc`/`returning` initialize `trap` from
+		// `L->hookmask` on every frame (re)entry, so a hook installed *before* this
+		// frame began executing still takes effect. `settraps` covers the inverse
+		// case (a hook installed while this frame is already the running one).
+		if L.hookmask & (LUA_MASKLINE | LUA_MASKCOUNT) != 0 {
+			trap = 1
+		}
 
 		// The dispatch loop. `pc` indexes `code`; `savedpc` is synced from `pc`
 		// before anything that can raise (so error line info is correct) and
 		// before every frame switch (so the caller resumes correctly).
 		for {
+			// Hook trap: when a line/count hook is installed this frame is marked
+			// trapping, and we consult `luaG_traceexec` before each instruction.
+			// In the common (no-hook) case `trap` is 0 and this costs one branch.
+			if trap != 0 {
+				L.frames[ci_idx].u.l.savedpc = pc
+				trap = luaG_traceexec(L, pc)
+				base = L.frames[ci_idx].func + 1 // reference `updatebase` (no-op in the index model)
+			}
 			i := code[pc]
 			pc += 1
 			switch get_opcode(i) {
