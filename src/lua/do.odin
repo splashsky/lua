@@ -83,8 +83,15 @@ realloc_stack :: proc(L: ^Lua_State, newsize: int, raise: bool) -> Thread_Status
 	oldbytes := uint(oldsize + EXTRA_STACK) * size_of(StackValue)
 	newbytes := uint(newsize + EXTRA_STACK) * size_of(StackValue)
 
-	// TODO(phase-7): set gcstopem to stop an emergency GC firing mid-realloc.
+	// Stop emergency collection for the duration of the reallocation: an
+	// emergency GC triggered mid-realloc would traverse a stack that is, for a
+	// moment, in an inconsistent state. Reference Lua's `luaD_reallocstack`
+	// brackets the allocation the same way. (Indices, not pointers, mean we still
+	// need no `correctstack` afterward.)
+	oldgcstop := L.g.gcstopem
+	L.g.gcstopem = 1
 	newblock := state_realloc(L, L.stack, oldbytes, newbytes)
+	L.g.gcstopem = oldgcstop
 	if newblock == nil {
 		if raise {
 			return throw(L, .Err_Mem)
@@ -101,19 +108,28 @@ realloc_stack :: proc(L: ^Lua_State, newsize: int, raise: bool) -> Thread_Status
 	return .Ok
 }
 
+// Raise the "error in error handling" error -- reference Lua's `luaD_errerr`.
+// Reached when the stack overflows *while already* unwinding an error (so the
+// overflow handler itself has no room left). We push the fixed message as the
+// error object -- EXTRA_STACK guarantees the one slot -- and throw `LUA_ERRERR`.
+luaD_errerr :: proc(L: ^Lua_State) -> Thread_Status {
+	msg := luaS_new(L, "error in error handling")
+	set_string(&L.stack[L.top].val, msg)
+	L.top += 1 // assume EXTRA_STACK
+	return throw(L, .Err_Err)
+}
+
 // Grow the stack by at least `n` slots -- reference Lua's `luaD_growstack`. The
 // growth policy is faithful: prefer 1.5x, but never below what's actually needed
 // and never above `MAXSTACK`. If the request itself can't fit, we grow to the
-// error-reserve size and report "stack overflow" (a Phase-5 error *message*, once
-// interned strings exist -- for now we surface the right status).
+// error-reserve size and report "stack overflow".
 grow_stack :: proc(L: ^Lua_State, n: int, raise: bool) -> Thread_Status {
 	size := L.stack_size
 	if size > MAXSTACK {
 		// The stack is already in its error-reserve regime, i.e. we are
 		// handling a stack overflow and cannot grow any further.
 		if raise {
-			// TODO(phase-5): luaD_errerr -- "error in error handling".
-			return throw(L, .Err_Err)
+			return luaD_errerr(L) // "error in error handling"
 		}
 		return .Err_Err
 	}
@@ -138,8 +154,7 @@ grow_stack :: proc(L: ^Lua_State, n: int, raise: bool) -> Thread_Status {
 		return status
 	}
 	if raise {
-		// TODO(phase-5): luaG_runerror(L, "stack overflow").
-		return throw(L, .Err_Run)
+		luaG_runerror(L, "stack overflow") // raises LUA_ERRRUN, never returns
 	}
 	return .Err_Run
 }
