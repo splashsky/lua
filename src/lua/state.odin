@@ -23,6 +23,21 @@ package lua
 // Call frames
 // ---------------------------------------------------------------------------
 
+// The continuation function a C frame parks so it can be resumed after a yield --
+// reference Lua's `lua_KFunction`. It receives the thread, the status the call is
+// being continued with, and the opaque context the C function stashed.
+K_Function :: #type proc "c" (L: rawptr, status: i32, ctx: K_Context) -> i32
+
+// The opaque context a C continuation carries across a yield -- reference Lua's
+// `lua_KContext`. It is exactly pointer-width and signed (reference default
+// `ptrdiff_t`); Odin's `int` is pointer-width on our targets.
+K_Context :: distinct int
+
+// A debug hook -- reference Lua's `lua_Hook`. It is handed the thread and a
+// filled-in activation record. `Lua_Debug` is defined with the debug machinery;
+// the pointer is opaque here so the frame struct doesn't depend on it.
+Hook_Proc :: #type proc "c" (L: rawptr, ar: rawptr)
+
 // `Call_Info` is one activation record on a thread's explicit call-frame stack --
 // reference Lua's `CallInfo`. The reference struct is a doubly linked list node
 // holding raw stack *pointers*; ours lives in a growable array and stores stack
@@ -30,21 +45,141 @@ package lua
 // The previous/next links become simple index arithmetic (frame `ci-1` is the
 // caller), which is why they aren't fields here.
 //
-// Phase 2 only ever has the base frame, so this carries just the essentials. The
-// per-call-kind union (a Lua frame's saved program counter, a C/Odin frame's
-// continuation function + context), the result-count bookkeeping, and the yield
-// machinery all grow onto this struct in Phase 5 when real calls execute.
+// CRITICAL (Decision 4, reaffirmed in the Phase-5 design review): because the
+// frame array can be reallocated by any nested call/metamethod/hook, code must
+// hold a frame *index* across any re-entrant operation and re-derive
+// `&L.frames[idx]` afterward -- never cache a `^Call_Info` across a call.
+//
+// The `u` union mirrors reference Lua's: a Lua frame needs its saved program
+// counter (for us an *index* into `Proto.code`, not a pointer), a line/count
+// trap flag, and its vararg overflow count; a C frame needs its yield
+// continuation, the caller's error handler to restore, and the continuation's
+// context. `u2` overlays three disjoint uses (a C function's protected-call
+// function index, a yielding function's yielded-value count, a returning
+// function's result count while closing to-be-closed variables).
 Call_Info :: struct {
 	func:       int, // stack index of this frame's function slot
 	top:        int, // stack index one past this frame's usable region
-	callstatus: u32, // CIST_* flag bits
+	u:          struct #raw_union {
+		l: struct {
+			// only for Lua frames
+			savedpc:    int, // index of the NEXT instruction in Proto.code
+			trap:       i32, // nonzero while tracing lines/counts
+			nextraargs: int, // # extra args a vararg call received
+		},
+		c: struct {
+			// only for C frames
+			k:           K_Function, // continuation to run after a yield
+			old_errfunc: int, // caller's errfunc, to restore
+			ctx:         K_Context, // continuation context
+		},
+	},
+	u2:         int, // funcidx | nyield | nres (disjoint uses, per reference)
+	callstatus: u32, // CIST_* flag bits (also packs the wanted-results count)
 }
 
-// `callstatus` flag bits, matching reference Lua's `CIST_*` (lstate.h). Only the
-// one we need in Phase 2 is defined; the rest arrive with the call protocol.
-// `CIST_C` marks a frame that is running a C (for us, Odin) function rather than
-// a Lua closure -- the base frame is always such a frame.
-CIST_C :: u32(1) << (12 + 3)
+// `callstatus` layout and flag bits, matching reference Lua 5.5's `CIST_*`
+// (lstate.h). The low byte packs the *expected number of results + 1*; bits 8-11
+// count `__call`-metamethod recursion; bits 12-14 hold the "recover status" used
+// to carry an error code across a yielding `__close`; bit 15 is `CIST_C`; the
+// remaining flags climb from there.
+CIST_NRESULTS :: u32(0xff) // bits 0-7: (wanted results + 1)
+CIST_CCMT :: u32(8) // offset of the __call-metamethod counter (bits 8-11)
+MAX_CCMT :: u32(0xf) << CIST_CCMT // full __call counter
+CIST_RECST :: u32(12) // offset of the 3-bit recover-status field (bits 12-14)
+CIST_C :: u32(1) << (CIST_RECST + 3) // frame runs a C (Odin) function (bit 15)
+CIST_FRESH :: CIST_C << 1 // frame is a fresh `luaV_execute` invocation
+CIST_CLSRET :: CIST_FRESH << 1 // frame is closing to-be-closed variables
+CIST_TBC :: CIST_CLSRET << 1 // frame has to-be-closed variables
+CIST_OAH :: CIST_TBC << 1 // saved original value of `allowhook`
+CIST_HOOKED :: CIST_OAH << 1 // frame is running a debug hook
+CIST_YPCALL :: CIST_HOOKED << 1 // frame is a yieldable protected call
+CIST_TAIL :: CIST_YPCALL << 1 // frame was entered by a tail call
+CIST_HOOKYIELD :: CIST_TAIL << 1 // last hook call yielded
+CIST_FIN :: CIST_HOOKYIELD << 1 // frame "called" a finalizer
+
+// The maximum results a call may request, which must fit in the `CIST_NRESULTS`
+// byte -- reference Lua's `MAXRESULTS`.
+MAXRESULTS :: 250
+
+// Decode the wanted-results count packed in a `callstatus` -- reference Lua's
+// `get_nresults`. The stored value is (wanted + 1), so `LUA_MULTRET` (-1) rides
+// through as 0.
+get_nresults :: #force_inline proc "contextless" (cs: u32) -> int {
+	return int(cs & CIST_NRESULTS) - 1
+}
+
+// Whether frame `ci` is running a Lua function (not a C function) -- reference
+// `isLua`.
+is_lua_frame :: #force_inline proc "contextless" (ci: ^Call_Info) -> bool {
+	return (ci.callstatus & CIST_C) == 0
+}
+
+// The 3-bit "recover status" packed into `callstatus` (bits 12-14). A yielding
+// `__close` needs to remember which error code interrupted it so that, once the
+// close finishes, the surrounding `pcall` can report that original status. These
+// two helpers read and write that field -- reference `getcistrecst`/`setcistrecst`.
+get_cist_recst :: #force_inline proc "contextless" (ci: ^Call_Info) -> Thread_Status {
+	return Thread_Status((ci.callstatus >> CIST_RECST) & 7)
+}
+set_cist_recst :: #force_inline proc "contextless" (ci: ^Call_Info, st: Thread_Status) {
+	ci.callstatus = (ci.callstatus & ~(u32(7) << CIST_RECST)) | (u32(st) << CIST_RECST)
+}
+
+// The `CIST_OAH` bit stashes the caller's `allowhook` across a call so it can be
+// restored afterward -- reference `getoah`/`setoah`. `get_oah` returns the saved
+// hook flag (0/1); `set_oah` records the current value into the frame.
+get_oah :: #force_inline proc "contextless" (ci: ^Call_Info) -> u8 {
+	return (ci.callstatus & CIST_OAH) != 0 ? 1 : 0
+}
+set_oah :: #force_inline proc "contextless" (ci: ^Call_Info, v: u8) {
+	if v != 0 {
+		ci.callstatus |= CIST_OAH
+	} else {
+		ci.callstatus &= ~CIST_OAH
+	}
+}
+
+// Whether frame `ci` is running Lua code and not a hook -- reference `isLuacode`.
+is_lua_code :: #force_inline proc "contextless" (ci: ^Call_Info) -> bool {
+	return (ci.callstatus & (CIST_C | CIST_HOOKED)) == 0
+}
+
+// The Lua closure a frame is executing -- reference Lua's `ci_func`. Only valid
+// for Lua frames.
+ci_func :: #force_inline proc "contextless" (L: ^Lua_State, ci: ^Call_Info) -> ^LClosure {
+	return (^LClosure)(stack_value(L, ci.func).value_.gc)
+}
+
+// ---------------------------------------------------------------------------
+// The nCcalls split: C-call depth (low 16 bits) + non-yieldable count (high 16)
+// ---------------------------------------------------------------------------
+//
+// Reference Lua packs two counters into `nCcalls` so both can be saved/restored
+// with one move: the low half is how deep we are in native recursion (the
+// overflow guard), the high half is how many of those calls forbid yielding.
+
+// A single non-yieldable call: increments both halves at once -- reference `nyci`.
+nyci :: u32(0x10000) | u32(1)
+
+// The real number of nested C calls -- reference `getCcalls`.
+get_ccalls :: #force_inline proc "contextless" (L: ^Lua_State) -> u32 {
+	return L.n_ccalls & 0xffff
+}
+
+// Whether this thread may yield: true iff there are no non-yieldable calls on its
+// stack -- reference `yieldable`.
+yieldable :: #force_inline proc "contextless" (L: ^Lua_State) -> bool {
+	return (L.n_ccalls & 0xffff0000) == 0
+}
+
+// Enter / leave a non-yieldable region -- reference `incnny`/`decnny`.
+incnny :: #force_inline proc "contextless" (L: ^Lua_State) {
+	L.n_ccalls += 0x10000
+}
+decnny :: #force_inline proc "contextless" (L: ^Lua_State) {
+	L.n_ccalls -= 0x10000
+}
 
 // ---------------------------------------------------------------------------
 // The string table (placeholder)
@@ -108,6 +243,15 @@ Lua_State :: struct {
 	errfunc:              int, // stack index of the current message handler
 	oldpc:                int, // last program counter (for hooks/line info)
 	errorJmp:             ^Lua_Longjmp, // innermost active protected boundary (nil if none)
+
+	// debug hooks (Phase 5) --------------------------------------------
+	hook:          Hook_Proc, // the installed hook, if any
+	hookmask:      i32, // which hook events are enabled (LUA_MASK*)
+	basehookcount: i32, // reload value for the instruction-count hook
+	hookcount:     i32, // instructions remaining until the next count hook
+	// values transferred to/from a call, for the call/return hooks
+	transfer_first: int, // offset of the first transferred value
+	transfer_n:     int, // number of transferred values
 
 	twups:  ^Lua_State, // link in the list of threads with open upvalues
 	gclist: ^GCObject, // GC gray-list thread (a thread has children to scan)
@@ -227,8 +371,44 @@ preinit_thread :: proc(L: ^Lua_State, g: ^Global_State) {
 	L.errfunc = 0
 	L.oldpc = 0
 	L.errorJmp = nil
+	L.hook = nil
+	L.hookmask = 0
+	L.basehookcount = 0
+	L.hookcount = 0
+	L.transfer_first = 0
+	L.transfer_n = 0
 	L.allowhook = 1
 	L.status = .Ok
+}
+
+// Ensure a frame exists at index `ci + 1`, growing the frame array if the current
+// one is full, and return that index -- our analogue of reference Lua's
+// `next_ci`/`luaE_extendCI`. Reference keeps freed `CallInfo` nodes on a
+// per-thread free list and reuses them; our contiguous array simply grows its
+// capacity and hands back the next slot. Because callers address frames by index,
+// a reallocation here invalidates nothing (Decision 4). Raises `Err_Mem` through
+// the active boundary on allocation failure.
+next_ci :: proc(L: ^Lua_State) -> int {
+	next := L.ci + 1
+	if next >= L.frames_capacity {
+		// Grow the frame array. The 1.5x policy mirrors our other growable
+		// arrays; the exact factor is not observable.
+		newcap := L.frames_capacity + (L.frames_capacity >> 1)
+		if newcap < next + 1 {
+			newcap = next + 1
+		}
+		oldbytes := uint(L.frames_capacity) * size_of(Call_Info)
+		newbytes := uint(newcap) * size_of(Call_Info)
+		block := state_realloc(L, L.frames, oldbytes, newbytes)
+		if block == nil {
+			throw(L, .Err_Mem)
+		}
+		L.frames = ([^]Call_Info)(block)
+		L.frames_capacity = newcap
+	}
+	L.ci = next
+	L.nci = next + 1 // active frames are exactly 0..ci (invariant nci == ci+1)
+	return next
 }
 
 // Point the current frame back at the freshly created base frame and reset the
@@ -243,6 +423,9 @@ reset_ci :: proc(L: ^Lua_State) {
 	set_nil(stack_value(L, 0)) // the base frame's function entry
 	base.top = 0 + 1 + LUA_MINSTACK
 	base.callstatus = CIST_C
+	base.u.c.k = nil // no continuation on the host frame
+	base.u.c.old_errfunc = 0
+	base.u2 = 0
 	L.status = .Ok
 	L.errfunc = 0
 }
@@ -253,7 +436,15 @@ reset_ci :: proc(L: ^Lua_State) {
 // `Err_Mem` through the active protected boundary; the half-done state is safe to
 // tear down because everything not yet allocated is still nil (see
 // `preinit_thread`).
-stack_init :: proc(L: ^Lua_State) -> Thread_Status {
+// Allocate and initialize a thread's value stack and call-frame stack --
+// reference Lua's `stack_init`. Both allocations flow through the state-aware
+// allocator so the GC's byte accounting stays honest. `L1` is the thread being
+// initialized; `L` is the thread whose protected boundary should catch an
+// allocation failure (they are the same for the main thread, but differ when a
+// running thread spawns a coroutine). On failure we raise `Err_Mem` through `L`'s
+// boundary; the half-done state is safe to tear down because everything not yet
+// allocated is still nil (see `preinit_thread`).
+stack_init :: proc(L1: ^Lua_State, L: ^Lua_State) -> Thread_Status {
 	// The value stack: BASIC_STACK_SIZE usable slots plus the EXTRA_STACK
 	// reserve, every slot erased to nil so nothing ever scans garbage.
 	total := BASIC_STACK_SIZE + EXTRA_STACK
@@ -261,23 +452,23 @@ stack_init :: proc(L: ^Lua_State) -> Thread_Status {
 	if sblock == nil {
 		return throw(L, .Err_Mem)
 	}
-	L.stack = ([^]StackValue)(sblock)
+	L1.stack = ([^]StackValue)(sblock)
 	for i in 0 ..< total {
-		set_nil(&L.stack[i].val)
+		set_nil(&L1.stack[i].val)
 	}
-	L.stack_size = BASIC_STACK_SIZE
-	L.tbclist = 0 // no to-be-closed slots yet; anchor at the stack base
-	L.top = 1 // slot 0 is the base frame's function entry
+	L1.stack_size = BASIC_STACK_SIZE
+	L1.tbclist = 0 // no to-be-closed slots yet; anchor at the stack base
+	L1.top = 1 // slot 0 is the base frame's function entry
 
 	// The call-frame stack, seeded with room for a few frames.
 	fblock := state_realloc(L, nil, 0, uint(INITIAL_FRAMES) * size_of(Call_Info))
 	if fblock == nil {
 		return throw(L, .Err_Mem)
 	}
-	L.frames = ([^]Call_Info)(fblock)
-	L.frames_capacity = INITIAL_FRAMES
+	L1.frames = ([^]Call_Info)(fblock)
+	L1.frames_capacity = INITIAL_FRAMES
 
-	reset_ci(L)
+	reset_ci(L1)
 	return .Ok
 }
 
@@ -334,7 +525,7 @@ init_registry :: proc(L: ^Lua_State) -> Thread_Status {
 // finally nils the sentinel to announce the state is complete.
 f_luaopen :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
 	g := L.g
-	if status := stack_init(L); status != .Ok {
+	if status := stack_init(L, L); status != .Ok {
 		return status
 	}
 	if status := init_registry(L); status != .Ok {
@@ -449,4 +640,45 @@ close_state :: proc(L: ^Lua_State) {
 	assert(gettotalbytes(g) == L_Mem(size_of(Global_State)))
 
 	raw_free(g.alloc, g, size_of(Global_State))
+}
+
+// Create a new coroutine thread belonging to the same global state as `L`, anchor
+// it on `L`'s stack, and return it -- reference Lua's `luaE_newthread`. Unlike the
+// main thread (which is embedded in the global block), a coroutine is a standalone
+// `LX` block whose collectable `Lua_State` sits `LUA_EXTRASPACE` bytes in, so that
+// `free_thread` can recover the true base to release it. The new thread inherits
+// the parent's hook configuration. Allocation failures raise `Err_Mem` through
+// `L`'s protected boundary. Returns the new thread, or never returns on OOM.
+luaE_newthread :: proc(L: ^Lua_State) -> ^Lua_State {
+	g := L.g
+	// TODO(phase-7): luaC_checkGC(L) -- a new thread is a good GC step point.
+
+	// Allocate the LX block and register its inner Lua_State as a GC object. We
+	// mirror luaC_newobj by hand because the collectable header lives at offset
+	// `LUA_EXTRASPACE` within the block, not at offset 0.
+	block := state_realloc(L, nil, uint(no_variant(VTHREAD)), size_of(LX))
+	if block == nil {
+		throw(L, .Err_Mem)
+	}
+	lx := (^LX)(block)
+	L1 := &lx.l
+	L1.tt = VTHREAD
+	L1.marked = luaC_white(g)
+	L1.next = g.allgc
+	g.allgc = &L1.header
+
+	// Anchor the fresh thread on the parent stack so it can't be collected before
+	// the caller gets a reference to it.
+	set_gc(stack_value(L, L.top), &L1.header)
+	inc_top(L)
+
+	preinit_thread(L1, g)
+	// Inherit the parent's debug-hook configuration.
+	L1.hookmask = L.hookmask
+	L1.basehookcount = L.basehookcount
+	L1.hook = L.hook
+	L1.hookcount = L1.basehookcount
+
+	stack_init(L1, L) // allocate L1's stacks, raising through L on failure
+	return L1
 }

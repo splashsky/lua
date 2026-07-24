@@ -361,6 +361,121 @@ luaF_closeupval :: proc(L: ^Lua_State, level: int) {
 }
 
 // ---------------------------------------------------------------------------
+// To-be-closed variables (`<close>`)
+// ---------------------------------------------------------------------------
+// A `local x <close> = v` variable must have its `__close` metamethod called when
+// its scope exits -- normally, via an error, or via a `break`/`goto`/`return` that
+// leaves the block. We track these on a per-thread list threaded *through the stack
+// slots themselves*: each to-be-closed slot stores, in its `tbclist.delta` overlay,
+// the distance back to the previous such slot (with dummy nodes inserted when the
+// gap would overflow the 16-bit delta). `L.tbclist` indexes the most recent entry
+// (0 -- the base slot -- means "none").
+
+// The special "status" passed to `luaF_close` meaning "there is no error and the
+// closing call should be pushed at the current top" -- reference Lua's `CLOSEKTOP`.
+CLOSEKTOP :: -1
+
+// The widest gap representable in a single `tbclist.delta` -- reference `MAXDELTA`.
+MAXDELTA :: 0xffff
+
+// Invoke the `__close` metamethod of the value at `obj` (with the error object at
+// `err`, or none if `err < 0`) -- reference Lua's `callclosemethod`. Assumes
+// EXTRA_STACK headroom for the pushed function + arguments.
+callclosemethod :: proc(L: ^Lua_State, obj: int, err: int, yy: bool) {
+	top := L.top
+	func := top
+	tm := luaT_gettmbyobj(L, stack_value(L, obj), TM_CLOSE)
+	set_obj(stack_value(L, top), tm) // the metamethod to call...
+	top += 1
+	set_obj(stack_value(L, top), stack_value(L, obj)) // ...with the value as self
+	top += 1
+	if err >= 0 {
+		set_obj(stack_value(L, top), stack_value(L, err)) // and the error object
+		top += 1
+	}
+	L.top = top
+	if yy {
+		luaD_call(L, func, 0)
+	} else {
+		luaD_callnoyield(L, func, 0)
+	}
+}
+
+// Verify the value at `level` actually has a `__close` metamethod, raising a
+// descriptive error if not -- reference Lua's `checkclosemth`. (The reference names
+// the offending variable via `luaG_findlocal`; that name recovery lands with the
+// full debug layer, so for now we report "?".)
+checkclosemth :: proc(L: ^Lua_State, level: int) {
+	tm := luaT_gettmbyobj(L, stack_value(L, level), TM_CLOSE)
+	if is_nil(tm) {
+		luaG_runerror(L, "variable '%s' got a non-closable value", "?")
+	}
+}
+
+// Prepare and perform the closing call for the variable at `level` -- reference
+// Lua's `prepcallclosemth`. On a normal close there is no error object; on an error
+// close the in-flight error object is materialized just above the variable and
+// passed as the metamethod's second argument.
+prepcallclosemth :: proc(L: ^Lua_State, level: int, status: int, yy: bool) {
+	errobj := -1
+	switch status {
+	case int(Thread_Status.Ok):
+		L.top = level + 1 // the call happens at this level
+		errobj = -1
+	case CLOSEKTOP:
+		errobj = -1
+	case:
+		errobj = level + 1 // error object goes right after the variable
+		set_error_object(L, Thread_Status(status), level + 1)
+	}
+	callclosemethod(L, level, errobj, yy)
+}
+
+// Register the variable at stack index `level` as to-be-closed -- reference Lua's
+// `luaF_newtbcupval`. A `false`/`nil` value is skipped (it needs no closing);
+// otherwise the value must have a `__close` metamethod. Dummy nodes bridge gaps
+// wider than a single delta can express.
+luaF_newtbcupval :: proc(L: ^Lua_State, level: int) {
+	assert(level > L.tbclist, "luaF_newtbcupval: level must be above the current tbc top")
+	if is_false(stack_value(L, level)) {
+		return // nil/false variables never need closing
+	}
+	checkclosemth(L, level) // must be closable
+	for uint(level - L.tbclist) > MAXDELTA {
+		L.tbclist += MAXDELTA // insert a dummy node at the maximum reach
+		L.stack[L.tbclist].tbclist.delta = 0
+	}
+	L.stack[level].tbclist.delta = u16(level - L.tbclist)
+	L.tbclist = level
+}
+
+// Drop the head of the tbc list (and any dummy nodes behind it) -- reference Lua's
+// `poptbclist`.
+poptbclist :: proc(L: ^Lua_State) {
+	tbc := L.tbclist
+	tbc -= int(L.stack[tbc].tbclist.delta)
+	for tbc > 0 && L.stack[tbc].tbclist.delta == 0 {
+		tbc -= MAXDELTA // skip over dummy nodes
+	}
+	L.tbclist = tbc
+}
+
+// Close all open upvalues and to-be-closed variables at or above `level` --
+// reference Lua's `luaF_close`. `status` is `LUA_OK`/`CLOSEKTOP`/an error code and
+// controls whether (and what) error object the closing methods receive. Because our
+// slots are index-addressed, `level` survives any stack reallocation a closing call
+// triggers, so we simply return it unchanged.
+luaF_close :: proc(L: ^Lua_State, level: int, status: int, yy: bool) -> int {
+	luaF_closeupval(L, level) // ordinary upvalues first
+	for L.tbclist >= level && L.tbclist > 0 {
+		tbc := L.tbclist
+		poptbclist(L)
+		prepcallclosemth(L, tbc, status, yy) // run this variable's __close
+	}
+	return level
+}
+
+// ---------------------------------------------------------------------------
 // Prototype construction and teardown
 // ---------------------------------------------------------------------------
 

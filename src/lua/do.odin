@@ -178,3 +178,680 @@ stack_in_use :: proc(L: ^Lua_State) -> int {
 	}
 	return res
 }
+
+// ---------------------------------------------------------------------------
+// C-stack overflow guard
+// ---------------------------------------------------------------------------
+// Every nested call through C (a metamethod, `pcall`, a coroutine resume, the VM
+// re-entering itself) bumps `n_ccalls`. If that count runs away -- e.g. infinite
+// recursion with no Lua-stack growth to catch it -- we would blow the *native*
+// stack. Reference Lua's `luaE_checkcstack` draws the line at LUAI_MAXCCALLS, and
+// once we are already handling that overflow (about 110% of the limit) it escalates
+// to an "error in error handling" throw so we don't recurse forever building the
+// message.
+luaE_checkcstack :: proc(L: ^Lua_State) {
+	if get_ccalls(L) == LUAI_MAXCCALLS {
+		luaG_runerror(L, "C stack overflow")
+	} else if get_ccalls(L) >= (LUAI_MAXCCALLS / 10 * 11) {
+		throw(L, .Err_Err)
+	}
+}
+
+// A raising stack check that discards the status -- our analogue of reference
+// Lua's `checkstackp`/`checkstackGCp` (minus the GC step, which arrives in Phase 7).
+// Because our slots are index-addressed, there is no `func` pointer to correct
+// after a growth, so this is simply `check_stack` with the error left to `throw`.
+check_stack_p :: proc(L: ^Lua_State, n: int) {
+	check_stack(L, n)
+}
+
+// ---------------------------------------------------------------------------
+// Debug hooks
+// ---------------------------------------------------------------------------
+
+// Fire the installed hook for `event` -- reference Lua's `luaD_hook`. Guarded so
+// it is a no-op unless a hook is actually installed and hooks are currently
+// allowed (they cannot fire inside another hook). We widen the visible stack to the
+// whole activation register, ensure minimum working space, run the callback, then
+// restore `top`/`ci.top` exactly. `line`/`ftransfer`/`ntransfer` describe the event
+// for the line and call/return hooks.
+luaD_hook :: proc(L: ^Lua_State, event: i32, line: int, ftransfer: int, ntransfer: int) {
+	hook := L.hook
+	if hook == nil || L.allowhook == 0 {
+		return
+	}
+	ci := &L.frames[L.ci]
+	saved_top := L.top // preserve original tops (index model: values, not pointers)
+	saved_ci_top := ci.top
+	ar: Lua_Debug
+	ar.event = event
+	ar.currentline = i32(line)
+	ar.i_ci = L.ci
+	L.transfer_first = ftransfer
+	L.transfer_n = ntransfer
+	if is_lua_frame(ci) && L.top < ci.top {
+		L.top = ci.top // protect the entire activation register
+	}
+	check_stack(L, LUA_MINSTACK)
+	ci = &L.frames[L.ci]
+	if ci.top < L.top + LUA_MINSTACK {
+		ci.top = L.top + LUA_MINSTACK
+	}
+	L.allowhook = 0 // cannot call hooks inside a hook
+	ci.callstatus |= CIST_HOOKED
+	hook(L, &ar)
+	L.allowhook = 1
+	ci = &L.frames[L.ci]
+	ci.top = saved_ci_top
+	L.top = saved_top
+	ci.callstatus &~= CIST_HOOKED
+}
+
+// The call hook for entering a Lua function -- reference Lua's `luaD_hookcall`.
+// Also resets `oldpc` so the line hook restarts cleanly for the new function.
+luaD_hookcall :: proc(L: ^Lua_State, ci_idx: int) {
+	L.oldpc = 0
+	if (L.hookmask & LUA_MASKCALL) != 0 {
+		ci := &L.frames[ci_idx]
+		event: i32 = LUA_HOOKCALL
+		if (ci.callstatus & CIST_TAIL) != 0 {
+			event = LUA_HOOKTAILCALL
+		}
+		p := ci_func(L, ci).p
+		ci.u.l.savedpc += 1 // hooks assume pc is already incremented
+		luaD_hook(L, event, -1, 1, int(p.numparams))
+		ci = &L.frames[ci_idx]
+		ci.u.l.savedpc -= 1 // put it back
+	}
+}
+
+// The return hook for Lua and C functions; also maintains `oldpc` for the line
+// hook -- reference Lua's static `rethook`. `nres` results sit at the top of the
+// stack. For a vararg Lua function the frame's `func` was shifted past the hidden
+// varargs, so we temporarily undo that shift to report the transfer offset.
+rethook :: proc(L: ^Lua_State, ci_idx: int, nres: int) {
+	ci := &L.frames[ci_idx]
+	if (L.hookmask & LUA_MASKRET) != 0 {
+		firstres := L.top - nres
+		delta := 0
+		if is_lua_frame(ci) {
+			p := ci_func(L, ci).p
+			if (p.flag & PF_VAHID) != 0 {
+				delta = ci.u.l.nextraargs + int(p.numparams) + 1
+			}
+		}
+		ci.func -= delta
+		ftransfer := firstres - ci.func
+		luaD_hook(L, LUA_HOOKRET, -1, ftransfer, nres)
+		ci = &L.frames[ci_idx]
+		ci.func += delta
+	}
+	// Set 'oldpc' from the caller frame, if it is a Lua frame.
+	if ci_idx > 0 {
+		prev := &L.frames[ci_idx - 1]
+		if is_lua_frame(prev) {
+			L.oldpc = prev.u.l.savedpc - 1
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The call protocol: precall / poscall / result movement
+// ---------------------------------------------------------------------------
+
+// Handle a call to a non-function object by looking for a `__call` metamethod --
+// reference Lua's `tryfuncTM`. On success the metamethod is inserted *below* the
+// original object (which becomes its first argument), so the ordinary call path
+// can proceed with the metamethod as the callable. The CIST_CCMT bits count how
+// many `__call` metamethods have been chained (and thus how many extra arguments
+// were pushed); an overflow means a pathological `__call` chain.
+tryfuncTM :: proc(L: ^Lua_State, func: int, status: u32) -> u32 {
+	tm := luaT_gettmbyobj(L, stack_value(L, func), TM_CALL)
+	if is_nil(tm) {
+		luaG_callerror(L, stack_value(L, func))
+	}
+	// Open a slot at `func` by shifting everything above it up by one.
+	p := L.top
+	for p > func {
+		set_obj(stack_value(L, p), stack_value(L, p - 1))
+		p -= 1
+	}
+	L.top += 1 // the caller pre-reserved this slot
+	set_obj(stack_value(L, func), tm) // metamethod becomes the callee
+	if (status & MAX_CCMT) == MAX_CCMT {
+		luaG_runerror(L, "'__call' chain too long")
+	}
+	return status + (u32(1) << CIST_CCMT)
+}
+
+// Move `nres` freshly-produced results down to `res`, padding or trimming to
+// exactly `wanted` -- reference Lua's `genmoveresults`.
+genmoveresults :: proc(L: ^Lua_State, res: int, nres: int, wanted: int) {
+	firstresult := L.top - nres
+	n := nres
+	if n > wanted {
+		n = wanted // caller doesn't want the extras
+	}
+	i := 0
+	for ; i < n; i += 1 {
+		set_obj(stack_value(L, res + i), stack_value(L, firstresult + i))
+	}
+	for ; i < wanted; i += 1 {
+		set_nil(stack_value(L, res + i)) // pad missing results with nil
+	}
+	L.top = res + wanted
+}
+
+// Move a call's results into place, keyed on the encoded "wanted" field --
+// reference Lua's `moveresults`. `fwanted` is `ci.callstatus` masked to the
+// result-count field plus the CIST_TBC flag; the common shapes (no results, one
+// result, all results) are special-cased, and anything with to-be-closed variables
+// or a fixed count >= 2 falls to the general path.
+moveresults :: proc(L: ^Lua_State, res: int, nres: int, fwanted: u32) {
+	switch fwanted {
+	case 0 + 1: // no values needed (a statement call)
+		L.top = res
+		return
+	case 1 + 1: // exactly one value needed (an expression)
+		if nres == 0 {
+			set_nil(stack_value(L, res))
+		} else {
+			set_obj(stack_value(L, res), stack_value(L, L.top - nres))
+		}
+		L.top = res + 1
+		return
+	case u32(LUA_MULTRET + 1): // caller wants every result (encoded as 0)
+		genmoveresults(L, res, nres, nres)
+	case: // two-or-more fixed results, and/or to-be-closed variables
+		wanted := get_nresults(fwanted)
+		r := res
+		if (fwanted & CIST_TBC) != 0 {
+			// Results movement must run after closing to-be-closed variables,
+			// because a __close can yield/err. TBC support lands with the VM's
+			// close op; until a tbc upvalue can exist this branch is unreachable.
+			ci := &L.frames[L.ci]
+			ci.u2 = nres
+			ci.callstatus |= CIST_CLSRET
+			r = luaF_close(L, r, CLOSEKTOP, true)
+			ci.callstatus &~= CIST_CLSRET
+			if L.hookmask != 0 {
+				rethook(L, L.ci, nres)
+			}
+			if wanted == LUA_MULTRET {
+				wanted = nres
+			}
+		}
+		genmoveresults(L, r, nres, wanted)
+	}
+}
+
+// Finish a call: fire the return hook if needed, move results into place, and pop
+// back to the caller frame -- reference Lua's `luaD_poscall`.
+luaD_poscall :: proc(L: ^Lua_State, ci_idx: int, nres: int) {
+	ci := &L.frames[ci_idx]
+	fwanted := ci.callstatus & (CIST_TBC | CIST_NRESULTS)
+	if L.hookmask != 0 && (fwanted & CIST_TBC) == 0 {
+		rethook(L, ci_idx, nres)
+		ci = &L.frames[ci_idx]
+	}
+	moveresults(L, ci.func, nres, fwanted)
+	L.ci = ci_idx - 1 // back to the caller (frames are a stack; caller is one below)
+	L.nci = ci_idx
+}
+
+// Allocate and initialize the next call frame -- reference Lua's `prepCallInfo`.
+// Returns the new frame's index. Only the result-count, CIST_C, and CCMT bits are
+// valid in `status` at this point.
+prepCallInfo :: proc(L: ^Lua_State, func: int, status: u32, top: int) -> int {
+	idx := next_ci(L) // grows the frame array if needed; sets L.ci
+	ci := &L.frames[idx]
+	ci.func = func
+	ci.callstatus = status
+	ci.top = top
+	ci.u2 = 0
+	return idx
+}
+
+// precall for a C function (closure or light) -- reference Lua's `precallC`.
+// C functions run to completion right here: we build their frame, optionally fire
+// the call hook, invoke the native function, then post-process its results. Returns
+// the number of results. NOTE the re-entrancy hazard: `f(L)` can trigger arbitrary
+// nested calls and frame-array growth, so we hold the frame by *index* and
+// re-derive the pointer for `poscall`.
+precallC :: proc(L: ^Lua_State, func: int, status: u32, f: C_Function) -> int {
+	check_stack_p(L, LUA_MINSTACK)
+	ci_idx := prepCallInfo(L, func, status | CIST_C, L.top + LUA_MINSTACK)
+	if (L.hookmask & LUA_MASKCALL) != 0 {
+		narg := L.top - func - 1
+		luaD_hook(L, LUA_HOOKCALL, -1, 1, narg)
+	}
+	n := int(f(L)) // the actual C call; may re-enter the runtime
+	luaD_poscall(L, ci_idx, n)
+	return n
+}
+
+// Prepare a tail call, reusing the current frame `ci_idx` -- reference Lua's
+// `luaD_pretailcall`. `narg1` counts the arguments plus the function itself;
+// `delta` is how far the current frame's `func` was shifted past hidden varargs
+// (so we can restore it before overwriting the frame). Returns the result count for
+// a C callee, or -1 for a Lua callee (which the VM then continues executing in
+// place).
+luaD_pretailcall :: proc(L: ^Lua_State, ci_idx: int, func_in: int, narg1_in: int, delta: int) -> int {
+	func := func_in
+	narg1 := narg1_in
+	status := u32(LUA_MULTRET + 1)
+	for {
+		switch type_tag(stack_value(L, func)) {
+		case VCCL:
+			cl := (^CClosure)(stack_value(L, func).value_.gc)
+			return precallC(L, func, status, cl.f)
+		case VLCF:
+			return precallC(L, func, status, stack_value(L, func).value_.f)
+		case VLCL:
+			ci := &L.frames[ci_idx]
+			p := (^LClosure)(stack_value(L, func).value_.gc).p
+			fsize := int(p.maxstacksize)
+			nfixparams := int(p.numparams)
+			check_stack_p(L, fsize - delta)
+			ci = &L.frames[ci_idx]
+			ci.func -= delta // restore the real frame base (if vararg)
+			for i in 0 ..< narg1 { // slide function + args down over the old frame
+				set_obj(stack_value(L, ci.func + i), stack_value(L, func + i))
+			}
+			func = ci.func
+			for narg1 <= nfixparams { // nil-fill any missing fixed parameters
+				set_nil(stack_value(L, func + narg1))
+				narg1 += 1
+			}
+			ci.top = func + 1 + fsize
+			ci.u.l.savedpc = 0 // start at the callee's first instruction
+			ci.u.l.nextraargs = 0
+			ci.u.l.trap = 0
+			ci.callstatus |= CIST_TAIL
+			L.top = func + narg1
+			return -1
+		case:
+			check_stack_p(L, 1) // room for the __call metamethod
+			status = tryfuncTM(L, func, status)
+			narg1 += 1
+			// loop and retry with the metamethod as the callee
+		}
+	}
+}
+
+// Prepare a call to a function (C or Lua) -- reference Lua's `luaD_precall`. For a
+// C function it also *performs* the call and returns -1 (no Lua frame to run). For
+// a Lua function it builds the frame and returns its index for the VM to execute.
+// A non-function object is retried through its `__call` metamethod.
+luaD_precall :: proc(L: ^Lua_State, func_in: int, nresults: int) -> int {
+	func := func_in
+	status := u32(nresults + 1)
+	for {
+		switch type_tag(stack_value(L, func)) {
+		case VCCL:
+			cl := (^CClosure)(stack_value(L, func).value_.gc)
+			precallC(L, func, status, cl.f)
+			return -1
+		case VLCF:
+			precallC(L, func, status, stack_value(L, func).value_.f)
+			return -1
+		case VLCL:
+			p := (^LClosure)(stack_value(L, func).value_.gc).p
+			narg := L.top - func - 1
+			nfixparams := int(p.numparams)
+			fsize := int(p.maxstacksize)
+			check_stack_p(L, fsize)
+			ci_idx := prepCallInfo(L, func, status, func + 1 + fsize)
+			ci := &L.frames[ci_idx]
+			ci.u.l.savedpc = 0 // starting instruction
+			ci.u.l.nextraargs = 0
+			ci.u.l.trap = 0
+			for narg < nfixparams { // nil-fill missing fixed parameters
+				set_nil(stack_value(L, L.top))
+				L.top += 1
+				narg += 1
+			}
+			return ci_idx
+		case:
+			check_stack_p(L, 1)
+			status = tryfuncTM(L, func, status)
+			// loop and retry with the metamethod as the callee
+		}
+	}
+}
+
+// Call a function through C -- reference Lua's static `ccall`. `inc` bumps the
+// C-call counters (1 for an ordinary call, `nyci` when yields are disallowed).
+// If the callee is a Lua function, we mark its frame FRESH and hand it to the VM;
+// the FRESH bit tells `luaV_execute` to return here (rather than continue an outer
+// Lua frame) when this call returns.
+ccall :: proc(L: ^Lua_State, func: int, nResults: int, inc: u32) {
+	L.n_ccalls += inc
+	if get_ccalls(L) >= LUAI_MAXCCALLS {
+		check_stack_p(L, 0) // release any EXTRA_STACK use before erroring
+		luaE_checkcstack(L)
+	}
+	ci_idx := luaD_precall(L, func, nResults)
+	if ci_idx >= 0 { // a Lua function: run it
+		L.frames[ci_idx].callstatus |= CIST_FRESH
+		luaV_execute(L, ci_idx)
+	}
+	L.n_ccalls -= inc
+}
+
+// Call a function (C or Lua) -- reference Lua's `luaD_call`.
+luaD_call :: proc(L: ^Lua_State, func: int, nResults: int) {
+	ccall(L, func, nResults, 1)
+}
+
+// Like `luaD_call` but forbidding yields across the call -- reference Lua's
+// `luaD_callnoyield`.
+luaD_callnoyield :: proc(L: ^Lua_State, func: int, nResults: int) {
+	ccall(L, func, nResults, nyci)
+}
+
+// ---------------------------------------------------------------------------
+// Stack shrinking (post-error / post-yield housekeeping)
+// ---------------------------------------------------------------------------
+
+// After an error or a completed protected call, the stack may have ballooned --
+// e.g. it was blown up to `ERRORSTACKSIZE` to report an overflow. Reference Lua's
+// `luaD_shrinkstack` reclaims that: if the stack is more than 3x the live usage
+// (and we are no longer handling an overflow), shrink it back to ~2x usage. A
+// failed shrink is harmless, so we never raise here.
+//
+// Reference also shrinks the CallInfo list here (`luaE_shrinkCI`). Our frames are
+// a single growable array addressed by index, so there is nothing analogous to
+// free -- the spare capacity is reused by the next call, not leaked.
+shrink_stack :: proc(L: ^Lua_State) {
+	inuse := stack_in_use(L)
+	max := inuse > MAXSTACK / 3 ? MAXSTACK : inuse * 3
+	if inuse <= MAXSTACK && L.stack_size > max {
+		nsize := inuse > MAXSTACK / 2 ? MAXSTACK : inuse * 2
+		realloc_stack(L, nsize, false) // ok if it fails
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Protected calls (the plumbing behind `pcall` / loading / finalizers)
+// ---------------------------------------------------------------------------
+
+// Adjust the current frame's `top` so it covers everything pushed so far when the
+// caller asked for `LUA_MULTRET` -- reference Lua's `adjustresults` macro. Only the
+// multret shape needs this widening; fixed-count calls already know their extent.
+adjust_results :: #force_inline proc(L: ^Lua_State, nres: int) {
+	if nres <= LUA_MULTRET && L.frames[L.ci].top < L.top {
+		L.frames[L.ci].top = L.top
+	}
+}
+
+// Close any to-be-closed variables at or above `level` under a protected boundary,
+// looping until no fresh error surfaces -- reference Lua's `luaD_closeprotected`.
+// A `__close` handler can itself raise; each time it does we restore the saved
+// frame/hook state and try again from where we left off (each pass has at least one
+// fewer variable to close), returning the final error status (or the original one
+// if everything closed cleanly).
+luaD_closeprotected :: proc(L: ^Lua_State, level: int, status_in: Thread_Status) -> Thread_Status {
+	old_ci := L.ci
+	old_allowhooks := L.allowhook
+	status := status_in
+	for {
+		// Bundle the arguments for the protected close in a small struct so we can
+		// pass them through the opaque `ud` pointer that `run_protected` expects.
+		Close_Args :: struct {
+			level:  int,
+			status: Thread_Status,
+		}
+		args := Close_Args{level, status}
+		st := run_protected(L, proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
+			a := (^Close_Args)(ud)
+			luaF_close(L, a.level, int(a.status), false)
+			return .Ok
+		}, &args)
+		if st == .Ok {
+			return args.status // no more errors: report the status we came in with
+		}
+		// A close raised: undo the partial unwind and go around again.
+		status = st
+		L.ci = old_ci
+		L.allowhook = old_allowhooks
+	}
+}
+
+// The argument bundle for `luaD_pcall` -- the protected procedure plus its own
+// opaque payload, so a single `run_protected` call can forward both.
+PCall_Args :: struct {
+	func: Protected_Proc,
+	ud:   rawptr,
+}
+
+// Run `func` in fully protected mode, restoring thread bookkeeping on error --
+// reference Lua's `luaD_pcall`. On the error path we rewind `ci`/`allowhook`, close
+// any pending to-be-closed variables (which may change the status), install the
+// error object at `old_top`, and shrink the stack back down. `ef` is the message
+// handler index to use while `func` runs; it is restored afterward.
+luaD_pcall :: proc(L: ^Lua_State, func: Protected_Proc, ud: rawptr, old_top: int, ef: int) -> Thread_Status {
+	old_ci := L.ci
+	old_allowhooks := L.allowhook
+	old_errfunc := L.errfunc
+	L.errfunc = ef
+	args := PCall_Args{func, ud}
+	status := run_protected(L, proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
+		a := (^PCall_Args)(ud)
+		return a.func(L, a.ud)
+	}, &args)
+	if status != .Ok { // an error escaped `func`
+		L.ci = old_ci
+		L.allowhook = old_allowhooks
+		status = luaD_closeprotected(L, old_top, status)
+		set_error_object(L, status, old_top)
+		shrink_stack(L) // reclaim any overflow-handling reserve
+	}
+	L.errfunc = old_errfunc
+	return status
+}
+
+// ---------------------------------------------------------------------------
+// Coroutine resume / yield
+// ---------------------------------------------------------------------------
+//
+// Reference Lua switches coroutine stacks with `longjmp`, which cannot resume a
+// stack it already unwound. Our explicit heap frame-stack + trampoline is exactly
+// what makes cooperative resume possible: a yielding coroutine leaves its frames
+// in place and `lua_resume` walks back into them (see docs/ARCHITECTURE.md,
+// Decision 2). The pieces below mirror ldo.c's `resume`/`unroll`/`precover`/
+// `lua_resume`/`lua_yieldk` one-for-one, translated to the index model.
+
+// Finish a `lua_pcallk` that a yield (or an error inside it) interrupted --
+// reference Lua's `finishpcallk`. It recovers the original status stashed in the
+// frame's recover-status field: `Ok` means "was merely interrupted by a yield",
+// anything else means a genuine error whose to-be-closed variables must now finish
+// closing before the error object is installed.
+finishpcallk :: proc(L: ^Lua_State, ci_idx: int) -> Thread_Status {
+	status := get_cist_recst(&L.frames[ci_idx])
+	if status == .Ok { // no error: the pcall was interrupted by a yield
+		status = .Yield
+	} else { // a real error: close pending TBC vars, then place the error object
+		func := L.frames[ci_idx].u2 // saved funcidx
+		L.allowhook = get_oah(&L.frames[ci_idx]) // restore allowhook
+		func = luaF_close(L, func, int(status), true) // may yield or raise
+		set_error_object(L, status, func)
+		shrink_stack(L)
+		set_cist_recst(&L.frames[ci_idx], .Ok) // clear the recorded status
+	}
+	L.frames[ci_idx].callstatus &= ~CIST_YPCALL
+	L.errfunc = L.frames[ci_idx].u.c.old_errfunc
+	return status
+}
+
+// Complete a C frame that a yield interrupted -- reference Lua's `finishCcall`.
+// Two shapes: it was closing to-be-closed variables (just redo `luaD_poscall`), or
+// it was inside `lua_callk`/`lua_pcallk` and must run its continuation function
+// before finishing the enclosing `luaD_call`.
+finishCcall :: proc(L: ^Lua_State, ci_idx: int) {
+	n: int // actual number of results
+	if (L.frames[ci_idx].callstatus & CIST_CLSRET) != 0 { // was closing TBC vars?
+		n = L.frames[ci_idx].u2 // just redo the poscall with the saved count
+	} else {
+		status := Thread_Status.Yield // default when there were no errors
+		if (L.frames[ci_idx].callstatus & CIST_YPCALL) != 0 { // inside a pcallk?
+			status = finishpcallk(L, ci_idx)
+		}
+		adjust_results(L, LUA_MULTRET) // finish the callk
+		kf := L.frames[ci_idx].u.c.k // the continuation
+		ctx := L.frames[ci_idx].u.c.ctx
+		n = int(kf(rawptr(L), i32(status), ctx)) // run it
+	}
+	luaD_poscall(L, ci_idx, n) // finish the luaD_call
+}
+
+// Run every remaining suspended frame of a resumed coroutine to completion (or
+// until another yield long-jumps out) -- reference Lua's `unroll`. C frames get
+// `finishCcall`; Lua frames get their interrupted instruction finished and then
+// execute down to the next C boundary.
+unroll :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
+	for L.ci != 0 { // while there is something above the base frame
+		ci_idx := L.ci
+		if !is_lua_frame(&L.frames[ci_idx]) {
+			finishCcall(L, ci_idx)
+		} else {
+			luaV_finishOp(L) // finish the instruction the yield cut short
+			luaV_execute(L, ci_idx) // run to the next C boundary
+		}
+	}
+	return .Ok
+}
+
+// Find the innermost suspended yieldable protected call (a recover point) --
+// reference Lua's `findpcall`. Walks the frame stack from the current frame down to
+// the base, returning that frame's index or -1 if there is no pending pcall.
+findpcall :: proc(L: ^Lua_State) -> int {
+	for i := L.ci; i >= 0; i -= 1 {
+		if (L.frames[i].callstatus & CIST_YPCALL) != 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// Re-unroll a resumed coroutine while errors keep landing inside protected calls --
+// reference Lua's `precover`. Each recoverable error drops us to its pcall frame,
+// records the status for the pcall to report, and re-runs `unroll` under a fresh
+// boundary. Stops at a clean end, a yield, or an error with no recover point.
+precover :: proc(L: ^Lua_State, status_in: Thread_Status) -> Thread_Status {
+	status := status_in
+	for is_error_status(status) {
+		ci := findpcall(L)
+		if ci < 0 {
+			break
+		}
+		L.ci = ci // drop to the recovery frame
+		set_cist_recst(&L.frames[ci], status) // status for pcall to finish with
+		status = run_protected(L, unroll, nil)
+	}
+	return status
+}
+
+// Signal an error in the *call to* `lua_resume` itself (bad/dead coroutine) rather
+// than an error *inside* the coroutine -- reference Lua's `resume_error`. Such
+// errors must not be caught by the coroutine's own error handling, so we simply
+// leave a message string on the stack and report `Err_Run`.
+resume_error :: proc(L: ^Lua_State, msg: string, narg: int) -> Thread_Status {
+	L.top -= narg // discard the arguments
+	set_string(stack_value(L, L.top), luaS_new(L, msg))
+	L.top += 1
+	return .Err_Run
+}
+
+// The protected body of `lua_resume` -- reference Lua's `resume`. Starts the
+// coroutine's body (first resume) or continues it from where a previous yield left
+// off, then unrolls any remaining frames. `ud` points at the argument count.
+resume :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
+	n := (^int)(ud)^ // number of arguments
+	first_arg := L.top - n // first argument index
+	ci_idx := L.ci
+	if L.status == .Ok { // starting a coroutine?
+		ccall(L, first_arg - 1, LUA_MULTRET, 0) // just call its body
+	} else { // resuming from a previous yield
+		L.status = .Ok // mark it running again
+		if is_lua_frame(&L.frames[ci_idx]) { // yielded inside a hook?
+			L.frames[ci_idx].u.l.savedpc -= 1 // the instruction wasn't run yet
+			L.top = first_arg // discard arguments
+			luaV_execute(L, ci_idx) // continue running Lua code
+		} else { // a "common" yield
+			kf := L.frames[ci_idx].u.c.k
+			if kf != nil { // does it have a continuation?
+				ctx := L.frames[ci_idx].u.c.ctx
+				n = int(kf(rawptr(L), i32(Thread_Status.Yield), ctx))
+			}
+			luaD_poscall(L, ci_idx, n) // finish the luaD_call
+		}
+		unroll(L, nil) // run continuation
+	}
+	return .Ok
+}
+
+// Resume (start or continue) coroutine `L`, whose arguments (and, on the first
+// resume, the body function) are already on its stack -- reference Lua's
+// `lua_resume`. `from` is the resuming thread (for C-call accounting). Returns the
+// final status and, through the return tuple, how many results/yielded values sit
+// on `L`'s stack.
+lua_resume :: proc(L: ^Lua_State, from: ^Lua_State, nargs_in: int) -> (status: Thread_Status, nresults: int) {
+	nargs := nargs_in
+	if L.status == .Ok { // may be starting a coroutine
+		if L.ci != 0 { // not at the base level?
+			return resume_error(L, "cannot resume non-suspended coroutine", nargs), 0
+		} else if L.top - (L.frames[L.ci].func + 1) == nargs { // no body function?
+			return resume_error(L, "cannot resume dead coroutine", nargs), 0
+		}
+	} else if L.status != .Yield { // ended with errors?
+		return resume_error(L, "cannot resume dead coroutine", nargs), 0
+	}
+	L.n_ccalls = from != nil ? get_ccalls(from) : 0
+	if get_ccalls(L) >= LUAI_MAXCCALLS {
+		return resume_error(L, "C stack overflow", nargs), 0
+	}
+	L.n_ccalls += 1
+	status = run_protected(L, resume, &nargs)
+	status = precover(L, status) // keep running through recoverable errors
+	if is_error_status(status) { // an unrecoverable error
+		L.status = status // mark the thread dead
+		set_error_object(L, status, L.top)
+		L.frames[L.ci].top = L.top
+	}
+	nresults = status == .Yield ? L.frames[L.ci].u2 : L.top - (L.frames[L.ci].func + 1)
+	return status, nresults
+}
+
+// Suspend the running coroutine, handing `nresults` values back to whoever resumed
+// it -- reference Lua's `lua_yieldk`. A continuation `k` (with context `ctx`) may be
+// registered to run when the coroutine is next resumed. Yielding is illegal across a
+// non-yieldable C boundary or from the main thread; both raise a runtime error.
+lua_yieldk :: proc(L: ^Lua_State, nresults: int, ctx: K_Context, k: K_Function) -> i32 {
+	ci_idx := L.ci
+	if !yieldable(L) {
+		if L != &L.g.main_thread.l {
+			luaG_runerror(L, "attempt to yield across a C-call boundary")
+		} else {
+			luaG_runerror(L, "attempt to yield from outside a coroutine")
+		}
+	}
+	L.status = .Yield
+	L.frames[ci_idx].u2 = nresults // save the number of yielded values
+	if is_lua_frame(&L.frames[ci_idx]) { // inside a hook?
+		// Hooks can't yield values or carry a continuation; the VM's hook path
+		// (once wired) handles the resume. Nothing to throw -- return to luaD_hook.
+	} else {
+		L.frames[ci_idx].u.c.k = k
+		if k != nil {
+			L.frames[ci_idx].u.c.ctx = ctx
+		}
+		throw(L, .Yield) // long-jump out to the resuming boundary
+	}
+	return 0
+}
+
+// The common no-continuation yield -- reference Lua's `lua_yield`.
+lua_yield :: proc(L: ^Lua_State, nresults: int) -> i32 {
+	return lua_yieldk(L, nresults, K_Context(0), nil)
+}

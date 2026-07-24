@@ -76,6 +76,13 @@ is_dummy :: #force_inline proc "contextless" (t: ^Table) -> bool {
 	return (t.flags & BITDUMMY) != 0
 }
 
+// Point a value at a table -- reference Lua's `sethvalue`. The value's tag is the
+// table tag plus the collectable bit; the header sits at offset 0, so `&t.header`
+// is the object the value references.
+set_table :: #force_inline proc "contextless" (o: ^TValue, t: ^Table) {
+	set_gc(o, &t.header)
+}
+
 // `sizenode == 2^lsizenode`, reference's `sizenode`/`twoto`. Even the dummy has
 // one slot (lsizenode 0 -> 1), so indexing the hash part never needs a guard.
 twoto :: #force_inline proc "contextless" (x: u8) -> int {
@@ -358,7 +365,8 @@ getintfromhash :: proc "contextless" (t: ^Table, key: Integer) -> ^TValue {
 }
 
 // The value slot for an integer key: array part if in range, else the hash part.
-@(private = "file")
+// Package-visible: the VM's GETI/index fast paths and the vararg helpers read the
+// raw slot directly (testing `is_empty`) to skip the copying `luaH_get`.
 luaH_getint_slot :: proc "contextless" (t: ^Table, key: Integer) -> ^TValue {
 	k := ikeyinarray(t, key)
 	if k > 0 {
@@ -397,7 +405,8 @@ Hgetstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
 }
 
 // The value slot for an arbitrary key -- reference Lua's `luaH_get` dispatcher.
-@(private = "file")
+// Package-visible: the VM's GETTABLE/finishget paths test the returned slot with
+// `is_empty` to decide between a hit and the metamethod fallback.
 luaH_getslot :: proc "contextless" (t: ^Table, key: ^TValue) -> ^TValue {
 	switch type_tag(key) {
 	case VNUMINT:
