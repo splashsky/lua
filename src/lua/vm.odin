@@ -41,7 +41,9 @@ l_strton :: proc (o: ^TValue) -> (TValue, bool) {
 	}
 	s := str_slice(str_value(o))
 	v, sz := str_to_number(s)
-	return v, sz == uint(len(s)) && sz != 0
+	// str_to_number reports the count INCLUDING the implicit trailing '\0'
+	// (mirroring reference luaO_str2num), so a full parse consumes len(s)+1.
+	return v, sz == uint(len(s)) + 1
 }
 
 // Try to convert a value (including a numeric string) to a float -- reference
