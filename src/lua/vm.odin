@@ -705,13 +705,24 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 		code := cl.p.code
 		base := L.frames[ci_idx].func + 1 // stack index of R[0]
 		pc := L.frames[ci_idx].u.l.savedpc
-		trap := L.frames[ci_idx].u.l.trap // nonzero while tracing lines/counts
-		// Reference Lua's `startfunc`/`returning` initialize `trap` from
-		// `L->hookmask` on every frame (re)entry, so a hook installed *before* this
-		// frame began executing still takes effect. `settraps` covers the inverse
-		// case (a hook installed while this frame is already the running one).
-		if L.hookmask & (LUA_MASKLINE | LUA_MASKCOUNT) != 0 {
+		// Reference Lua's `luaG_tracecall`, inlined at the `startfunc`/`returning`
+		// entry. `trap` starts from the hook mask; when any hook is active we arm
+		// this frame's `u.l.trap` (so an `updatetrap` after a nested call reloads a
+		// 1 and tracing survives the call) and, on a fresh (non-resuming) entry,
+		// either suppress trapping until *after* the VARARGPREP instruction (vararg
+		// functions) or fire the call hook right away (fixed-arity functions).
+		trap: i32 = 0
+		if L.hookmask != 0 {
+			ci0 := &L.frames[ci_idx]
+			ci0.u.l.trap = 1 // ensure hooks keep being checked after nested calls
 			trap = 1
+			if pc == 0 { // first instruction of a fresh (non-resuming) call?
+				if (cl.p.flag & u8(PF_VAHID | PF_VATAB)) != 0 {
+					trap = 0 // hooks begin at the VARARGPREP instruction
+				} else if (ci0.callstatus & CIST_HOOKYIELD) == 0 {
+					luaD_hookcall(L, ci_idx) // fire the 'call' hook now
+				}
+			}
 		}
 
 		// The dispatch loop. `pc` indexes `code`; `savedpc` is synced from `pc`
@@ -1384,6 +1395,16 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 			case .VARARGPREP:
 				L.frames[ci_idx].u.l.savedpc = pc
 				luaT_adjustvarargs(L, ci_idx, cl.p)
+				// `luaT_adjustvarargs` is a protected point that may have installed
+				// a hook; reload `trap` from the frame (reference's `updatetrap`).
+				// If a hook is now armed this is where a vararg function's call hook
+				// fires, and we mark the *next* opcode as a new line so the line
+				// hook restarts cleanly -- reference Lua's OP_VARARGPREP.
+				trap = L.frames[ci_idx].u.l.trap
+				if trap != 0 {
+					luaD_hookcall(L, ci_idx)
+					L.oldpc = 1 // next opcode is seen as a "new" line
+				}
 				base = L.frames[ci_idx].func + 1 // function has a new base now
 
 			case .EXTRAARG:
