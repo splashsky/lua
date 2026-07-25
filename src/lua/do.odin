@@ -282,8 +282,13 @@ luaD_hookcall :: proc(L: ^Lua_State, ci_idx: int) {
 
 // The return hook for Lua and C functions; also maintains `oldpc` for the line
 // hook -- reference Lua's static `rethook`. `nres` results sit at the top of the
-// stack. For a vararg Lua function the frame's `func` was shifted past the hidden
-// varargs, so we temporarily undo that shift to report the transfer offset.
+// stack. For a vararg Lua function the frame's `func` was moved *past* the hidden
+// varargs when the frame was set up; here we shift it up by `delta` to the
+// "virtual" func (the position transfer offsets are measured from) while the hook
+// runs, then restore it -- exactly mirroring reference's `+= delta` / `-= delta`.
+// Getting this sign right matters: a Lua return hook can call debug.getlocal on
+// the returning frame, and that reads locals relative to `func`, so a wrong shift
+// points `func` at a non-closure slot and crashes.
 rethook :: proc(L: ^Lua_State, ci_idx: int, nres: int) {
 	ci := &L.frames[ci_idx]
 	if (L.hookmask & LUA_MASKRET) != 0 {
@@ -295,11 +300,11 @@ rethook :: proc(L: ^Lua_State, ci_idx: int, nres: int) {
 				delta = ci.u.l.nextraargs + int(p.numparams) + 1
 			}
 		}
-		ci.func -= delta
+		ci.func += delta
 		ftransfer := firstres - ci.func
 		luaD_hook(L, LUA_HOOKRET, -1, ftransfer, nres)
 		ci = &L.frames[ci_idx]
-		ci.func += delta
+		ci.func -= delta
 	}
 	// Set 'oldpc' from the caller frame, if it is a Lua frame.
 	if ci_idx > 0 {

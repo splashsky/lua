@@ -863,15 +863,30 @@ collectvalidlines :: proc(L: ^Lua_State, fv: ^TValue) {
 		active: TValue
 		set_bool(&active, true)
 		currentline := p.linedefined
-		for i in 0 ..< p.sizecode {
-			if p.lineinfo[i] == ABSLINEINFO {
-				currentline = luaG_getfuncline(p, i)
-			} else {
-				currentline += int(p.lineinfo[i])
-			}
+		i := 0
+		// A vararg function begins with OP_VARARGPREP, whose line is the function
+		// header. Reference skips it: advance the running line past instruction 0
+		// but do not mark it, so an all-empty vararg body reports only its real
+		// lines (e.g. just {linedefined} for `function(...) end`).
+		if (p.flag & u8(PF_VAHID | PF_VATAB)) != 0 {
+			currentline = nextline(p, currentline, 0)
+			i = 1
+		}
+		for ; i < p.sizecode; i += 1 {
+			currentline = nextline(p, currentline, i)
 			luaH_setint(L, t, Integer(currentline), &active)
 		}
 	}
+}
+
+// The source line of instruction `pc`, given the running line of `pc-1` -- reference
+// Lua's `nextline`. Relative deltas accumulate; an absolute checkpoint resets.
+@(private = "file")
+nextline :: proc(p: ^Proto, currentline: int, pc: int) -> int {
+	if p.lineinfo[pc] == ABSLINEINFO {
+		return luaG_getfuncline(p, pc)
+	}
+	return currentline + int(p.lineinfo[pc])
 }
 
 // Return the name of local variable number `n` in the frame `ar` describes, and
@@ -893,36 +908,66 @@ lua_getlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok
 		}
 		return string(str_slice(nm)), true
 	}
-	ci := &L.frames[ar.i_ci]
-	if !is_lua_frame(ci) {
-		return "", false // C frames expose no locals
-	}
-	p := ci_func(L, ci).p
-	nm := luaF_getlocalname(p, n, currentpc(ci))
-	if nm == nil {
+	nm, pos, found := findlocal(L, ar.i_ci, n)
+	if !found {
 		return "", false
 	}
-	// Local `n` lives at register (n-1) above the frame base.
-	base := ci.func + 1
-	set_obj(stack_value(L, L.top), stack_value(L, base + (n - 1)))
+	set_obj(stack_value(L, L.top), stack_value(L, pos))
 	L.top += 1
-	return string(str_slice(nm)), true
+	return nm, true
 }
 
 // Set local variable number `n` from the popped top value -- reference
 // `lua_setlocal`.
 lua_setlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok: bool) {
-	ci := &L.frames[ar.i_ci]
-	if !is_lua_frame(ci) {
+	nm, pos, found := findlocal(L, ar.i_ci, n)
+	if !found {
 		return "", false
 	}
-	p := ci_func(L, ci).p
-	nm := luaF_getlocalname(p, n, currentpc(ci))
-	if nm == nil {
-		return "", false
-	}
-	base := ci.func + 1
 	L.top -= 1
-	set_obj(stack_value(L, base + (n - 1)), stack_value(L, L.top))
-	return string(str_slice(nm)), true
+	set_obj(stack_value(L, pos), stack_value(L, L.top))
+	return nm, true
+}
+
+// Locate local variable number `n` in the frame at index `ci_idx` -- reference
+// `luaG_findlocal` (plus its `findvararg` helper). Positive `n` counts declared
+// locals from the frame base; a negative `n` reaches the frame's hidden vararg
+// values (only in the PF_VAHID model, where extras sit just below `func`). A
+// positive slot with no source-level name but still inside the frame's live stack
+// window gets a generic "(temporary)"/"(C temporary)" name, exactly like reference.
+@(private = "file")
+findlocal :: proc(L: ^Lua_State, ci_idx: int, n: int) -> (name: string, pos: int, ok: bool) {
+	ci := &L.frames[ci_idx]
+	base := ci.func + 1
+	found := false
+	if is_lua_frame(ci) {
+		if n < 0 {
+			// Access to vararg values. The extras were hidden just below `func`
+			// when the frame was set up (see luaT_adjustvarargs, PF_VAHID model).
+			p := lua_closure_value(stack_value(L, ci.func)).p
+			if (p.flag & PF_VAHID) != 0 {
+				nextra := ci.u.l.nextraargs
+				if n >= -nextra {
+					return "(vararg)", ci.func - nextra - (n + 1), true
+				}
+			}
+			return "", 0, false // no such vararg
+		}
+		nm := luaF_getlocalname(ci_func(L, ci).p, n, currentpc(ci))
+
+		if nm != nil {
+			name = string(str_slice(nm))
+			found = true
+		}
+	}
+	if !found {
+		// No "standard" name: is `n` still a valid live slot inside this frame?
+		limit := ci_idx == L.ci ? L.top : L.frames[ci_idx + 1].func
+		if n > 0 && (limit - base) >= n {
+			name = is_lua_frame(ci) ? "(temporary)" : "(C temporary)"
+		} else {
+			return "", 0, false // no name
+		}
+	}
+	return name, base + (n - 1), true
 }
