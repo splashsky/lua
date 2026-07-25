@@ -322,8 +322,10 @@ luaT_tryconcatTM :: proc(L: ^Lua_State) {
 
 // An ordering metamethod (`__lt` / `__le`) -- reference Lua's `luaT_callorderTM`.
 // Returns 1 if the metamethod ran and its result is truthy, 0 if it ran and is
-// falsy, and -1 if no metamethod exists (the VM then raises an order error). The
-// scratch result rides `L.top` without permanently advancing it.
+// falsy. When NO metamethod exists reference raises the "attempt to compare"
+// order error *inside* this routine (it never returns a "not found" sentinel);
+// we do the same so every caller (`lessthanothers`, `callorderiTM`) inherits the
+// error without having to test for it. The scratch result rides `L.top`.
 luaT_callorderTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, event: int) -> int {
 	if callbinTM(L, p1, p2, L.top, event) {
 		// The metamethod's result is truthy unless it is nil or false
@@ -333,7 +335,8 @@ luaT_callorderTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, event: int) ->
 		}
 		return 0
 	}
-	return -1
+	luaG_ordererror(L, p1, p2) // no metamethod: raise "attempt to compare ..."
+	return 0 // unreachable (luaG_ordererror diverges); keeps the type checker happy
 }
 
 // An ordering metamethod with one immediate numeric operand -- reference Lua's
