@@ -28,6 +28,12 @@ TARGET="${1:-lua}"
 
 # The collection makes cross-package imports stable and path-independent.
 COLLECTION="-collection:luao=$SRC_DIR"
+
+# On Linux/macOS the default main-thread stack (~8 MiB) comfortably holds the
+# LUAI_MAXCCALLS (200) nested native `luaV_execute` frames Lua permits, so Lua's
+# own C-stack guard turns runaway recursion into a catchable error. Windows only
+# reserves 1 MiB by default, so build.ps1 additionally passes /STACK to the linker;
+# no such flag is needed here.
 if [[ "${DEBUG:-0}" == "1" ]]; then
     OPTIMIZE="-debug"
 else
