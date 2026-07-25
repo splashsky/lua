@@ -721,6 +721,58 @@ luaL_pushresultsize :: proc(B: ^Buffer, sz: uint) {
 	luaL_pushresult(B)
 }
 
+// Remove the last `n` bytes previously added to the buffer -- reference
+// `luaL_buffsub`. Used by the package loader to peel off a trailing separator it
+// had optimistically appended between accumulated error messages.
+luaL_buffsub :: proc(B: ^Buffer, n: uint) {
+	B.n -= n
+}
+
+// Append `s` to the buffer, but with every occurrence of the literal substring `p`
+// replaced by `r` -- reference `luaL_addgsub`. This is a plain (non-pattern) literal
+// substitution, used by the package loader to expand path templates ('?' -> module
+// name) and to turn dotted module names into directory paths ('.' -> path sep).
+luaL_addgsub :: proc(B: ^Buffer, s: string, p: string, r: string) {
+	s := s
+	if len(p) == 0 {
+		// Reference relies on strstr never matching an empty needle in this API
+		// (callers always pass a non-empty pattern); mirror that by doing nothing
+		// but appending the source unchanged.
+		luaL_addstring(B, s)
+		return
+	}
+	for {
+		// Find the next occurrence of `p` in the remaining source.
+		wild := -1
+		if len(p) <= len(s) {
+			for i in 0 ..= len(s) - len(p) {
+				if s[i:i + len(p)] == p {
+					wild = i
+					break
+				}
+			}
+		}
+		if wild < 0 {
+			break
+		}
+		luaL_addlstring(B, transmute([]u8)s[:wild]) // prefix before the match
+		luaL_addstring(B, r) // the replacement
+		s = s[wild + len(p):] // continue after the matched pattern
+	}
+	luaL_addstring(B, s) // trailing suffix after the last match
+}
+
+// Return a copy of `s` with every literal `p` replaced by `r`, pushing it on the
+// stack and returning it -- reference `luaL_gsub`.
+luaL_gsub :: proc(L: ^lua.Lua_State, s: string, p: string, r: string) -> string {
+	b: Buffer
+	luaL_buffinit(L, &b)
+	luaL_addgsub(&b, s, p, r)
+	luaL_pushresult(&b)
+	res, _ := lua.lua_tolstring(L, -1)
+	return res
+}
+
 // --------------------------------------------------------------------------------
 // Chunk loaders
 // --------------------------------------------------------------------------------
