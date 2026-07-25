@@ -793,9 +793,15 @@ auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_
 			}
 		case 't':
 			ar.istailcall = (ci_idx >= 0 && (L.frames[ci_idx].callstatus & CIST_TAIL) != 0) ? 1 : 0
-			// We do not yet track C-continuation extra arguments, so report 0
-			// honestly rather than fabricate a count.
-			ar.extraargs = 0
+			// "extraargs" is how many extra arguments a chain of `__call`
+			// metamethods injected before this call -- reference stores that count
+			// in the CIST_CCMT bits of callstatus (each tryfuncTM bumps it), so we
+			// simply decode it back out here.
+			if ci_idx >= 0 {
+				ar.extraargs = u8((L.frames[ci_idx].callstatus & MAX_CCMT) >> CIST_CCMT)
+			} else {
+				ar.extraargs = 0
+			}
 		case 'r':
 			// The 'r' option reports the value-transfer window of the call being
 			// hooked (which arguments a call received, or which results a return
