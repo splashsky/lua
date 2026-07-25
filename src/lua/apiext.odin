@@ -50,14 +50,20 @@ lua_setwarnf :: proc(L: ^Lua_State, f: Warn_Proc, ud: rawptr) {
 // vector, so callers can both read the shared `UpVal*` and overwrite it (that is
 // how `lua_upvaluejoin` makes two closures share one upvalue). Only valid for Lua
 // closures; the caller must have already established that.
-getupvalref :: proc(L: ^Lua_State, fidx: int, n: int) -> (slot: ^^UpVal, f: ^LClosure) {
+getupvalref :: proc(L: ^Lua_State, fidx: int, n: int) -> (slot: ^^UpVal, f: ^LClosure, ok: bool) {
 	fi := index2value(L, fidx)
 	// Callers are contractually required to pass a Lua closure here. We assert on
 	// the tag rather than silently misbehaving, matching reference `api_check`.
 	assert(type_tag(fi) == VLCL, "lua_upvaluejoin/upvalueid on a non-Lua closure")
 	cl := lua_closure_value(fi)
-	assert(1 <= n && n <= int(cl.p.sizeupvalues), "invalid upvalue index")
-	return &cl.upvals[n - 1], cl
+	// Reference `getupvalref` does NOT assert on an out-of-range index: it returns
+	// a pointer to a static NULL upvalue so callers can detect the miss. We mirror
+	// that with an `ok` flag (nil slot when false); `debug.upvalueid(f, 99)` must
+	// yield nil rather than crash.
+	if 1 <= n && n <= int(cl.p.sizeupvalues) {
+		return &cl.upvals[n - 1], cl, true
+	}
+	return nil, cl, false
 }
 
 // Return a unique identity for the n-th upvalue of the function at `fidx` --
@@ -70,12 +76,17 @@ lua_upvalueid :: proc(L: ^Lua_State, fidx: int, n: int) -> rawptr {
 	fi := index2value(L, fidx)
 	switch type_tag(fi) {
 	case VLCL:
-		slot, _ := getupvalref(L, fidx, n)
+		slot, _, ok := getupvalref(L, fidx, n)
+		if !ok {
+			return nil // out-of-range index -> no identity (reference returns NULL)
+		}
 		return rawptr(slot^) // the UpVal* itself is the identity
 	case VCCL:
 		f := c_closure_value(fi)
-		assert(1 <= n && n <= int(f.nupvalues), "invalid upvalue index")
-		return rawptr(&f.upvalue[n - 1])
+		if 1 <= n && n <= int(f.nupvalues) {
+			return rawptr(&f.upvalue[n - 1])
+		}
+		return nil // out-of-range -> no identity (reference falls through to NULL)
 	case VLCF:
 		return nil // light C functions have no upvalues
 	case:
@@ -90,8 +101,12 @@ lua_upvalueid :: proc(L: ^Lua_State, fidx: int, n: int) -> rawptr {
 // through the other. We fire a forward barrier because `f1` now points at an object
 // (`*up1`) it did not reference before, and the GC must not lose track of it.
 lua_upvaluejoin :: proc(L: ^Lua_State, fidx1: int, n1: int, fidx2: int, n2: int) {
-	up1, f1 := getupvalref(L, fidx1, n1)
-	up2, _ := getupvalref(L, fidx2, n2)
+	up1, f1, ok1 := getupvalref(L, fidx1, n1)
+	up2, _, ok2 := getupvalref(L, fidx2, n2)
+	// Reference `api_check`s that both indices resolved; the stdlib wrapper
+	// (`db_upvaluejoin`) has already validated them, so this only guards against
+	// a misbehaving direct C-API caller.
+	assert(ok1 && ok2, "invalid upvalue index")
 	up1^ = up2^
 	luaC_barrier(L, &f1.header, &up1^.header)
 }
