@@ -781,7 +781,12 @@ auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_
 			}
 			if p != nil {
 				ar.nparams = p.numparams
-				ar.isvararg = (p.flag & PF_VAHID) != 0 ? 1 : 0
+				// "isvararg" must cover BOTH vararg models: the hidden-args model
+				// (PF_VAHID) and the vararg-table model (PF_VATAB). code.odin clears
+				// PF_VAHID when PF_VATAB is set, so testing only PF_VAHID would wrongly
+				// report a `(a,b,...t)` function as non-vararg. Reference's `isvararg`
+				// checks the union of both flags.
+				ar.isvararg = (p.flag & u8(PF_VAHID | PF_VATAB)) != 0 ? 1 : 0
 			} else {
 				ar.nparams = 0
 				ar.isvararg = 1
@@ -792,12 +797,18 @@ auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_
 			// honestly rather than fabricate a count.
 			ar.extraargs = 0
 		case 'r':
-			// The 'r' option reports the value-transfer window of a call, which
-			// the reference only fills in while a hook is running (it reads
-			// L->transferinfo). Our kernel does not record transfer info, so we
-			// honestly report an empty window rather than invent one.
-			ar.ftransfer = 0
-			ar.ntransfer = 0
+			// The 'r' option reports the value-transfer window of the call being
+			// hooked (which arguments a call received, or which results a return
+			// produced). Reference fills it from L->transferinfo, but only when the
+			// described frame is actually running a hook (CIST_HOOKED); otherwise
+			// there is no meaningful transfer to report.
+			if ci_idx >= 0 && (L.frames[ci_idx].callstatus & CIST_HOOKED) != 0 {
+				ar.ftransfer = u16(L.transfer_first)
+				ar.ntransfer = u16(L.transfer_n)
+			} else {
+				ar.ftransfer = 0
+				ar.ntransfer = 0
+			}
 		case 'n':
 			// Recover how this function was reached: its name and the kind of
 			// reference (local/global/field/method/upvalue/metamethod/...),
