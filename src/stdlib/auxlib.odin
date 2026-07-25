@@ -110,7 +110,14 @@ luaL_argerror :: proc(L: ^lua.Lua_State, arg: int, extramsg: string) -> ! {
 	}
 	name := ar.name
 	if name == "" {
-		name = "?"
+		// Reference falls back to a qualified module name (e.g. "table.sort") by
+		// searching package.loaded for the running function before giving up on
+		// "?". pushglobalfuncname leaves the name on the stack on success.
+		if pushglobalfuncname(L, &ar) {
+			name, _ = lua.lua_tostring(L, -1)
+		} else {
+			name = "?"
+		}
 	}
 	luaL_error(L, "bad argument #%d to '%s' (%s)", a, name, extramsg)
 }
