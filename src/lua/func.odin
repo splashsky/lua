@@ -406,13 +406,18 @@ callclosemethod :: proc(L: ^Lua_State, obj: int, err: int, yy: bool) {
 }
 
 // Verify the value at `level` actually has a `__close` metamethod, raising a
-// descriptive error if not -- reference Lua's `checkclosemth`. (The reference names
-// the offending variable via `luaG_findlocal`; that name recovery lands with the
-// full debug layer, so for now we report "?".)
+// descriptive error if not -- reference Lua's `checkclosemth`. The offending
+// variable is named via the debug layer (`findlocal`), exactly as reference names
+// it through `luaG_findlocal`; when no name can be recovered we fall back to "?".
 checkclosemth :: proc(L: ^Lua_State, level: int) {
 	tm := luaT_gettmbyobj(L, stack_value(L, level), TM_CLOSE)
 	if is_nil(tm) {
-		luaG_runerror(L, "variable '%s' got a non-closable value", "?")
+		idx := level - L.frames[L.ci].func // the variable's register index
+		vname := "?"
+		if name, _, ok := findlocal(L, L.ci, idx); ok && name != "" {
+			vname = name
+		}
+		luaG_runerror(L, "variable '%s' got a non-closable value", vname)
 	}
 }
 

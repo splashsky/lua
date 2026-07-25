@@ -477,11 +477,15 @@ luaG_typeerror :: proc(L: ^Lua_State, o: ^TValue, op: string) {
 	typeerror(L, o, op, varinfo(L, o))
 }
 
-// Calling a non-callable object -- reference Lua's `luaG_callerror`. (Name-from-
-// call recovery is deferred with the rest of name guessing; we fall back to
-// `varinfo`, which is currently empty.)
+// Calling a non-callable object -- reference Lua's `luaG_callerror`. We first try
+// to name the object from *how it was called* (`funcnamefromcall` on the current
+// frame): that is what turns a failed `__close`/`__index`/... dispatch into the
+// "(metamethod 'close')" hint. Only if that yields nothing do we fall back to the
+// generic variable-info recovery.
 luaG_callerror :: proc(L: ^Lua_State, o: ^TValue) {
-	typeerror(L, o, "call", varinfo(L, o))
+	kind, name := dbg_funcnamefromcall(L, L.ci)
+	extra := kind != "" ? dbg_formatvarinfo(L, kind, name) : varinfo(L, o)
+	typeerror(L, o, "call", extra)
 }
 
 // A `for` loop given a non-number control value -- reference Lua's `luaG_forerror`.
@@ -952,7 +956,6 @@ lua_setlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok
 // values (only in the PF_VAHID model, where extras sit just below `func`). A
 // positive slot with no source-level name but still inside the frame's live stack
 // window gets a generic "(temporary)"/"(C temporary)" name, exactly like reference.
-@(private = "file")
 findlocal :: proc(L: ^Lua_State, ci_idx: int, n: int) -> (name: string, pos: int, ok: bool) {
 	ci := &L.frames[ci_idx]
 	base := ci.func + 1
