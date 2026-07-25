@@ -180,9 +180,28 @@ ll_loadlib :: proc "c" (Lp: rawptr) -> i32 {
 // -----------------------------------------------------------------------------
 
 // Can `filename` be opened for reading? -- reference `readable` (fopen "r").
+// NOTE: `filename` is frequently a *slice* of a larger expanded path list (see
+// `searchpath_push`), so unlike a whole Lua string it is NOT guaranteed to be
+// NUL-terminated -- the byte just past it is usually the ';' template separator.
+// We therefore copy it into a terminated buffer before handing it to fopen;
+// reinterpreting the slice directly would make fopen read the trailing garbage and
+// spuriously fail for any candidate that isn't the last one in the list.
 @(private = "file")
 readable :: proc(filename: string) -> bool {
-	f := libc.fopen(cstr(filename), cstr("r\x00"))
+	buf: [512]u8
+	name_c: cstring
+	if len(filename) < len(buf) {
+		copy(buf[:], filename)
+		buf[len(filename)] = 0
+		name_c = cstring(&buf[0])
+	} else {
+		tmp := make([]u8, len(filename) + 1)
+		defer delete(tmp)
+		copy(tmp, filename)
+		tmp[len(filename)] = 0
+		name_c = cstring(raw_data(tmp))
+	}
+	f := libc.fopen(name_c, cstring("r"))
 	if f == nil {
 		return false
 	}
