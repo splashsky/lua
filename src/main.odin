@@ -1,26 +1,657 @@
 package main
 
-// main.odin -- the standalone `lua` interpreter, our analogue of `lua.c`.
+// main.odin -- the standalone `lua` interpreter, our faithful analogue of the
+// reference `lua.c`.
 //
-// This is the command-line front end most people mean when they say "lua": it
-// parses arguments, runs scripts or `-e` chunks, loads libraries with `-l`, and
-// drops into a REPL when asked. All of that arrives in Phase 10, once the kernel
-// and standard library exist for it to drive.
+// This is the program most people mean when they say "lua": it parses the command
+// line, runs scripts or `-e` chunks, pulls libraries in with `-l`, honours the
+// LUA_INIT environment hooks, and -- when asked, or when stdin is an interactive
+// terminal -- drops into a read-eval-print loop. Everything here is a direct port
+// of the reference C driver, kept structurally identical (same helper procedures,
+// same control flow, same stack choreography) so that its observable behaviour
+// matches PUC-Rio Lua exactly.
 //
-// For now it's a deliberately tiny but *real* program: it prints the version
-// banner. Its actual job at this stage is to prove the scaffolding hangs
-// together -- that `package main` here can import and link against the kernel
-// package (`luao:lua`) through our build collection.
+// A few honest, documented deviations from the C original, forced by the
+// standard-library-only Odin setting:
+//
+//   * SIGINT handling is omitted. Reference Lua installs a signal handler during
+//     `docall` that converts Ctrl-C into a Lua "interrupted!" error via a debug
+//     hook. Wiring a C signal handler into an Odin runtime is fragile and buys us
+//     nothing for batch execution or the PUC-Rio test suite, so we leave the OS
+//     default in place. Interactive Ctrl-C terminates the process rather than the
+//     running chunk. Nothing else changes.
+//
+//   * The command-line vector is handed to `pmain` through a package-global
+//     (`g_argv`) whose storage lives across the protecting `lua_pcall`, instead of
+//     the reference's `argc` + `lightuserdata(argv)` pair. This is exactly as safe
+//     for a single, non-reentrant interpreter launch; we still push `argc` and the
+//     pointer so the protected-call shape mirrors the original.
+//
+// The interactive readline niceties (history, line editing via libreadline) are
+// intentionally not ported: like the reference's own dlopen-less fallback, we
+// emulate readline with a plain prompt + `fgets`.
 
 import "core:fmt"
+import "core:os"
+import c "core:c"
+import libc "core:c/libc"
+import "base:runtime"
+
 import lua "luao:lua"
+import aux "luao:stdlib"
+
+// --------------------------------------------------------------------------------
+// Small configuration constants that reference Lua keeps in luaconf.h.
+// --------------------------------------------------------------------------------
+
+// The name the interpreter calls itself in diagnostics before it has learned its
+// real argv[0]. Reference LUA_PROGNAME.
+LUA_PROGNAME :: "lua"
+
+// The environment variables consulted at start-up. LUA_INIT_5_5 is tried first
+// (version-suffixed, VERSUFFIX = "_5_5"), then the unversioned LUA_INIT. Reference
+// LUA_INIT_VAR / LUA_INITVARVERSION.
+LUA_INIT_VAR :: "LUA_INIT"
+LUA_INITVARVERSION :: "LUA_INIT_5_5"
+
+// REPL prompts and the input line cap. Reference LUA_PROMPT / LUA_PROMPT2 /
+// LUA_MAXINPUT.
+LUA_PROMPT :: "> "
+LUA_PROMPT2 :: ">> "
+LUA_MAXINPUT :: 512
+
+// The suffix Lua appends to an error message for a statement that ends mid-way
+// through (so the REPL knows to ask for another line). Reference EOFMARK.
+EOFMARK :: "<eof>"
+
+// --------------------------------------------------------------------------------
+// Argument-mask bits, mirroring the reference `#define has_* ...` set exactly.
+// --------------------------------------------------------------------------------
+
+has_error :: 1 // bad option
+has_i :: 2 // -i
+has_v :: 4 // -v
+has_e :: 8 // -e
+has_E :: 16 // -E
+
+// --------------------------------------------------------------------------------
+// Package-global state, matching the reference file-static `progname` and the
+// argv vector we thread into `pmain`.
+// --------------------------------------------------------------------------------
+
+// The program name printed in front of error messages. Reference keeps this in a
+// file-static and blanks it out inside the REPL (so REPL errors carry no prefix);
+// we use the empty string as that "no prefix" sentinel.
+progname: string = LUA_PROGNAME
+
+// The command line, captured in `main` and read back in `pmain`. Storage outlives
+// the protecting `lua_pcall`, so handing `pmain` a pointer to it is safe.
+g_argv: []string
+
+// --------------------------------------------------------------------------------
+// Tiny string helpers. Odin strings coming from `os.args` are NOT guaranteed to be
+// NUL-terminated, so we never index past the end the way the C code leans on the
+// implicit terminator; `byte_at` returns 0 for an out-of-range index, reproducing
+// C's "read the '\0'" behaviour precisely.
+// --------------------------------------------------------------------------------
+
+byte_at :: proc(s: string, i: int) -> u8 {
+	return i < len(s) ? s[i] : 0
+}
+
+// First index of byte `ch` in `s`, or -1. Stands in for C's `strchr`.
+index_byte :: proc(s: string, ch: u8) -> int {
+	for i in 0 ..< len(s) {
+		if s[i] == ch {
+			return i
+		}
+	}
+	return -1
+}
+
+// --------------------------------------------------------------------------------
+// Diagnostics. All of these route through `aux.write_stderr`, which is our
+// `lua_writestringerror`: raw bytes to the C stderr stream, so ordering with the
+// io library stays consistent.
+// --------------------------------------------------------------------------------
+
+// Print the usage summary, blaming `badoption`. Reference print_usage.
+print_usage :: proc(badoption: string) {
+	aux.write_stderr(fmt.tprintf("%s: ", progname))
+	if byte_at(badoption, 1) == 'e' || byte_at(badoption, 1) == 'l' {
+		aux.write_stderr(fmt.tprintf("'%s' needs argument\n", badoption))
+	} else {
+		aux.write_stderr(fmt.tprintf("unrecognized option '%s'\n", badoption))
+	}
+	aux.write_stderr(
+		fmt.tprintf(
+			"usage: %s [options] [script [args]]\n" +
+			"Available options are:\n" +
+			"  -e stat   execute string 'stat'\n" +
+			"  -i        enter interactive mode after executing 'script'\n" +
+			"  -l mod    require library 'mod' into global 'mod'\n" +
+			"  -l g=mod  require library 'mod' into global 'g'\n" +
+			"  -v        show version information\n" +
+			"  -E        ignore environment variables\n" +
+			"  -W        turn warnings on\n" +
+			"  --        stop handling options\n" +
+			"  -         stop handling options and execute stdin\n",
+			progname,
+		),
+	)
+}
+
+// Print `msg` prefixed with `pname` (when non-empty). Reference l_message.
+l_message :: proc(pname: string, msg: string) {
+	if pname != "" {
+		aux.write_stderr(fmt.tprintf("%s: ", pname))
+	}
+	aux.write_stderr(fmt.tprintf("%s\n", msg))
+}
+
+// If `status` is not OK, print the error message sitting on top of the stack and
+// pop it. Returns `status` unchanged so callers can chain. Reference report.
+report :: proc(L: ^lua.Lua_State, status: lua.Thread_Status) -> lua.Thread_Status {
+	if status != .Ok {
+		msg, ok := lua.lua_tolstring(L, -1)
+		if !ok {
+			msg = "(error message not a string)"
+		}
+		l_message(progname, msg)
+		lua.lua_pop(L, 1)
+	}
+	return status
+}
+
+// The message handler installed under every chunk we run: it turns the raw error
+// object into a human-readable string and appends a traceback. Reference
+// msghandler. Note this runs as a Lua C function, so we must establish an Odin
+// `context` before touching anything that allocates.
+msghandler :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := (^lua.Lua_State)(Lp)
+	// `lua_tolstring` also *converts* a numeric error object into a string in
+	// place, so we try it first and only fall back to __tostring / a generic
+	// description when the object is genuinely not string-convertible.
+	msg, ok := lua.lua_tolstring(L, 1)
+	if !ok {
+		if aux.luaL_callmeta(L, 1, "__tostring") && lua.lua_type(L, -1) == lua.LUA_TSTRING {
+			return 1 // the metamethod result itself is the message
+		}
+		msg = lua.lua_pushfstring(L, "(error object is a %s value)", aux.luaL_typename(L, 1))
+	}
+	aux.luaL_traceback(L, L, msg, true, 1) // append a standard traceback
+	return 1
+}
+
+// Call a function already sitting on the stack (with `narg` arguments above it),
+// wrapping it with the message handler so errors arrive pre-tracebacked.
+// Reference docall (minus the SIGINT wiring, see the file header).
+docall :: proc(L: ^lua.Lua_State, narg: int, nres: int) -> lua.Thread_Status {
+	base := lua.lua_gettop(L) - narg // function index
+	lua.lua_pushcfunction(L, msghandler) // push message handler
+	lua.lua_insert(L, base) // put it under function and args
+	status := lua.lua_pcall(L, narg, nres, base)
+	lua.lua_remove(L, base) // remove message handler from the stack
+	return status
+}
+
+// Print the copyright banner. Reference print_version.
+print_version :: proc() {
+	aux.lua_writestring(lua.COPYRIGHT)
+	aux.lua_writeline()
+}
+
+// --------------------------------------------------------------------------------
+// The `arg` table and script arguments.
+// --------------------------------------------------------------------------------
+
+// Build the global `arg` table so that `arg[0]` is the script name, arguments
+// after it get positive indices, and options before it get negative indices.
+// Reference createargtable.
+createargtable :: proc(L: ^lua.Lua_State, argv: []string, argc: int, script: int) {
+	narg := argc - (script + 1) // number of positive indices
+	lua.lua_createtable(L, narg, script + 1)
+	for i in 0 ..< argc {
+		lua.lua_pushstring(L, argv[i])
+		lua.lua_rawseti(L, -2, lua.Integer(i - script))
+	}
+	lua.lua_setglobal(L, "arg")
+}
+
+// Push the contents of `arg` from 1..#arg on the stack and return the count.
+// Reference pushargs.
+pushargs :: proc(L: ^lua.Lua_State) -> int {
+	if lua.lua_getglobal(L, "arg") != lua.LUA_TTABLE {
+		aux.luaL_error(L, "'arg' is not a table")
+	}
+	n := int(aux.luaL_len(L, -1))
+	aux.luaL_checkstack(L, n + 3, "too many arguments to script")
+	for i in 1 ..= n {
+		lua.lua_rawgeti(L, -i, lua.Integer(i))
+	}
+	lua.lua_remove(L, -(n + 1)) // remove table from the stack
+	return n
+}
+
+// --------------------------------------------------------------------------------
+// Chunk loaders: load-then-call, reporting any error. Reference dochunk / dofile /
+// dostring. An empty `name` means "read stdin as a file", exactly as passing NULL
+// to the reference `luaL_loadfile` does.
+// --------------------------------------------------------------------------------
+
+dochunk :: proc(L: ^lua.Lua_State, status: lua.Thread_Status) -> lua.Thread_Status {
+	status := status
+	if status == .Ok {
+		status = docall(L, 0, 0)
+	}
+	return report(L, status)
+}
+
+dofile :: proc(L: ^lua.Lua_State, name: string) -> lua.Thread_Status {
+	return dochunk(L, aux.luaL_loadfilex(L, name))
+}
+
+dostring :: proc(L: ^lua.Lua_State, s: string, name: string) -> lua.Thread_Status {
+	return dochunk(L, aux.luaL_loadbufferx(L, transmute([]u8)s, name))
+}
+
+// Run `globname[=modname]` as `globname = require(modname)`. With no explicit
+// `=modname`, a '-' in the name marks a "version" suffix that is trimmed off the
+// *global* name (the module name keeps it). Reference dolibrary (LUA_IGMARK = "-").
+dolibrary :: proc(L: ^lua.Lua_State, arg: string) -> lua.Thread_Status {
+	globname := arg
+	modname := arg
+	suffix := -1 // index of the '-' version mark in the global name, if any
+	if eq := index_byte(arg, '='); eq >= 0 {
+		globname = arg[:eq] // global name ends at '='
+		modname = arg[eq + 1:] // module name starts after '='
+	} else {
+		suffix = index_byte(modname, '-') // look for a suffix mark
+	}
+	lua.lua_getglobal(L, "require")
+	lua.lua_pushstring(L, modname)
+	status := docall(L, 1, 1) // call 'require(modname)'
+	if status == .Ok {
+		if suffix >= 0 {
+			globname = globname[:suffix] // drop the version suffix
+		}
+		lua.lua_setglobal(L, globname) // globname = require(modname)
+	}
+	return report(L, status)
+}
+
+// --------------------------------------------------------------------------------
+// Argument sweep and option execution.
+// --------------------------------------------------------------------------------
+
+// Walk `argv`, returning the option mask and the "first" index: -1 when there is
+// no program name, 0 when there is no script, otherwise the script index (or the
+// bad-argument index when the mask is has_error). Also records `progname` from
+// argv[0]. Reference collectargs.
+collectargs :: proc(argv: []string) -> (args: int, first: int) {
+	if len(argv) == 0 { // no program name at all
+		return 0, -1
+	}
+	if len(argv[0]) > 0 { // program name present and not empty?
+		progname = argv[0] // save it
+	}
+	i := 1
+	for i < len(argv) {
+		first = i
+		if byte_at(argv[i], 0) != '-' { // not an option?
+			return args, first // stop handling options
+		}
+		switch byte_at(argv[i], 1) { // check the option letter
+		case '-': // "--"
+			if byte_at(argv[i], 2) != 0 { // extra characters after "--"?
+				return has_error, i
+			}
+			// a script name, if any, comes after "--"
+			first = (i + 1 < len(argv)) ? i + 1 : 0
+			return args, first
+		case 0: // "-"
+			return args, first // script "name" is '-'
+		case 'E':
+			if byte_at(argv[i], 2) != 0 {
+				return has_error, i
+			}
+			args |= has_E
+		case 'W':
+			if byte_at(argv[i], 2) != 0 {
+				return has_error, i
+			}
+		case 'i':
+			args |= has_i // (-i implies -v)
+			fallthrough
+		case 'v':
+			if byte_at(argv[i], 2) != 0 {
+				return has_error, i
+			}
+			args |= has_v
+		case 'e':
+			args |= has_e
+			fallthrough
+		case 'l': // both -e and -l need an argument
+			if byte_at(argv[i], 2) == 0 { // no concatenated argument?
+				i += 1 // try the next argv entry
+				if i >= len(argv) || byte_at(argv[i], 0) == '-' {
+					return has_error, i - 1 // missing argument
+				}
+			}
+		case: // invalid option
+			return has_error, i
+		}
+		i += 1
+	}
+	return args, 0 // no script name
+}
+
+// Execute the `-e`, `-l`, and `-W` options in command-line order, stopping at the
+// first error. Reference runargs.
+runargs :: proc(L: ^lua.Lua_State, argv: []string, n: int) -> bool {
+	lua.lua_warning(L, cstring("@off"), false) // stand-alone Lua starts with warnings off
+	i := 1
+	for i < n {
+		option := byte_at(argv[i], 1)
+		switch option {
+		case 'e', 'l':
+			extra: string
+			if byte_at(argv[i], 2) == 0 { // argument is the next entry
+				i += 1
+				extra = argv[i]
+			} else { // argument is glued on: -eCODE
+				extra = argv[i][2:]
+			}
+			status := option == 'e' \
+				? dostring(L, extra, "=(command line)") \
+				: dolibrary(L, extra)
+			if status != .Ok {
+				return false // stop if error
+			}
+		case 'W':
+			lua.lua_warning(L, cstring("@on"), false) // warnings on
+		}
+		i += 1
+	}
+	return true
+}
+
+// Run the LUA_INIT / LUA_INIT_5_5 environment hook, if set. A leading '@' means
+// "the rest is a filename"; otherwise the value is a chunk of Lua source.
+// Reference handle_luainit.
+handle_luainit :: proc(L: ^lua.Lua_State) -> lua.Thread_Status {
+	name := LUA_INITVARVERSION
+	init, ok := os.lookup_env(name, context.temp_allocator)
+	if !ok {
+		name = LUA_INIT_VAR
+		init, ok = os.lookup_env(name, context.temp_allocator)
+	}
+	if !ok {
+		return .Ok
+	}
+	if len(init) > 0 && init[0] == '@' {
+		return dofile(L, init[1:])
+	}
+	return dostring(L, init, fmt.tprintf("=%s", name))
+}
+
+// Load and run the main script named on the command line. A bare "-" (unless it
+// followed a literal "--") means stdin. Reference handle_script.
+handle_script :: proc(L: ^lua.Lua_State, argv: []string, script: int) -> lua.Thread_Status {
+	fname := argv[script]
+	if fname == "-" && argv[script - 1] != "--" {
+		fname = "" // stdin
+	}
+	status := aux.luaL_loadfilex(L, fname)
+	if status == .Ok {
+		n := pushargs(L) // push arguments to script
+		status = docall(L, n, lua.LUA_MULTRET)
+	}
+	return report(L, status)
+}
+
+// --------------------------------------------------------------------------------
+// Read-Eval-Print Loop.
+// --------------------------------------------------------------------------------
+
+// Return the prompt string, leaving its Lua value anchored on the stack (the
+// caller pops it). Honours the `_PROMPT` / `_PROMPT2` globals. Reference get_prompt.
+get_prompt :: proc(L: ^lua.Lua_State, firstline: bool) -> string {
+	name := firstline ? "_PROMPT" : "_PROMPT2"
+	if lua.lua_getglobal(L, name) == lua.LUA_TNIL {
+		return firstline ? LUA_PROMPT : LUA_PROMPT2 // default
+	}
+	// apply tostring over the custom prompt value
+	p := aux.luaL_tolstring(L, -1)
+	lua.lua_remove(L, -2) // remove original value, keep the string
+	return p
+}
+
+// Does `status` mean "syntax error because the statement isn't finished"? True
+// when it's a syntax error whose message ends with the EOFMARK. Reference
+// incomplete.
+incomplete :: proc(L: ^lua.Lua_State, status: lua.Thread_Status) -> bool {
+	if status == .Err_Syntax {
+		msg, ok := lua.lua_tolstring(L, -1)
+		if ok && len(msg) >= len(EOFMARK) && msg[len(msg) - len(EOFMARK):] == EOFMARK {
+			return true
+		}
+	}
+	return false
+}
+
+// Show the prompt, read one line via `fgets`, and push it (newline stripped) on
+// the stack. Returns false at end-of-input. Reference pushline + the dlopen-less
+// lua_readline fallback.
+pushline :: proc(L: ^lua.Lua_State, firstline: bool) -> bool {
+	buffer: [LUA_MAXINPUT]c.char
+	prmt := get_prompt(L, firstline)
+	// emulate lua_readline: print the prompt, flush, then read a line
+	aux.lua_writestring(prmt)
+	libc.fflush(libc.stdout)
+	b := libc.fgets(raw_data(buffer[:]), LUA_MAXINPUT, libc.stdin)
+	lua.lua_pop(L, 1) // remove prompt (get_prompt left it on the stack)
+	if b == nil {
+		return false // no input
+	}
+	// Measure up to the NUL fgets wrote, then trim a trailing newline.
+	l := 0
+	for l < len(buffer) && buffer[l] != 0 {
+		l += 1
+	}
+	if l > 0 && buffer[l - 1] == '\n' {
+		l -= 1
+	}
+	lua.lua_pushlstring(L, transmute([]u8)buffer[:l])
+	return true
+}
+
+// Try to compile the line on top of the stack as `return <line>;` -- the trick
+// that lets the REPL echo bare expressions. On success the compiled chunk
+// replaces the line; on failure the stack is left holding the original line.
+// Reference addreturn.
+addreturn :: proc(L: ^lua.Lua_State) -> lua.Thread_Status {
+	line, _ := lua.lua_tolstring(L, -1) // original line
+	retline := lua.lua_pushfstring(L, "return %s;", line)
+	status := aux.luaL_loadbufferx(L, transmute([]u8)retline, "=stdin")
+	if status == .Ok {
+		lua.lua_remove(L, -2) // remove modified line, keep the chunk
+	} else {
+		lua.lua_pop(L, 2) // pop the failed load result and the modified line
+	}
+	return status
+}
+
+// Warn that `local` declarations don't persist between REPL lines. Reference
+// checklocal (including its quirk of also warning on a bare "local" at end of
+// line, because C's strchr matches the terminating NUL).
+checklocal :: proc(line: string) {
+	i := 0
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i += 1
+	}
+	rest := line[i:]
+	if len(rest) >= 5 && rest[:5] == "local" {
+		if len(rest) == 5 || rest[5] == ' ' || rest[5] == '\t' {
+			aux.write_stderr(
+				"warning: locals do not survive across lines in interactive mode\n",
+			)
+		}
+	}
+}
+
+// Keep reading and concatenating lines until we have a complete statement (or hit
+// an error that isn't "incomplete"). The first line is already on the stack.
+// Reference multiline.
+multiline :: proc(L: ^lua.Lua_State) -> lua.Thread_Status {
+	line, _ := lua.lua_tolstring(L, 1) // get first line
+	checklocal(line)
+	for {
+		status := aux.luaL_loadbufferx(L, transmute([]u8)line, "=stdin") // try it
+		if !incomplete(L, status) || !pushline(L, false) {
+			return status // shouldn't or can't add a continuation line
+		}
+		lua.lua_remove(L, -2) // remove the "incomplete" error message
+		lua.lua_pushstring(L, "\n") // add a newline...
+		lua.lua_insert(L, -2) // ...between the two lines
+		lua.lua_concat(L, 3) // join them
+		line, _ = lua.lua_tolstring(L, 1) // get what we have so far
+	}
+}
+
+// Read one logical line of input and load it: first as an expression (`return
+// ...`), then, failing that, as a statement possibly spanning continuation lines.
+// Returns `eof = true` at end-of-input. Reference loadline (with a boolean eof in
+// place of the C sentinel return of -1).
+loadline :: proc(L: ^lua.Lua_State) -> (status: lua.Thread_Status, eof: bool) {
+	lua.lua_settop(L, 0)
+	if !pushline(L, true) {
+		return .Ok, true // no input
+	}
+	status = addreturn(L)
+	if status != .Ok { // "return ..." didn't compile?
+		status = multiline(L) // try as a statement, maybe multi-line
+	}
+	lua.lua_remove(L, 1) // remove the line, leaving the chunk (if any)
+	return status, false
+}
+
+// Print, via the global `print`, whatever values a REPL chunk left on the stack.
+// Reference l_print.
+l_print :: proc(L: ^lua.Lua_State) {
+	n := lua.lua_gettop(L)
+	if n > 0 { // any result to print?
+		aux.luaL_checkstack(L, lua.LUA_MINSTACK, "too many results to print")
+		lua.lua_getglobal(L, "print")
+		lua.lua_insert(L, 1)
+		if lua.lua_pcall(L, n, 0, 0) != .Ok {
+			msg, _ := lua.lua_tolstring(L, -1)
+			l_message(progname, lua.lua_pushfstring(L, "error calling 'print' (%s)", msg))
+		}
+	}
+}
+
+// The loop itself: read a line, evaluate it, print results, repeat. Errors are
+// reported but don't end the session. Reference doREPL.
+doREPL :: proc(L: ^lua.Lua_State) {
+	oldprogname := progname
+	progname = "" // no 'progname' prefix on errors in interactive mode
+	for {
+		status, eof := loadline(L)
+		if eof {
+			break
+		}
+		if status == .Ok {
+			status = docall(L, 0, lua.LUA_MULTRET)
+		}
+		if status == .Ok {
+			l_print(L)
+		} else {
+			report(L, status)
+		}
+	}
+	lua.lua_settop(L, 0) // clear the stack
+	aux.lua_writeline()
+	progname = oldprogname
+}
+
+// --------------------------------------------------------------------------------
+// pmain -- the whole driver, run inside a protected call so any start-up error is
+// caught and reported rather than crashing. Reference pmain.
+// --------------------------------------------------------------------------------
+
+pmain :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := (^lua.Lua_State)(Lp)
+	argc := int(lua.lua_tointeger(L, 1))
+	argv := (^[]string)(lua.lua_touserdata(L, 2))^
+	args, script := collectargs(argv)
+	// index of the first argument that is not an option (or argc when there is none)
+	optlim := script > 0 ? script : argc
+	aux.luaL_checkversion(L) // check the core is the version we expect
+	if args == has_error { // bad argument?
+		print_usage(argv[script]) // 'script' holds the bad-arg index
+		return 0
+	}
+	if (args & has_v) != 0 { // -v?
+		print_version()
+	}
+	if (args & has_E) != 0 { // -E? tell the libraries to ignore env vars
+		lua.lua_pushboolean(L, true)
+		lua.lua_setfield(L, lua.LUA_REGISTRYINDEX, "LUA_NOENV")
+	}
+	aux.luaL_openlibs(L) // open the standard libraries
+	createargtable(L, argv, argc, script) // build the 'arg' table
+	lua.lua_gc(L, lua.LUA_GCRESTART) // start the collector...
+	lua.lua_gc(L, lua.LUA_GCGEN) // ...in generational mode
+	if (args & has_E) == 0 { // no -E? run LUA_INIT
+		if handle_luainit(L) != .Ok {
+			return 0 // error running LUA_INIT
+		}
+	}
+	if !runargs(L, argv, optlim) { // execute -e / -l / -W
+		return 0 // something failed
+	}
+	if script > 0 { // run the main script, if any
+		if handle_script(L, argv, script) != .Ok {
+			return 0 // stop on error
+		}
+	}
+	if (args & has_i) != 0 { // -i? enter the REPL
+		doREPL(L)
+	} else if script < 1 && (args & (has_e | has_v)) == 0 { // nothing else to do?
+		if lua_stdin_is_tty() { // interactive terminal?
+			print_version()
+			doREPL(L)
+		} else {
+			dofile(L, "") // execute stdin as a file (status deliberately ignored)
+		}
+	}
+	lua.lua_pushboolean(L, true) // signal "no errors"
+	return 1
+}
+
+// --------------------------------------------------------------------------------
+// The process entry point: create a state, call `pmain` under protection, report,
+// and translate success/failure into an exit code. Reference main.
+// --------------------------------------------------------------------------------
 
 main :: proc() {
-	// Reference Lua's banner is exactly its LUA_COPYRIGHT string. We pull it
-	// from the kernel's single source of version truth so the CLI, the
-	// `_VERSION` global, and the bytecode header can never disagree.
-	fmt.println(lua.COPYRIGHT)
+	g_argv = os.args // capture the command line; storage outlives the pcall below
 
-	// TODO(phase-10): argument parsing (-e/-l/-i/-v/-- and script + args),
-	// chunk loading and protected execution, and the interactive REPL.
+	L := lua.new_state(lua.default_allocator()) // create the interpreter state
+	if L == nil {
+		l_message(len(g_argv) > 0 ? g_argv[0] : LUA_PROGNAME, "cannot create state: not enough memory")
+		os.exit(1)
+	}
+	lua.lua_gc(L, lua.LUA_GCSTOP) // stop the GC while we build the state
+	lua.lua_pushcfunction(L, pmain) // the function to protect-call
+	lua.lua_pushinteger(L, lua.Integer(len(g_argv))) // 1st arg: argc
+	lua.lua_pushlightuserdata(L, &g_argv) // 2nd arg: pointer to argv
+	status := lua.lua_pcall(L, 2, 1, 0) // run pmain in protected mode
+	result := lua.lua_toboolean(L, -1) // pmain's boolean result
+	report(L, status)
+	lua.close_state(L)
+	os.exit((result && status == .Ok) ? 0 : 1)
 }
