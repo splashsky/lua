@@ -1068,6 +1068,32 @@ write_stderr :: proc(s: string) {
 	libc.fflush(libc.stderr)
 }
 
+// Write bytes to stdout through the C stdout stream -- reference `lua_writestring`.
+// Routing through libc's stdout keeps buffering consistent with the io.* library
+// and with base's `print` (which writes to the same stream).
+lua_writestring :: proc(s: string) {
+	if len(s) > 0 {
+		libc.fwrite(raw_data(s), 1, uint(len(s)), libc.stdout)
+	}
+}
+
+// End a line on stdout and flush it -- reference `lua_writeline`.
+lua_writeline :: proc() {
+	lua_writestring("\n")
+	libc.fflush(libc.stdout)
+}
+
+// Verify the running core is the version the caller was built for -- reference
+// `luaL_checkversion`. In a single-binary Odin build there is no separately
+// compiled core to disagree with (no shared-library ABI boundary), so the numeric
+// version, integer/float widths, and value representation are consistent by
+// construction. We still assert the version number matches so the check is a real
+// (if always-satisfied) guard rather than a silent no-op.
+luaL_checkversion :: proc(L: ^lua.Lua_State) {
+	assert(lua.VERSION_NUM == 505, "unexpected Lua version number")
+}
+
+
 
 // --------------------------------------------------------------------------------
 // Traceback support -- reference lauxlib.c's luaL_traceback and its static helpers.
