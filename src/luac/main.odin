@@ -198,7 +198,7 @@ pmain :: proc "c" (Lp: rawptr) -> i32 {
 		fatal(msg)
 	}
 	if listing != 0 {
-		list_function(f, listing > 1)
+		list_function(L, f, listing > 1)
 	}
 	if dumping {
 		if output_to_stdout {
@@ -224,13 +224,487 @@ pmain :: proc "c" (Lp: rawptr) -> i32 {
 }
 
 // --------------------------------------------------------------------------------
-// Bytecode listing (`-l`). Implemented by the disassembler port; until then this
-// fails explicitly rather than silently ignoring the request. Reference luaU_print
-// / PrintFunction.
+// Bytecode listing (`-l`). A faithful port of reference luac.c's PrintFunction and
+// its helpers (PrintString / PrintType / PrintConstant / PrintCode / PrintHeader /
+// PrintDebug). This is purely human-readable debug output: it has no bearing on the
+// language semantics or on the byte-compatibility of dumped chunks. We deliberately
+// mirror the reference format character-for-character so `luac -l` output can be
+// diffed against the reference tool (pointer addresses aside, which differ per run).
 // --------------------------------------------------------------------------------
 
-list_function :: proc(f: ^lua.Proto, full: bool) {
-	fatal("listing (-l) is not yet implemented")
+// Reference COMMENT: the tab-semicolon that introduces a trailing annotation.
+@(private = "file")
+LIST_COMMENT :: "\t; "
+
+// isprint for the C locale: printable ASCII, space through tilde. Reference relies
+// on <ctype.h> isprint; in the "C" locale that is exactly this range.
+@(private = "file")
+is_print :: proc(c: int) -> bool {
+	return c >= 0x20 && c <= 0x7e
+}
+
+// "" for a count of one, "s" otherwise -- reference SS(x). Used to pluralize the
+// header's noun list ("1 slot", "3 slots").
+@(private = "file")
+plural :: proc(x: int) -> string {
+	return x == 1 ? "" : "s"
+}
+
+// The name of upvalue `x`, or "-" when it carries no debug name -- reference
+// UPVALNAME.
+@(private = "file")
+upvalname :: proc(f: ^lua.Proto, x: int) -> string {
+	name := f.upvalues[x].name
+	return name != nil ? string(lua.str_slice(name)) : "-"
+}
+
+// The metamethod event name for index `c` -- reference eventname(c). The interned
+// TM_* names live in the global state; the VM stores them there at startup.
+@(private = "file")
+eventname :: proc(L: ^lua.Lua_State, c: int) -> string {
+	return string(lua.str_slice(L.g.tmname[c]))
+}
+
+// Print a string constant with the exact C-string escaping reference luac uses.
+@(private = "file")
+print_string :: proc(ts: ^lua.TString) {
+	fmt.print("\"")
+	for b in lua.str_slice(ts) {
+		c := int(b)
+		switch c {
+		case 34: // '"'
+			fmt.print("\\\"")
+		case 92: // '\\'
+			fmt.print("\\\\")
+		case 7: // '\a'
+			fmt.print("\\a")
+		case 8: // '\b'
+			fmt.print("\\b")
+		case 12: // '\f'
+			fmt.print("\\f")
+		case 10: // '\n'
+			fmt.print("\\n")
+		case 13: // '\r'
+			fmt.print("\\r")
+		case 9: // '\t'
+			fmt.print("\\t")
+		case 11: // '\v'
+			fmt.print("\\v")
+		case:
+			if is_print(c) {
+				fmt.printf("%c", rune(c))
+			} else {
+				fmt.printf("\\%03d", c)
+			}
+		}
+	}
+	fmt.print("\"")
+}
+
+// Print the one-letter type tag of constant `i` (N/B/F/I/S), then a tab --
+// reference PrintType.
+@(private = "file")
+print_type :: proc(f: ^lua.Proto, i: int) {
+	o := &f.k[i]
+	switch lua.type_tag(o) {
+	case lua.VNIL:
+		fmt.print("N")
+	case lua.VFALSE, lua.VTRUE:
+		fmt.print("B")
+	case lua.VNUMFLT:
+		fmt.print("F")
+	case lua.VNUMINT:
+		fmt.print("I")
+	case lua.VSHRSTR, lua.VLNGSTR:
+		fmt.print("S")
+	case:
+		fmt.printf("?%d", int(lua.type_tag(o))) // cannot happen
+	}
+	fmt.print("\t")
+}
+
+// Print constant `i` in source form -- reference PrintConstant. Numbers reuse the
+// kernel's own formatters, so a float renders byte-identically to how the runtime
+// (and reference Lua) would print it, including the trailing ".0" on integral
+// floats.
+@(private = "file")
+print_constant :: proc(f: ^lua.Proto, i: int) {
+	o := &f.k[i]
+	buf: [128]byte
+	switch lua.type_tag(o) {
+	case lua.VNIL:
+		fmt.print("nil")
+	case lua.VFALSE:
+		fmt.print("false")
+	case lua.VTRUE:
+		fmt.print("true")
+	case lua.VNUMFLT, lua.VNUMINT:
+		n := lua.number_to_str(o, buf[:])
+		fmt.print(string(buf[:n]))
+	case lua.VSHRSTR, lua.VLNGSTR:
+		print_string(lua.str_value(o))
+	case:
+		fmt.printf("?%d", int(lua.type_tag(o))) // cannot happen
+	}
+}
+
+// Print the instruction stream, one opcode per line, with the same columns and
+// trailing comments as reference PrintCode.
+@(private = "file")
+print_code :: proc(L: ^lua.Lua_State, f: ^lua.Proto) {
+	code := f.code
+	n := f.sizecode
+	for pc in 0 ..< n {
+		i := code[pc]
+		o := lua.get_opcode(i)
+		// Our kernel's argument extractors deliberately assert that the instruction
+		// is in the matching format (they exist to catch VM misuse). A disassembler,
+		// though, must read whatever fields a given opcode actually uses -- so we
+		// gate each extractor on the opcode's format mode and leave the rest at 0.
+		// Every case below reads only the fields its own opcode defines, so the
+		// zeroed placeholders are never printed. (Reference luac gets away with
+		// computing them all eagerly only because C's GETARG_* macros don't assert.)
+		mode := lua.get_op_mode(o)
+		abc := mode == .iABC
+		vabc := mode == .ivABC
+		a := lua.getarg_A(i)
+		b := abc ? lua.getarg_B(i) : 0
+		c := abc ? lua.getarg_C(i) : 0
+		ax := mode == .iAx ? lua.getarg_Ax(i) : 0
+		bx := mode == .iABx ? lua.getarg_Bx(i) : 0
+		sb := abc ? lua.getarg_sB(i) : 0
+		sc := abc ? lua.getarg_sC(i) : 0
+		vb := vabc ? lua.getarg_vB(i) : 0
+		vc := vabc ? lua.getarg_vC(i) : 0
+		sbx := mode == .iAsBx ? lua.getarg_sBx(i) : 0
+		isk := lua.getarg_k(i)
+		line := lua.luaG_getfuncline(f, pc)
+		isk_s := isk != 0 ? "k" : ""
+
+		fmt.printf("\t%d\t", pc + 1)
+		if line > 0 {
+			fmt.printf("[%d]\t", line)
+		} else {
+			fmt.print("[-]\t")
+		}
+		fmt.printf("%-9s\t", lua.opnames[int(o)])
+
+		switch o {
+		case .MOVE:
+			fmt.printf("%d %d", a, b)
+		case .LOADI:
+			fmt.printf("%d %d", a, sbx)
+		case .LOADF:
+			fmt.printf("%d %d", a, sbx)
+		case .LOADK:
+			fmt.printf("%d %d", a, bx)
+			fmt.print(LIST_COMMENT)
+			print_constant(f, bx)
+		case .LOADKX:
+			fmt.printf("%d", a)
+			fmt.print(LIST_COMMENT)
+			print_constant(f, lua.getarg_Ax(code[pc + 1]))
+		case .LOADFALSE:
+			fmt.printf("%d", a)
+		case .LFALSESKIP:
+			fmt.printf("%d", a)
+		case .LOADTRUE:
+			fmt.printf("%d", a)
+		case .LOADNIL:
+			fmt.printf("%d %d", a, b)
+			fmt.printf(LIST_COMMENT + "%d out", b + 1)
+		case .GETUPVAL:
+			fmt.printf("%d %d", a, b)
+			fmt.printf(LIST_COMMENT + "%s", upvalname(f, b))
+		case .SETUPVAL:
+			fmt.printf("%d %d", a, b)
+			fmt.printf(LIST_COMMENT + "%s", upvalname(f, b))
+		case .GETTABUP:
+			fmt.printf("%d %d %d", a, b, c)
+			fmt.printf(LIST_COMMENT + "%s", upvalname(f, b))
+			fmt.print(" ")
+			print_constant(f, c)
+		case .GETTABLE:
+			fmt.printf("%d %d %d", a, b, c)
+		case .GETI:
+			fmt.printf("%d %d %d", a, b, c)
+		case .GETFIELD:
+			fmt.printf("%d %d %d", a, b, c)
+			fmt.print(LIST_COMMENT)
+			print_constant(f, c)
+		case .SETTABUP:
+			fmt.printf("%d %d %d%s", a, b, c, isk_s)
+			fmt.printf(LIST_COMMENT + "%s", upvalname(f, a))
+			fmt.print(" ")
+			print_constant(f, b)
+			if isk != 0 {
+				fmt.print(" ")
+				print_constant(f, c)
+			}
+		case .SETTABLE:
+			fmt.printf("%d %d %d%s", a, b, c, isk_s)
+			if isk != 0 {
+				fmt.print(LIST_COMMENT)
+				print_constant(f, c)
+			}
+		case .SETI:
+			fmt.printf("%d %d %d%s", a, b, c, isk_s)
+			if isk != 0 {
+				fmt.print(LIST_COMMENT)
+				print_constant(f, c)
+			}
+		case .SETFIELD:
+			fmt.printf("%d %d %d%s", a, b, c, isk_s)
+			fmt.print(LIST_COMMENT)
+			print_constant(f, b)
+			if isk != 0 {
+				fmt.print(" ")
+				print_constant(f, c)
+			}
+		case .NEWTABLE:
+			fmt.printf("%d %d %d%s", a, vb, vc, isk_s)
+			extraargc := lua.getarg_Ax(code[pc + 1]) * (lua.MAXARG_C + 1)
+			fmt.printf(LIST_COMMENT + "%d", vc + extraargc)
+		case .SELF:
+			fmt.printf("%d %d %d%s", a, b, c, isk_s)
+			if isk != 0 {
+				fmt.print(LIST_COMMENT)
+				print_constant(f, c)
+			}
+		case .ADDI:
+			fmt.printf("%d %d %d", a, b, sc)
+		case .ADDK, .SUBK, .MULK, .MODK, .POWK, .DIVK, .IDIVK, .BANDK, .BORK, .BXORK:
+			fmt.printf("%d %d %d", a, b, c)
+			fmt.print(LIST_COMMENT)
+			print_constant(f, c)
+		case .SHLI:
+			fmt.printf("%d %d %d", a, b, sc)
+		case .SHRI:
+			fmt.printf("%d %d %d", a, b, sc)
+		case .ADD, .SUB, .MUL, .MOD, .POW, .DIV, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR:
+			fmt.printf("%d %d %d", a, b, c)
+		case .MMBIN:
+			fmt.printf("%d %d %d", a, b, c)
+			fmt.printf(LIST_COMMENT + "%s", eventname(L, c))
+		case .MMBINI:
+			fmt.printf("%d %d %d %d", a, sb, c, isk)
+			fmt.printf(LIST_COMMENT + "%s", eventname(L, c))
+			if isk != 0 {
+				fmt.print(" flip")
+			}
+		case .MMBINK:
+			fmt.printf("%d %d %d %d", a, b, c, isk)
+			fmt.printf(LIST_COMMENT + "%s ", eventname(L, c))
+			print_constant(f, b)
+			if isk != 0 {
+				fmt.print(" flip")
+			}
+		case .UNM:
+			fmt.printf("%d %d", a, b)
+		case .BNOT:
+			fmt.printf("%d %d", a, b)
+		case .NOT:
+			fmt.printf("%d %d", a, b)
+		case .LEN:
+			fmt.printf("%d %d", a, b)
+		case .CONCAT:
+			fmt.printf("%d %d", a, b)
+		case .CLOSE:
+			fmt.printf("%d", a)
+		case .TBC:
+			fmt.printf("%d", a)
+		case .JMP:
+			sj := lua.getarg_sJ(i)
+			fmt.printf("%d", sj)
+			fmt.printf(LIST_COMMENT + "to %d", sj + pc + 2)
+		case .EQ:
+			fmt.printf("%d %d %d", a, b, isk)
+		case .LT:
+			fmt.printf("%d %d %d", a, b, isk)
+		case .LE:
+			fmt.printf("%d %d %d", a, b, isk)
+		case .EQK:
+			fmt.printf("%d %d %d", a, b, isk)
+			fmt.print(LIST_COMMENT)
+			print_constant(f, b)
+		case .EQI:
+			fmt.printf("%d %d %d", a, sb, isk)
+		case .LTI:
+			fmt.printf("%d %d %d", a, sb, isk)
+		case .LEI:
+			fmt.printf("%d %d %d", a, sb, isk)
+		case .GTI:
+			fmt.printf("%d %d %d", a, sb, isk)
+		case .GEI:
+			fmt.printf("%d %d %d", a, sb, isk)
+		case .TEST:
+			fmt.printf("%d %d", a, isk)
+		case .TESTSET:
+			fmt.printf("%d %d %d", a, b, isk)
+		case .CALL:
+			fmt.printf("%d %d %d", a, b, c)
+			fmt.print(LIST_COMMENT)
+			if b == 0 {
+				fmt.print("all in ")
+			} else {
+				fmt.printf("%d in ", b - 1)
+			}
+			if c == 0 {
+				fmt.print("all out")
+			} else {
+				fmt.printf("%d out", c - 1)
+			}
+		case .TAILCALL:
+			fmt.printf("%d %d %d%s", a, b, c, isk_s)
+			fmt.printf(LIST_COMMENT + "%d in", b - 1)
+		case .RETURN:
+			fmt.printf("%d %d %d%s", a, b, c, isk_s)
+			fmt.print(LIST_COMMENT)
+			if b == 0 {
+				fmt.print("all out")
+			} else {
+				fmt.printf("%d out", b - 1)
+			}
+		case .RETURN0:
+			// no operands
+		case .RETURN1:
+			fmt.printf("%d", a)
+		case .FORLOOP:
+			fmt.printf("%d %d", a, bx)
+			fmt.printf(LIST_COMMENT + "to %d", pc - bx + 2)
+		case .FORPREP:
+			fmt.printf("%d %d", a, bx)
+			fmt.printf(LIST_COMMENT + "exit to %d", pc + bx + 3)
+		case .TFORPREP:
+			fmt.printf("%d %d", a, bx)
+			fmt.printf(LIST_COMMENT + "to %d", pc + bx + 2)
+		case .TFORCALL:
+			fmt.printf("%d %d", a, c)
+		case .TFORLOOP:
+			fmt.printf("%d %d", a, bx)
+			fmt.printf(LIST_COMMENT + "to %d", pc - bx + 2)
+		case .SETLIST:
+			fmt.printf("%d %d %d%s", a, vb, vc, isk_s)
+			if isk != 0 {
+				extraargc := lua.getarg_Ax(code[pc + 1]) * (lua.MAXARG_C + 1)
+				fmt.printf(LIST_COMMENT + "%d", c + extraargc)
+			}
+		case .CLOSURE:
+			fmt.printf("%d %d", a, bx)
+			fmt.printf(LIST_COMMENT + "%p", rawptr(f.p[bx]))
+		case .VARARG:
+			fmt.printf("%d %d %d%s", a, b, c, isk_s)
+			fmt.print(LIST_COMMENT)
+			if c == 0 {
+				fmt.print("all out")
+			} else {
+				fmt.printf("%d out", c - 1)
+			}
+		case .GETVARG:
+			fmt.printf("%d %d %d", a, b, c)
+		case .ERRNNIL:
+			fmt.printf("%d %d", a, bx)
+			fmt.print(LIST_COMMENT)
+			if bx == 0 {
+				fmt.print("?")
+			} else {
+				print_constant(f, bx - 1)
+			}
+		case .VARARGPREP:
+			fmt.printf("%d", a)
+		case .EXTRAARG:
+			fmt.printf("%d", ax)
+		}
+		fmt.print("\n")
+	}
+}
+
+// Print the one-line function header (source span, instruction count, and the
+// param/slot/upvalue/local/constant/function tallies) -- reference PrintHeader.
+@(private = "file")
+print_header :: proc(f: ^lua.Proto) {
+	s := f.source != nil ? string(lua.str_slice(f.source)) : "=?"
+	if len(s) > 0 && (s[0] == '@' || s[0] == '=') {
+		s = s[1:] // skip the @file / =chunk marker
+	} else if len(s) > 0 && s[0] == u8(lua.LUA_SIGNATURE[0]) {
+		s = "(bstring)" // a binary chunk used as a source
+	} else {
+		s = "(string)" // an anonymous string chunk
+	}
+	fmt.printf(
+		"\n%s <%s:%d,%d> (%d instruction%s at %p)\n",
+		f.linedefined == 0 ? "main" : "function",
+		s,
+		f.linedefined,
+		f.lastlinedefined,
+		f.sizecode,
+		plural(f.sizecode),
+		rawptr(f),
+	)
+	fmt.printf(
+		"%d%s param%s, %d slot%s, %d upvalue%s, ",
+		int(f.numparams),
+		(f.flag & (lua.PF_VAHID | lua.PF_VATAB)) != 0 ? "+" : "",
+		plural(int(f.numparams)),
+		int(f.maxstacksize),
+		plural(int(f.maxstacksize)),
+		f.sizeupvalues,
+		plural(f.sizeupvalues),
+	)
+	fmt.printf(
+		"%d local%s, %d constant%s, %d function%s\n",
+		f.sizelocvars,
+		plural(f.sizelocvars),
+		f.sizek,
+		plural(f.sizek),
+		f.sizep,
+		plural(f.sizep),
+	)
+}
+
+// Print the debug tables (constants, locals, upvalues) -- reference PrintDebug.
+// Only emitted for `-l -l` (the "full" listing).
+@(private = "file")
+print_debug :: proc(f: ^lua.Proto) {
+	n := f.sizek
+	fmt.printf("constants (%d) for %p:\n", n, rawptr(f))
+	for i in 0 ..< n {
+		fmt.printf("\t%d\t", i)
+		print_type(f, i)
+		print_constant(f, i)
+		fmt.print("\n")
+	}
+	n = f.sizelocvars
+	fmt.printf("locals (%d) for %p:\n", n, rawptr(f))
+	for i in 0 ..< n {
+		lv := &f.locvars[i]
+		fmt.printf(
+			"\t%d\t%s\t%d\t%d\n",
+			i,
+			string(lua.str_slice(lv.varname)),
+			lv.startpc + 1,
+			lv.endpc + 1,
+		)
+	}
+	n = f.sizeupvalues
+	fmt.printf("upvalues (%d) for %p:\n", n, rawptr(f))
+	for i in 0 ..< n {
+		uv := &f.upvalues[i]
+		fmt.printf("\t%d\t%s\t%d\t%d\n", i, upvalname(f, i), int(uv.instack), int(uv.idx))
+	}
+}
+
+// The top-level lister -- reference PrintFunction. Prints this prototype, then (for
+// full listings) its debug tables, then recurses into every nested prototype.
+list_function :: proc(L: ^lua.Lua_State, f: ^lua.Proto, full: bool) {
+	print_header(f)
+	print_code(L, f)
+	if full {
+		print_debug(f)
+	}
+	for i in 0 ..< f.sizep {
+		list_function(L, f.p[i], full)
+	}
 }
 
 // --------------------------------------------------------------------------------
