@@ -493,6 +493,17 @@ concat_tostr :: proc(L: ^Lua_State, o: ^TValue) -> bool {
 	return false
 }
 
+// Non-converting sibling of `concat_tostr` -- reference Lua's inline
+// `ttisstring(o) || cvt2str(o)` test. `luaV_concat`'s guard must NOT convert the
+// LEFT operand before deciding whether to invoke `__concat`: if the right operand
+// is not string-able the metamethod fires, and it has to see the left operand in
+// its ORIGINAL type (a number stays a number, not a folded string). Only the
+// right operand is eagerly converted (via `concat_tostr`).
+@(private = "file")
+concat_can_str :: proc(o: ^TValue) -> bool {
+	return base_type(o) == TSTRING || is_number(o)
+}
+
 // Concatenate the top `total` stack values into one -- reference Lua's
 // `luaV_concat`. Runs right-to-left, folding runs of coercible values with one
 // allocation each, and falling back to `__concat` for anything else.
@@ -504,10 +515,13 @@ luaV_concat :: proc(L: ^Lua_State, total_in: int) {
 	for {
 		top := L.top
 		n := 2 // values folded this pass (at least the top two)
-		if !concat_tostr(L, stack_value(L, top - 2)) || !concat_tostr(L, stack_value(L, top - 1)) {
+		if !concat_can_str(stack_value(L, top - 2)) || !concat_tostr(L, stack_value(L, top - 1)) {
 			luaT_tryconcatTM(L) // a metamethod (may reshape the stack)
 		} else if is_empty_str(stack_value(L, top - 1)) {
-			// Second operand empty: result is the (already-string) first operand.
+			// Second operand empty: result is the first operand -- but the guard
+			// only CHECKED it, so fold it into a string now (reference does the
+			// same `tostring(L, s2v(top-2))` here).
+			concat_tostr(L, stack_value(L, top - 2))
 		} else if is_empty_str(stack_value(L, top - 2)) {
 			set_obj(stack_value(L, top - 2), stack_value(L, top - 1)) // result is second
 		} else {
