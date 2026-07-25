@@ -771,14 +771,13 @@ hexavalue :: #force_inline proc "contextless" (c: byte) -> Byte {
 // ---------------------------------------------------------------------------
 //
 // Locale note: reference Lua honors the current LC_NUMERIC decimal point when
-// parsing (l_str2d's radix-retry) and formatting (appending the locale radix in
-// tostringbuffFloat). We hardcode '.' throughout, which is exactly faithful in
-// the "C" locale. This is a *deliberate* deferral, not an oversight: the locale
-// can only change via os.setlocale, which doesn't exist until the standard-
-// library phase, so before then the decimal point is always '.'. When
-// os.setlocale lands, wire the radix through localeconv() here and in
-// float_to_str, and reproduce l_str2d's copy-and-retry.
-// TODO(phase-9/stdlib): locale-aware decimal point once os.setlocale exists.
+// parsing and formatting numbers. Parsing is now locale-aware here: the decimal
+// path defers to the C library's `strtod` (which reads the active locale radix)
+// and, mirroring reference `l_str2d`, retries a failed parse with any '.' rewritten
+// to `localeconv()->decimal_point` -- so `tonumber("3.4")` still works under a
+// comma-radix locale like pt_BR. Formatting likewise rides the C library's
+// snprintf in `number_to_str`, so it emits the locale radix too. In the default
+// "C" locale the point is '.', keeping the common case byte-identical.
 
 // Try to parse `s` as an integer, faithful to reference Lua's `l_str2int`.
 // Accepts optional surrounding Lua-ASCII whitespace, an optional sign, and either
@@ -863,6 +862,8 @@ strx_to_number :: proc "contextless" (s: []byte) -> (Number, int, bool) {
 	}
 	i += 2
 
+	dot := lua_getlocaledecpoint() // reference honors the locale radix in hex too
+
 	r: Number = 0.0 // mantissa accumulator
 	sigdig := 0 // significant digits read
 	nosigdig := 0 // leading zeros (non-significant)
@@ -871,7 +872,7 @@ strx_to_number :: proc "contextless" (s: []byte) -> (Number, int, bool) {
 
 	for i < n {
 		c := s[i]
-		if c == '.' {
+		if c == dot {
 			if hasdot {break} 	// a second dot ends the numeral
 			hasdot = true
 		} else if is_xdigit(c) {
@@ -926,11 +927,73 @@ strx_to_number :: proc "contextless" (s: []byte) -> (Number, int, bool) {
 	return libc.ldexp(r, i32(e)), end, true
 }
 
+// Return the current locale's decimal-point character (`localeconv()->decimal_point[0]`,
+// exactly reference Lua's `lua_getlocaledecpoint`). In the default "C" locale this is
+// '.'; under e.g. pt_BR it becomes ','. We fall back to '.' if the C library hands us
+// an empty or null string, so parsing never breaks on a degenerate locale.
+lua_getlocaledecpoint :: proc "contextless" () -> byte {
+	lc := libc.localeconv()
+	if lc != nil && lc.decimal_point != nil {
+		dp := ([^]byte)(lc.decimal_point)
+		if dp[0] != 0 {
+			return dp[0]
+		}
+	}
+	return '.'
+}
+
+// Run the C library's `strtod` over a byte slice and report the parsed value plus
+// how many bytes it consumed (0 if it recognized nothing). Shared by the verbatim
+// and locale-retry decimal attempts so both go through identical NUL-termination.
+@(private = "file")
+strtod_slice :: proc(s: []byte) -> (Number, int) {
+	n := len(s)
+	buf := make([]byte, n + 1, context.temp_allocator)
+	copy(buf, s)
+	buf[n] = 0
+	base := raw_data(buf)
+	endptr: [^]libc.char
+	val := libc.strtod(cstring(base), &endptr)
+	return val, int(uintptr(endptr) - uintptr(base))
+}
+
+// Convert one float spelling -- decimal or hex -- with a whole-string check,
+// faithful to reference Lua's `l_str2dloc`. The decimal path defers to the C
+// library's `strtod` (locale-aware); the hex path uses our pure-Odin
+// `strx_to_number`. Either way the entire slice, bar trailing spaces, must be
+// consumed. Returning ok=false is precisely what triggers the locale
+// decimal-point retry in `str_to_double`.
+@(private = "file")
+str2dloc :: proc(s: []byte, mode: byte) -> (Number, bool) {
+	val: Number
+	end: int
+	if mode == 'x' {
+		ok: bool
+		val, end, ok = strx_to_number(s)
+		if !ok {
+			return 0, false
+		}
+	} else {
+		val, end = strtod_slice(s)
+		if end == 0 {
+			return 0, false
+		}
+	}
+	for end < len(s) && is_space(s[end]) {end += 1}
+	if end != len(s) {
+		return 0, false
+	}
+	return val, true
+}
+
 // Parse `s` as a decimal or hexadecimal float, faithful to reference Lua's
 // `l_str2d`. "inf"/"nan" spellings are rejected (Lua numerals never name them).
-// The decimal path defers to the C library's `strtod` (matching reference Lua's
-// `lua_str2number`); the hex path uses our pure-Odin `strx_to_number`. The whole
-// slice must be consumed apart from trailing spaces.
+// We first try the string verbatim, then -- exactly like reference -- retry with
+// any '.' rewritten to the current locale's decimal point. That retry is what lets
+// `tonumber("3.4")` (or the hex `"0x.41"`) still parse while a comma-radix locale
+// like pt_BR is active: the C library / our hex parser expect the locale radix, so
+// we swap the source '.' for the ',' they want and parse again. Both attempts
+// demand the whole slice (bar trailing spaces) be consumed.
 @(private = "file")
 str_to_double :: proc(s: []byte) -> (Number, bool) {
 	n := len(s)
@@ -947,35 +1010,21 @@ str_to_double :: proc(s: []byte) -> (Number, bool) {
 		return 0, false // reject 'inf'/'nan'
 	}
 
-	val: Number
-	end: int
-	if mode == 'x' {
-		ok: bool
-		val, end, ok = strx_to_number(s)
-		if !ok {
-			return 0, false
+	val, ok := str2dloc(s, mode)
+	if !ok {
+		dp := lua_getlocaledecpoint()
+		dot := -1
+		for c, i in s {
+			if c == '.' {dot = i; break}
 		}
-	} else {
-		// Decimal via C strtod on a NUL-terminated copy. strtod reports how far it
-		// got via endptr, which we turn back into a slice index.
-		buf := make([]byte, n + 1, context.temp_allocator)
-		copy(buf, s)
-		buf[n] = 0
-		base := raw_data(buf)
-		endptr: [^]libc.char
-		val = libc.strtod(cstring(base), &endptr)
-		end = int(uintptr(endptr) - uintptr(base))
-		if end == 0 {
-			return 0, false // nothing recognized
+		if dp != '.' && dot >= 0 {
+			buf2 := make([]byte, n, context.temp_allocator)
+			copy(buf2, s)
+			buf2[dot] = dp
+			val, ok = str2dloc(buf2, mode)
 		}
 	}
-
-	// Only trailing whitespace may follow the number.
-	for end < n && is_space(s[end]) {end += 1}
-	if end != n {
-		return 0, false
-	}
-	return val, true
+	return val, ok
 }
 
 // Convert a Lua source string to a number value, faithful to `luaO_str2num`:
