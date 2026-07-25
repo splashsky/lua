@@ -1256,11 +1256,112 @@ int_arith :: proc "contextless" (op: Arith_Op, v1, v2: Integer) -> (Integer, boo
 	return 0, true
 }
 
+// A correct IEEE-754 double `fmod`, implemented in pure Odin.
+//
+// Why not `libc.fmod`? On at least one of our target toolchains (Windows/MSVC via
+// Odin's `core:c/libc` binding) the linked `fmod` is broken for large magnitudes:
+// `fmod(2^54, 3)` wrongly yields `0` instead of `1`, because that implementation
+// falls back to the naive `x - trunc(x/y)*y` which loses all precision once `x`
+// exceeds `2^53`. `core:math.mod` has the same flaw (`x - round(x/y)*y`). Faithful
+// Lua semantics (and the PUC math.lua suite, which checks `2^i % 3` up to the float
+// range) demand an exact remainder, so we compute it ourselves the classic way:
+// long division on the raw significand bits, exactly as fdlibm/musl do. This is
+// also nicely in the spirit of our std-lib-only mandate -- one less libc dependency.
+//
+// The remainder returned here has the SIGN OF `x` and satisfies `|result| < |y|`,
+// matching C `fmod`. The Lua-visible sign correction (remainder takes the divisor's
+// sign) is applied separately in `flt_mod` below.
+num_fmod :: proc "contextless" (x, y: Number) -> Number {
+	ux := transmute(u64)x
+	uy := transmute(u64)y
+	ex := int(ux >> 52) & 0x7ff // biased exponent of x
+	ey := int(uy >> 52) & 0x7ff // biased exponent of y
+	sx := ux >> 63 // sign bit of x
+	uxi := ux
+
+	// If y is zero, NaN, or infinite -- or x is NaN/infinite -- the result is NaN
+	// (0/0 style), which we produce arithmetically so it carries the right payload.
+	if (uy << 1) == 0 || ey == 0x7ff || ex == 0x7ff {
+		return (x * y) / (x * y)
+	}
+	// |x| <= |y|: either x is already the remainder, or (if equal magnitude) 0.
+	if (uxi << 1) <= (uy << 1) {
+		if (uxi << 1) == (uy << 1) {
+			return 0 * x // signed zero
+		}
+		return x
+	}
+
+	// Normalize x: turn its significand into an explicit-leading-1 mantissa and let
+	// `ex` become the true (unbiased-ish) exponent used by the division loop below.
+	if ex == 0 { // subnormal x
+		i := uxi << 12
+		for i >> 63 == 0 {
+			ex -= 1
+			i <<= 1
+		}
+		uxi <<= u64(-ex + 1)
+	} else {
+		uxi &= (~u64(0)) >> 12
+		uxi |= u64(1) << 52
+	}
+	// Normalize y the same way.
+	if ey == 0 { // subnormal y
+		i := uy << 12
+		for i >> 63 == 0 {
+			ey -= 1
+			i <<= 1
+		}
+		uy <<= u64(-ey + 1)
+	} else {
+		uy &= (~u64(0)) >> 12
+		uy |= u64(1) << 52
+	}
+
+	// x mod y: repeated shift-and-subtract long division on the mantissas.
+	for ex > ey {
+		i := uxi - uy
+		if i >> 63 == 0 { // no borrow: subtraction was valid
+			if i == 0 {
+				return 0 * x
+			}
+			uxi = i
+		}
+		uxi <<= 1
+		ex -= 1
+	}
+	{
+		i := uxi - uy
+		if i >> 63 == 0 {
+			if i == 0 {
+				return 0 * x
+			}
+			uxi = i
+		}
+	}
+	// Renormalize the remainder's leading 1 back into bit 52.
+	for uxi >> 52 == 0 {
+		uxi <<= 1
+		ex -= 1
+	}
+
+	// Reassemble the double: bias the exponent (or shift down into subnormal range),
+	// then restore x's sign.
+	if ex > 0 {
+		uxi -= u64(1) << 52
+		uxi |= u64(ex) << 52
+	} else {
+		uxi >>= u64(-ex + 1)
+	}
+	uxi |= sx << 63
+	return transmute(Number)uxi
+}
+
 // Float modulus, faithful to `luaV_modf` / `luai_nummod`: an `fmod` corrected so
 // the remainder takes the sign of the divisor.
 @(private = "file")
 flt_mod :: proc "contextless" (a, b: Number) -> Number {
-	m := libc.fmod(a, b)
+	m := num_fmod(a, b)
 	if (m > 0 ? b < 0 : (m < 0 && b > 0)) {
 		m += b
 	}

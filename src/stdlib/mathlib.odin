@@ -247,7 +247,7 @@ math_fmod :: proc "c" (Lp: rawptr) -> i32 {
 	} else {
 		a := f64(luaL_checknumber(L, 1))
 		b := f64(luaL_checknumber(L, 2))
-		lua.lua_pushnumber(L, lua.Number(libc.fmod(a, b)))
+		lua.lua_pushnumber(L, lua.Number(lua.num_fmod(a, b)))
 	}
 	return 1
 }
