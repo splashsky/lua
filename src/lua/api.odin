@@ -219,8 +219,18 @@ lua_rotate :: proc(L: ^Lua_State, idx: int, n_rot: int) {
 	t := L.top - 1 // end of the affected segment
 	p := index2stack(L, idx) // start of the affected segment
 	api_check(L.tbclist < p, "moving a to-be-closed variable")
-	m := n_rot >= 0 ? t - n_rot : p - n_rot - 1 // end of the prefix to reverse
-	api_check(p <= m && m <= t, "invalid 'n'")
+	// Length of the segment [p, t]. Reference Lua requires the caller to pass a
+	// rotation count already within [-len, len] and only *checks* it under an
+	// api-check that is compiled out of release builds -- which is why a legitimate
+	// degenerate call like `lua_insert(L, -1)` (rotate a single-element segment by
+	// 1) works there despite failing that check. We keep our api-checks live for
+	// safety, so we instead reduce the count modulo the length (Euclidean `%%`, so
+	// the result is always in [0, len)). This is identical to reference's `t - n`
+	// for every in-range count and gracefully folds the full-rotation boundary into
+	// the identity case rather than tripping an assertion.
+	length := t - p + 1
+	api_check(length > 0, "invalid 'n'")
+	m := t - (n_rot %% length) // end of the prefix to reverse
 	reverse_slice(L, p, m) // reverse the prefix
 	reverse_slice(L, m + 1, t) // reverse the suffix
 	reverse_slice(L, p, t) // reverse the whole
