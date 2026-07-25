@@ -447,8 +447,15 @@ auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_
 				ar.lastlinedefined = -1
 				ar.what = "C"
 			}
+			// `luaO_chunkid` writes `w` bytes but leaves no terminator (its other
+			// callers slice by the return value). `short_src`, however, is a fixed
+			// array consumed elsewhere as a NUL-terminated C string, and the same
+			// `Lua_Debug` record is reused across frames (e.g. in `luaL_traceback`).
+			// Without a terminator a short label like "[C]" would show stale bytes
+			// from a previous, longer source. `w` is always < LUA_IDSIZE, so there
+			// is room to place the NUL.
 			w := luaO_chunkid(ar.short_src[:], ar.source)
-			_ = w
+			ar.short_src[w] = 0
 		case 'l':
 			ar.currentline = (p != nil && ci_idx >= 0) ? i32(getcurrentline(L, &L.frames[ci_idx])) : -1
 		case 'u':
