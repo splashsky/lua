@@ -16,14 +16,15 @@ package lua
 // messages before raising. When there is no source (an unnamed chunk), Lua uses a
 // bare "?" in place of the chunk id.
 luaG_addinfo :: proc(L: ^Lua_State, msg: string, src: ^TString, line: int) -> ^TString {
-	buff: [LUA_IDSIZE]u8
-	idstr: string
-	if src != nil {
-		w := luaO_chunkid(buff[:], string(str_slice(src)))
-		idstr = string(buff[:w])
-	} else {
-		idstr = "?"
+	// Reference `luaG_addinfo`: with no debug info the source pointer is nil, and
+	// BOTH the chunk id and the line render as "?" (a stripped chunk carries no
+	// line table, so there is no meaningful number to print -- not even -1).
+	if src == nil {
+		return luaO_pushfstring(L, "?:?: %s", msg)
 	}
+	buff: [LUA_IDSIZE]u8
+	w := luaO_chunkid(buff[:], string(str_slice(src)))
+	idstr := string(buff[:w])
 	return luaO_pushfstring(L, "%s:%d: %s", idstr, line, msg)
 }
 
