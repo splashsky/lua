@@ -1306,25 +1306,30 @@ lua_isyieldable :: proc(L: ^Lua_State) -> bool {
 // `lua_getupvalue`/`lua_setupvalue`. Reference Lua's `aux_upvalue`. `owner`
 // receives the closure object (for the write barrier on set).
 @(private = "file")
-aux_upvalue :: proc(fi: ^TValue, n: int) -> (name: ^TString, val: ^TValue, owner: ^GCObject) {
+aux_upvalue :: proc(fi: ^TValue, n: int) -> (name: string, val: ^TValue, owner: ^GCObject) {
 	switch type_tag(fi) {
 	case VCCL:
 		f := c_closure_value(fi)
 		if !(1 <= n && n <= int(f.nupvalues)) {
-			return nil, nil, nil
+			return "", nil, nil
 		}
-		// Native closures capture nameless values (reference reports "").
-		return nil, &f.upvalue[n - 1], &f.header
+		// Native closures capture nameless values -- reference reports "" for a
+		// C upvalue (distinct from the "(no name)" a stripped Lua closure gives).
+		return "", &f.upvalue[n - 1], &f.header
 	case VLCL:
 		f := lua_closure_value(fi)
 		p := f.p
 		if !(1 <= n && n <= int(p.sizeupvalues)) {
-			return nil, nil, nil
+			return "", nil, nil
 		}
+		// A Lua closure always has a real upvalue; when its debug name is absent
+		// (a chunk compiled/loaded with stripped debug info) reference reports the
+		// placeholder "(no name)" rather than an empty string.
 		nm := p.upvalues[n - 1].name
-		return nm, upval_value(f.upvals[n - 1]), &f.header
+		name = nm == nil ? "(no name)" : string(str_slice(nm))
+		return name, upval_value(f.upvals[n - 1]), &f.header
 	case:
-		return nil, nil, nil
+		return "", nil, nil
 	}
 }
 
@@ -1338,7 +1343,7 @@ lua_getupvalue :: proc(L: ^Lua_State, funcindex, n: int) -> (name: string, ok: b
 	}
 	set_obj(stack_value(L, L.top), val)
 	api_incr_top(L)
-	return nm == nil ? "" : string(str_slice(nm)), true
+	return nm, true
 }
 
 // Set the n-th upvalue of the closure at `funcindex` from the popped top value --
@@ -1354,5 +1359,5 @@ lua_setupvalue :: proc(L: ^Lua_State, funcindex, n: int) -> (name: string, ok: b
 	if is_collectable(stack_value(L, L.top)) {
 		luaC_barrier(L, owner, gc_value(stack_value(L, L.top)))
 	}
-	return nm == nil ? "" : string(str_slice(nm)), true
+	return nm, true
 }
