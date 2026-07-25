@@ -839,33 +839,36 @@ getF :: proc "c" (L: ^lua.Lua_State, ud: rawptr, size: ^uint) -> [^]u8 {
 	return &lf.buff[0]
 }
 
-// Skip a UTF-8 BOM and a leading `#!` line before compiling -- reference
-// `skipcomment`. Returns the first significant byte via `c`.
-skipcomment :: proc(lf: ^Load_F, c: ^i32) {
-	bom := [3]i32{0xEF, 0xBB, 0xBF}
-	ci := libc.getc(lf.f)
-	// Consume a BOM if the first bytes match it exactly.
-	i := 0
-	for i < 3 && ci == bom[i] {
-		lf.buff[lf.n] = u8(ci)
-		lf.n += 1
-		ci = libc.getc(lf.f)
-		i += 1
+// Skip a leading UTF-8 BOM if present and return the first byte after it --
+// reference `skipBOM`. The BOM is discarded (never handed to the loader). Note we
+// faithfully mirror the reference quirk: a *partial* BOM (a stray 0xEF not followed
+// by the full sequence) already consumed its trailing bytes via `getc`, which can't
+// be pushed back -- but a real Lua source never starts that way, so this matches
+// reference behavior exactly.
+skipBOM :: proc(lf: ^Load_F) -> i32 {
+	c := libc.getc(lf.f)
+	if c == 0xEF && libc.getc(lf.f) == 0xBB && libc.getc(lf.f) == 0xBF {
+		return libc.getc(lf.f) // valid BOM: ignore it and return the next char
 	}
+	return c // no (valid) BOM: return the first character read
+}
+
+// Skip a leading `#!` line (a Unix executable shebang) before compiling --
+// reference `skipcomment`. Reports the first significant byte via `c` and returns
+// `true` when a comment line was skipped (so the caller can inject a newline to keep
+// line numbers honest, exactly as reference Lua does).
+skipcomment :: proc(lf: ^Load_F, c: ^i32) -> bool {
+	ci := skipBOM(lf)
+	c^ = ci
 	if ci == '#' {
 		// A `#!` line: skip until end of line, then report the next byte.
-		for {
+		for ci != libc.EOF && ci != '\n' {
 			ci = libc.getc(lf.f)
-			if ci == libc.EOF || ci == '\n' {
-				break
-			}
 		}
-		// Reset the pre-read buffer -- the shebang line is not part of the chunk.
-		lf.n = 0
-		c^ = libc.getc(lf.f)
-		return
+		c^ = libc.getc(lf.f) // the character after the comment (if any)
+		return true
 	}
-	c^ = ci
+	return false
 }
 
 // Load a chunk from a named file (or stdin when `filename == ""`) -- reference
@@ -876,24 +879,47 @@ luaL_loadfilex :: proc(
 	mode: string = "",
 ) -> lua.Thread_Status {
 	lf: Load_F
+	cname: cstring
 	if filename == "" {
 		lua.lua_pushstring(L, "=stdin")
 		lf.f = libc.stdin
 	} else {
 		lua.lua_pushfstring(L, "@%s", filename)
-		cname := cstring_from(filename)
-		defer delete_cstring(cname)
+		cname = cstring_from(filename)
 		lf.f = libc.fopen(cname, "r")
 		if lf.f == nil {
+			delete_cstring(cname)
 			lua.lua_pushfstring(L, "cannot open %s", filename)
 			lua.lua_remove(L, -2)
 			return .Err_Err
 		}
 	}
+	defer if cname != nil {
+		delete_cstring(cname)
+	}
 	c: i32
-	skipcomment(&lf, &c)
+	lf.n = 0
+	if skipcomment(&lf, &c) {
+		// A shebang line was skipped; inject a newline so reported line numbers
+		// stay aligned with the source file (reference Lua does the same).
+		lf.buff[lf.n] = '\n'
+		lf.n += 1
+	}
+	if c == i32(lua.LUA_SIGNATURE[0]) && filename != "" {
+		// Binary chunk. We sniffed it in text mode, which on Windows mangles bytes
+		// (CRLF translation, 0x1A-as-EOF). Discard everything read so far and reopen
+		// the file in binary mode, then re-sniff -- reference `freopen(..,"rb",..)`.
+		lf.n = 0
+		lf.f = libc.freopen(cname, "rb", lf.f)
+		if lf.f == nil {
+			lua.lua_pushfstring(L, "cannot reopen %s", filename)
+			lua.lua_remove(L, -2)
+			return .Err_Err
+		}
+		skipcomment(&lf, &c) // re-read the initial portion in binary mode
+	}
 	if c != libc.EOF {
-		lf.buff[lf.n] = u8(c)
+		lf.buff[lf.n] = u8(c) // `c` is the first real character of the stream
 		lf.n += 1
 	}
 	chunkname, _ := lua.lua_tostring(L, -1)
