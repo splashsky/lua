@@ -198,6 +198,10 @@ throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
 //     We do the same, pointing the error slot at `g.memerrmsg`. On the rare path
 //     where the state isn't complete yet (memerrmsg not interned), we fall back
 //     to nil rather than dereference a null string.
+//   * `Err_Err`: an error was raised *while handling* another error. Reference
+//     replaces whatever half-formed object is on the stack with the fixed literal
+//     "error in error handling" -- the message handler is deliberately NOT the
+//     surviving value, so callers see a stable diagnostic string.
 //   * any other error: the raiser left the error object at `top-1`; slide it down
 //     to `old_top`.
 set_error_object :: proc(L: ^Lua_State, errcode: Thread_Status, old_top: int) {
@@ -207,6 +211,8 @@ set_error_object :: proc(L: ^Lua_State, errcode: Thread_Status, old_top: int) {
 		} else {
 			set_nil(stack_value(L, old_top))
 		}
+	} else if errcode == .Err_Err {
+		set_string(stack_value(L, old_top), luaS_new(L, "error in error handling"))
 	} else {
 		stack_value(L, old_top)^ = stack_value(L, L.top - 1)^
 	}
