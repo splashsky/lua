@@ -1344,8 +1344,10 @@ addquoted :: proc(b: ^Buffer, s: []u8) {
 }
 
 // Serialise a float so Lua can read it back exactly. inf/-inf/NaN have no numeral,
-// so we spell them; finite values use the C99 hex form via libc's `%a` (which, in
-// the C locale, already uses '.' as the radix).
+// so we spell them; finite values use the C99 hex form via libc's `%a`. Because
+// `%q` output must be valid *Lua source* (which always spells the radix as '.'),
+// we mirror reference `quotefloat`: if a comma-radix locale made snprintf emit its
+// own decimal point, rewrite that point back to a '.' so the literal re-parses.
 @(private = "file")
 quotefloat :: proc(L: ^lua.Lua_State, buff: [^]u8, n: lua.Number) -> int {
 	cbuf := cast([^]libc.char)buff
@@ -1356,7 +1358,21 @@ quotefloat :: proc(L: ^lua.Lua_State, buff: [^]u8, n: lua.Number) -> int {
 	} else if n != n {
 		return int(libc.snprintf(cbuf, MAX_ITEM, "%s", cstring("(0/0)")))
 	}
-	return int(libc.snprintf(cbuf, MAX_ITEM, "%a", f64(n)))
+	nb := int(libc.snprintf(cbuf, MAX_ITEM, "%a", f64(n)))
+	// Ensure the rendered literal uses '.' as its radix character.
+	has_dot := false
+	for i in 0 ..< nb {
+		if buff[i] == '.' {has_dot = true; break}
+	}
+	if !has_dot {
+		point := lua.lua_getlocaledecpoint()
+		if point != '.' {
+			for i in 0 ..< nb {
+				if buff[i] == point {buff[i] = '.'; break}
+			}
+		}
+	}
+	return nb
 }
 
 @(private = "file")
