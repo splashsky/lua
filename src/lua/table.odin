@@ -801,7 +801,8 @@ setnodevector :: proc(L: ^Lua_State, t: ^Table, size: u32) -> Thread_Status {
 	}
 	lsize := ceil_log2(size)
 	if int(lsize) > MAXHBITS {
-		return throw(L, .Err_Mem) // "table overflow" (Phase 5 gives the message)
+		luaG_runerror(L, "table overflow")
+		return .Err_Run // unreachable: luaG_runerror throws
 	}
 	realsize := twoto(lsize)
 	block := state_realloc(L, nil, 0, uint(realsize) * size_of(Node))
@@ -887,7 +888,8 @@ luaH_resize :: proc(L: ^Lua_State, t: ^Table, newasize: u32, nhsize: u32) -> Thr
 	newt: Table // scratch table holding the new hash part
 	oldasize := t.asize
 	if newasize > MAXASIZE {
-		return throw(L, .Err_Mem) // "table overflow"
+		luaG_runerror(L, "table overflow")
+		return .Err_Run // unreachable: luaG_runerror throws
 	}
 	newt.flags = 0
 	st := setnodevector(L, &newt, nhsize)
