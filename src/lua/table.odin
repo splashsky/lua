@@ -970,7 +970,7 @@ findindex :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, asize: u32) -> u32 {
 	}
 	n := getgeneric(t, key, true)
 	if is_absent(n) {
-		throw(L, .Err_Run) // "invalid key to 'next'"
+		luaG_runerror(L, "invalid key to 'next'") // reference: same message
 		return 0
 	}
 	idx := u32(node_index(t, (^Node)(n)))
