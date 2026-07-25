@@ -441,7 +441,7 @@ prepcallclosemth :: proc(L: ^Lua_State, level: int, status: int, yy: bool) {
 // wider than a single delta can express.
 luaF_newtbcupval :: proc(L: ^Lua_State, level: int) {
 	assert(level > L.tbclist, "luaF_newtbcupval: level must be above the current tbc top")
-	if is_false(stack_value(L, level)) {
+	if is_falsy(stack_value(L, level)) {
 		return // nil/false variables never need closing
 	}
 	checkclosemth(L, level) // must be closable
