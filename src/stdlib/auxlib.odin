@@ -902,6 +902,47 @@ luaL_pushfail :: proc(L: ^lua.Lua_State) {
 	lua.lua_pushnil(L)
 }
 
+// `luaL_fileresult` -- reference Lua's OS-result reporter. On success it pushes
+// `true`; on failure it pushes `fail`, an error string (prefixed with the file
+// name if one was given), and the numeric errno. Callers pass `stat = true` for a
+// successful C call. The errno is read once up front because subsequent Lua API
+// calls may clobber it.
+luaL_fileresult :: proc(L: ^lua.Lua_State, stat: bool, fname: string, has_fname: bool) -> i32 {
+	en := libc.errno()^ // capture before any Lua API call can change it
+	if stat {
+		lua.lua_pushboolean(L, true)
+		return 1
+	}
+	luaL_pushfail(L)
+	msg := en != 0 ? string(libc.strerror(en)) : "(no extra info)"
+	if has_fname {
+		lua.lua_pushfstring(L, "%s: %s", fname, msg)
+	} else {
+		lua.lua_pushstring(L, msg)
+	}
+	lua.lua_pushinteger(L, lua.Integer(en))
+	return 3
+}
+
+// `luaL_execresult` -- reference Lua's process-result reporter for os.execute /
+// io's pclose. Without POSIX's `l_inspectstat` there is nothing to decode, so the
+// termination type is always "exit" and the code is the raw status: success is
+// status 0, and we push (true|fail, "exit", code).
+luaL_execresult :: proc(L: ^lua.Lua_State, stat: i32) -> i32 {
+	if stat != 0 && libc.errno()^ != 0 {
+		// A real errno means the command could not be launched at all.
+		return luaL_fileresult(L, false, "", false)
+	}
+	if stat == 0 {
+		lua.lua_pushboolean(L, true)
+	} else {
+		luaL_pushfail(L)
+	}
+	lua.lua_pushstring(L, "exit")
+	lua.lua_pushinteger(L, lua.Integer(stat))
+	return 3
+}
+
 // `luaL_makeseed` -- reference Lua's seed generator. It mixes a stack address
 // (Address Space Layout Randomization, when present) with the current wall-clock
 // time and folds the bytes down to an unsigned 32-bit value. The result is
