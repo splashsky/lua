@@ -314,7 +314,9 @@ luaT_tryconcatTM :: proc(L: ^Lua_State) {
 // scratch result rides `L.top` without permanently advancing it.
 luaT_callorderTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, event: int) -> int {
 	if callbinTM(L, p1, p2, L.top, event) {
-		if is_true(stack_value(L, L.top)) {
+		// The metamethod's result is truthy unless it is nil or false
+		// (reference `!l_isfalse`); a truthy non-boolean must count as "yes".
+		if !is_falsy(stack_value(L, L.top)) {
 			return 1
 		}
 		return 0

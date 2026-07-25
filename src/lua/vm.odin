@@ -276,7 +276,8 @@ luaV_equalobj :: proc(L: ^Lua_State, t1, t2: ^TValue) -> bool {
 		return false
 	}
 	luaT_callTMres(L, tm, t1, t2, L.top)
-	return is_true(stack_value(L, L.top))
+	// `__eq`'s result is truthy unless nil or false (reference `!l_isfalse`).
+	return !is_falsy(stack_value(L, L.top))
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,7 +1037,10 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 			case .NOT:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
-				set_bool(stack_value(L, ra), is_false(rb))
+				// `not x` is true exactly when x is *falsy* -- nil OR false --
+				// mirroring reference Lua's `l_isfalse`. The strict `is_false`
+				// (VFALSE tag only) would wrongly treat `not nil` as false.
+				set_bool(stack_value(L, ra), is_falsy(rb))
 
 			case .LEN:
 				ra := base + getarg_A(i)
@@ -1499,7 +1503,9 @@ luaV_finishOp :: proc(L: ^Lua_State) {
 		L.top -= 1
 		set_obj(stack_value(L, base + getarg_A(inst)), stack_value(L, L.top))
 	case .LT, .LE, .LTI, .LEI, .GTI, .GEI, .EQ:
-		res := is_true(stack_value(L, L.top - 1))
+		// A resumed comparison metamethod is truthy unless nil or false
+		// (reference `!l_isfalse`), not merely when it is the boolean true.
+		res := !is_falsy(stack_value(L, L.top - 1))
 		L.top -= 1
 		if res != (getarg_k(inst) != 0) {
 			L.frames[ci_idx].u.l.savedpc += 1 // condition failed: skip the JMP
