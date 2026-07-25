@@ -653,5 +653,11 @@ main :: proc() {
 	result := lua.lua_toboolean(L, -1) // pmain's boolean result
 	report(L, status)
 	lua.close_state(L)
+	// Reference Lua exits by returning from `main`, so the C runtime flushes every
+	// buffered stream on the way out. We leave via `os.exit` (which on some
+	// platforms calls ExitProcess and skips that CRT cleanup), so flush all open
+	// output streams ourselves first -- otherwise a buffered `io.write` to a piped
+	// stdout would be silently dropped. `fflush(NULL)` flushes every stream.
+	libc.fflush(nil)
 	os.exit((result && status == .Ok) ? 0 : 1)
 }
