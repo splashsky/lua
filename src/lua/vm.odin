@@ -1132,12 +1132,12 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 
 			case .TEST:
 				ra := stack_value(L, base + getarg_A(i))
-				pc = docondjump(code, pc, i, is_true(ra))
+				pc = docondjump(code, pc, i, !is_falsy(ra))
 
 			case .TESTSET:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
-				if is_false(rb) == (getarg_k(i) != 0) {
+				if is_falsy(rb) == (getarg_k(i) != 0) {
 					pc += 1
 				} else {
 					set_obj(stack_value(L, ra), rb)
