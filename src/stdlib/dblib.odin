@@ -196,7 +196,16 @@ db_getinfo :: proc "c" (Lp: rawptr) -> i32 {
 		settabsb(L, "isvararg", ar.isvararg != 0)
 	}
 	if has_opt(options, 'n') {
-		settabss(L, "name", ar.name)
+		// Reference stores a NULL `ar.name` (pushed as nil) exactly when no name
+		// was found, which is precisely when `namewhat` is empty. A found name
+		// may itself be the empty string (e.g. a `t[""]` field), so we key off
+		// `namewhat`, not off `name` being empty.
+		if ar.namewhat == "" {
+			lua.lua_pushnil(L)
+			lua.lua_setfield(L, -2, "name")
+		} else {
+			settabss(L, "name", ar.name)
+		}
 		settabss(L, "namewhat", ar.namewhat)
 	}
 	if has_opt(options, 'r') {
