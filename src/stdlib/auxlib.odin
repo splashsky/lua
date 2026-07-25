@@ -1015,3 +1015,162 @@ write_stderr :: proc(s: string) {
 	}
 	libc.fflush(libc.stderr)
 }
+
+
+// --------------------------------------------------------------------------------
+// Traceback support -- reference lauxlib.c's luaL_traceback and its static helpers.
+// --------------------------------------------------------------------------------
+
+// How the traceback splits a very deep stack: it shows the top LEVELS1 frames, an
+// elision marker, then the bottom LEVELS2 frames -- reference LEVELS1 / LEVELS2.
+@(private = "file")
+LEVELS1 :: 10
+@(private = "file")
+LEVELS2 :: 11
+
+// Render a Lua_Debug's short_src (a fixed NUL-terminated byte array) as a string.
+@(private = "file")
+short_src_str :: proc(ar: ^lua.Lua_Debug) -> string {
+	return string(cstring(&ar.short_src[0]))
+}
+
+// Search the table at the top of the stack for the value at absolute index
+// `objidx`, up to `level` levels of nesting. On success leaves the dotted name on
+// the stack and returns true -- reference `findfield`.
+@(private = "file")
+findfield :: proc(L: ^lua.Lua_State, objidx: int, level: int) -> bool {
+	if level == 0 || !lua.lua_istable(L, -1) {
+		return false
+	}
+	lua.lua_pushnil(L) // first key for lua_next
+	for lua.lua_next(L, -2) {
+		if lua.lua_type(L, -2) == lua.LUA_TSTRING { // ignore non-string keys
+			if lua.lua_rawequal(L, objidx, -1) {
+				lua.lua_pop(L, 1) // drop value, keep the name
+				return true
+			} else if findfield(L, objidx, level - 1) {
+				// stack: lib_name, lib_table, field_name -- join with a '.'
+				lua.lua_pushstring(L, ".")
+				lua.lua_replace(L, -3)
+				lua.lua_concat(L, 3)
+				return true
+			}
+		}
+		lua.lua_pop(L, 1) // drop value, keep key for the next iteration
+	}
+	return false
+}
+
+// Try to name a function by scanning the loaded-modules table -- reference
+// `pushglobalfuncname`. On success it leaves the name on the stack and returns
+// true.
+@(private = "file")
+pushglobalfuncname :: proc(L: ^lua.Lua_State, ar: ^lua.Lua_Debug) -> bool {
+	top := lua.lua_gettop(L)
+	lua.lua_getinfo(L, "f", ar) // push the function being described
+	lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, LUA_LOADED_TABLE)
+	luaL_checkstack(L, 6, "not enough stack") // slots for findfield's recursion
+	if findfield(L, top + 1, 2) {
+		name, _ := lua.lua_tostring(L, -1)
+		if len(name) >= 3 && name[0:3] == "_G." { // strip a leading "_G."
+			lua.lua_pushstring(L, name[3:])
+			lua.lua_remove(L, -2)
+		}
+		lua.lua_copy(L, -1, top + 1) // move the name to its proper slot
+		lua.lua_settop(L, top + 1) // drop the loaded table and name copy
+		return true
+	}
+	lua.lua_settop(L, top) // drop the function and the loaded table
+	return false
+}
+
+// Push a human-readable description of a function frame -- reference `pushfuncname`.
+@(private = "file")
+pushfuncname :: proc(L: ^lua.Lua_State, ar: ^lua.Lua_Debug) {
+	if len(ar.namewhat) > 0 { // a name the code knows about
+		lua.lua_pushfstring(L, "%s '%s'", ar.namewhat, ar.name)
+	} else if len(ar.what) > 0 && ar.what[0] == 'm' { // the main chunk
+		lua.lua_pushstring(L, "main chunk")
+	} else if pushglobalfuncname(L, ar) { // a global/module name
+		name, _ := lua.lua_tostring(L, -1)
+		lua.lua_pushfstring(L, "function '%s'", name)
+		lua.lua_remove(L, -2)
+	} else if len(ar.what) > 0 && ar.what[0] != 'C' { // a Lua function: file:line
+		lua.lua_pushfstring(L, "function <%s:%d>", short_src_str(ar), int(ar.linedefined))
+	} else {
+		lua.lua_pushstring(L, "?")
+	}
+}
+
+// Find the index of the last (deepest) stack level -- reference `lastlevel`. Uses
+// an exponential probe followed by a binary search.
+@(private = "file")
+lastlevel :: proc(L: ^lua.Lua_State) -> int {
+	ar: lua.Lua_Debug
+	li := 1
+	le := 1
+	for lua.lua_getstack(L, le, &ar) { // find an upper bound
+		li = le
+		le *= 2
+	}
+	for li < le { // binary search
+		m := (li + le) / 2
+		if lua.lua_getstack(L, m, &ar) {
+			li = m + 1
+		} else {
+			le = m
+		}
+	}
+	return le - 1
+}
+
+// Build a stack traceback for thread `L1` into a string pushed on `L` -- reference
+// `luaL_traceback`. `has_msg` gates the optional leading message (reference passes
+// a NULL `msg` to omit it).
+luaL_traceback :: proc(
+	L: ^lua.Lua_State,
+	L1: ^lua.Lua_State,
+	msg: string,
+	has_msg: bool,
+	level: int,
+) {
+	level := level
+	b: Buffer
+	ar: lua.Lua_Debug
+	last := lastlevel(L1)
+	// Only elide when there are more frames than the two shown windows combined.
+	limit2show := (last - level > LEVELS1 + LEVELS2) ? LEVELS1 : -1
+	luaL_buffinit(L, &b)
+	if has_msg {
+		luaL_addstring(&b, msg)
+		luaL_addchar(&b, '\n')
+	}
+	luaL_addstring(&b, "stack traceback:")
+	for lua.lua_getstack(L1, level, &ar) {
+		level += 1
+		// Reference tests `limit2show-- == 0`: fire the elision exactly once, when
+		// the counter reaches zero, and decrement every iteration regardless.
+		do_skip := limit2show == 0
+		limit2show -= 1
+		if do_skip {
+			n := last - level - LEVELS2 + 1 // frames to skip
+			lua.lua_pushfstring(L, "\n\t...\t(skipping %d levels)", n)
+			luaL_addvalue(&b)
+			level += n // jump to the bottom window
+		} else {
+			lua.lua_getinfo(L1, "Slnt", &ar)
+			if ar.currentline <= 0 {
+				lua.lua_pushfstring(L, "\n\t%s: in ", short_src_str(&ar))
+			} else {
+				lua.lua_pushfstring(L, "\n\t%s:%d: in ", short_src_str(&ar), int(ar.currentline))
+			}
+			luaL_addvalue(&b)
+			pushfuncname(L, &ar)
+			luaL_addvalue(&b)
+			if ar.istailcall != 0 {
+				luaL_addstring(&b, "\n\t(...tail calls...)")
+			}
+		}
+	}
+	luaL_pushresult(&b)
+}

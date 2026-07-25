@@ -61,6 +61,7 @@ Lua_Debug :: struct {
 	nups:            u8,
 	nparams:         u8,
 	isvararg:        u8,
+	extraargs:       u8,
 	istailcall:      u8,
 	ftransfer:       u16,
 	ntransfer:       u16,
@@ -467,6 +468,16 @@ auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_
 			}
 		case 't':
 			ar.istailcall = (ci_idx >= 0 && (L.frames[ci_idx].callstatus & CIST_TAIL) != 0) ? 1 : 0
+			// We do not yet track C-continuation extra arguments, so report 0
+			// honestly rather than fabricate a count.
+			ar.extraargs = 0
+		case 'r':
+			// The 'r' option reports the value-transfer window of a call, which
+			// the reference only fills in while a hook is running (it reads
+			// L->transferinfo). Our kernel does not record transfer info, so we
+			// honestly report an empty window rather than invent one.
+			ar.ftransfer = 0
+			ar.ntransfer = 0
 		case 'n':
 			// Name guessing (getfuncname) is intentionally minimal for now: we
 			// report no name rather than a fabricated one. The fields are honest
@@ -545,6 +556,21 @@ collectvalidlines :: proc(L: ^Lua_State, fv: ^TValue) {
 // push its current value -- reference `lua_getlocal`. With a '>' style `ar`
 // (i_ci < 0) it instead reports a function's parameter names without a value.
 lua_getlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok: bool) {
+	if ar == nil {
+		// "Non-active function" form: the function sits on top of the stack and we
+		// report its parameter *names* only (no live value to push). Reference Lua
+		// inspects local variables live at pc 0 -- i.e. the declared parameters.
+		fv := stack_value(L, L.top - 1)
+		if !is_lua_closure(fv) {
+			return "", false // only Lua functions carry local-variable names
+		}
+		p := lua_closure_value(fv).p
+		nm := luaF_getlocalname(p, n, 0)
+		if nm == nil {
+			return "", false
+		}
+		return string(str_slice(nm)), true
+	}
 	ci := &L.frames[ar.i_ci]
 	if !is_lua_frame(ci) {
 		return "", false // C frames expose no locals

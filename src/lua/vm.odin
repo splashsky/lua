@@ -1159,6 +1159,9 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 					continue newframe
 				}
 				// C callee: already executed by precall; keep going.
+				// A C call may have installed a debug hook (e.g. debug.sethook),
+				// which arms this frame's trap. Reload it -- reference `updatetrap`.
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .TAILCALL:
 				ra := base + getarg_A(i)
