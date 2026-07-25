@@ -895,6 +895,32 @@ luaL_newstate :: proc() -> ^lua.Lua_State {
 	return L
 }
 
+// `luaL_pushfail` -- reference Lua's `#define luaL_pushfail(L) lua_pushnil(L)`.
+// The "fail" value in 5.5 is simply nil; a named helper keeps call sites reading
+// like the reference source (and gives us one place to change if that ever moves).
+luaL_pushfail :: proc(L: ^lua.Lua_State) {
+	lua.lua_pushnil(L)
+}
+
+// `luaL_makeseed` -- reference Lua's seed generator. It mixes a stack address
+// (Address Space Layout Randomization, when present) with the current wall-clock
+// time and folds the bytes down to an unsigned 32-bit value. The result is
+// *deliberately* nondeterministic: it seeds the PRNG and the sort's pivot
+// randomization, so faithfulness here means "some unpredictable unsigned int",
+// not "these exact bytes". We reproduce the reference's shape (address XOR time,
+// folded) without promising bit-for-bit identical output across runs.
+luaL_makeseed :: proc(L: ^lua.Lua_State) -> u32 {
+	// A local's address supplies ASLR-derived entropy; the clock supplies the rest.
+	local: int
+	addr := uintptr(&local)
+	t := u64(libc.time(nil))
+	mixed := u64(addr) ~ (t * 0x9E3779B97F4A7C15) // golden-ratio odd multiplier
+	// Fold the 64 bits into 32 by XORing the halves, matching the reference's
+	// "xor the buffer words together" reduction.
+	return u32(mixed) ~ u32(mixed >> 32)
+}
+
+
 // The warning subsystem's three states -- reference `warnfoff`/`warnfon`/
 // `warnfcont`. Control messages ("@on"/"@off") toggle emission; ordinary messages
 // are written to stderr, accumulating fragments until a non-continued piece flushes
