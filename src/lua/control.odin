@@ -189,6 +189,23 @@ throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
 	libc.abort()
 }
 
+// Throw straight to the *base* protected boundary of this thread -- reference
+// Lua's `luaD_throwbaselevel`. Ordinary `throw` unwinds to the *innermost* active
+// boundary (the nearest `pcall`); this one first rewinds the `errorJmp` chain to
+// its outermost node, so the throw leaps past every intervening `pcall` in one
+// go. It is exactly what a coroutine closing *itself* needs: `coroutine.close()`
+// run from inside a coroutine must terminate the whole coroutine (back to the
+// `resume` boundary), not merely pop out to some enclosing `pcall`. With no
+// boundary at all it degenerates to a plain `throw` (panic + abort).
+throw_baselevel :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
+	if L.errorJmp != nil {
+		for L.errorJmp.previous != nil {
+			L.errorJmp = L.errorJmp.previous
+		}
+	}
+	return throw(L, errcode)
+}
+
 // Move the error object into place after an error is caught, our analogue of
 // `luaD_seterrorobj`. `old_top` is the stack index the protected boundary wants
 // the error object to land at; afterward `top` sits one slot past it.

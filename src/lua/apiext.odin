@@ -165,5 +165,8 @@ lua_closethread :: proc(L: ^Lua_State, from: ^Lua_State) -> Thread_Status {
 		L.n_ccalls = 0
 	}
 	status := luaE_resetthread(L, L.status)
+	if L == from { // closing itself: unwind the whole thread, do not return
+		throw_baselevel(L, status)
+	}
 	return status
 }
