@@ -227,7 +227,13 @@ luaT_callTM :: proc(L: ^Lua_State, f: ^TValue, p1: ^TValue, p2: ^TValue, p3: ^TV
 	set_obj(stack_value(L, func + 2), p2)
 	set_obj(stack_value(L, func + 3), p3)
 	L.top = func + 4
-	luaD_callnoyield(L, func, 0)
+	// A metamethod may yield only when it is called from Lua code; from a C
+	// frame we must forbid the yield (reference gates on `isLuacode(L->ci)`).
+	if is_lua_code(&L.frames[L.ci]) {
+		luaD_call(L, func, 0)
+	} else {
+		luaD_callnoyield(L, func, 0)
+	}
 }
 
 // Call a metamethod `f` with two arguments and one wanted result, storing that
@@ -240,7 +246,13 @@ luaT_callTMres :: proc(L: ^Lua_State, f: ^TValue, p1: ^TValue, p2: ^TValue, res:
 	set_obj(stack_value(L, func + 1), p1)
 	set_obj(stack_value(L, func + 2), p2)
 	L.top = func + 3
-	luaD_callnoyield(L, func, 1)
+	// A metamethod may yield only when it is called from Lua code; from a C
+	// frame we must forbid the yield (reference gates on `isLuacode(L->ci)`).
+	if is_lua_code(&L.frames[L.ci]) {
+		luaD_call(L, func, 1)
+	} else {
+		luaD_callnoyield(L, func, 1)
+	}
 	L.top -= 1 // pop the single result...
 	set_obj(stack_value(L, res), stack_value(L, L.top)) // ...into its place
 }
