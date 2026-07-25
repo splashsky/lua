@@ -130,16 +130,329 @@ getcurrentline :: proc(L: ^Lua_State, ci: ^Call_Info) -> int {
 }
 
 // ---------------------------------------------------------------------------
-// Variable-name guessing (minimal placeholder)
+// Variable-name guessing (symbolic execution over the bytecode)
 // ---------------------------------------------------------------------------
-// Reference Lua enriches type errors with the source of the faulty value, e.g.
-// "attempt to index a nil value (global 'x')". Recovering that name requires a
-// small symbolic execution over the bytecode (`getobjname`/`getupvalname`), which
-// lands with the full debug layer later in this phase. Until then `varinfo`
-// returns the empty string, so messages are still *truthful* -- just without the
-// parenthetical hint. Nothing depends on the hint being present.
+// Lua enriches messages with the *source* of a value, e.g. "attempt to index a
+// nil value (global 'x')", and `debug.getinfo(...).name` reports how a function
+// was reached ("local 'f'", "method 'x'", "for iterator", ...). Both are best-
+// effort: we replay a little of the calling function's bytecode to discover which
+// local/upvalue/constant/field last wrote a register, then read the name out of
+// the prototype's debug tables. This is a faithful port of reference Lua's
+// `getobjname`/`funcnamefromcode` family (ldebug.c). Everything here is honest --
+// when the code cannot prove a name we report none rather than guess.
+
+// The name recorded for upvalue `uv` (or "?" when the prototype carries no debug
+// name) -- reference Lua's `upvalname`.
+@(private = "file")
+dbg_upvalname :: proc(p: ^Proto, uv: int) -> string {
+	s := p.upvalues[uv].name
+	if s == nil {
+		return "?"
+	}
+	return string(str_slice(s))
+}
+
+// A "name" for the constant at index `index`: a string constant names itself and
+// is kind "constant"; anything else has no usable name -- reference Lua's `kname`.
+// A "" kind means "no reasonable name" (reference's NULL return).
+@(private = "file")
+dbg_kname :: proc(p: ^Proto, index: int) -> (kind: string, name: string) {
+	kv := &p.k[index]
+	if base_type(kv) == TSTRING {
+		return "constant", string(str_slice(str_value(kv)))
+	}
+	return "", "?"
+}
+
+// A conditional instruction (one reached only by jumping into it) cannot be
+// trusted to have set a register on the straight-line path -- reference `filterpc`.
+@(private = "file")
+dbg_filterpc :: proc(pc: int, jmptarget: int) -> int {
+	if pc < jmptarget {
+		return -1 // inside a jump: we cannot know who set that register
+	}
+	return pc
+}
+
+// Find the last instruction before `lastpc` that wrote register `reg`, ignoring
+// writes that are only reached conditionally -- reference Lua's `findsetreg`.
+@(private = "file")
+dbg_findsetreg :: proc(p: ^Proto, lastpc: int, reg: int) -> int {
+	lastpc := lastpc
+	setreg := -1 // last instruction that changed `reg`
+	jmptarget := 0 // any code before this address is conditional
+	if test_mm_mode(get_opcode(p.code[lastpc])) {
+		lastpc -= 1 // the MMBIN pseudo-instruction did not really run
+	}
+	for pc := 0; pc < lastpc; pc += 1 {
+		i := p.code[pc]
+		op := get_opcode(i)
+		a := getarg_A(i)
+		change := false // did this instruction change `reg`?
+		#partial switch op {
+		case .LOADNIL: // sets registers a .. a+b
+			b := getarg_B(i)
+			change = a <= reg && reg <= a + b
+		case .TFORCALL: // clobbers all registers above base+2
+			change = reg >= a + 2
+		case .CALL, .TAILCALL: // clobber all registers from base up
+			change = reg >= a
+		case .JMP: // no register change, but it advances `jmptarget`
+			b := getarg_sJ(i)
+			dest := pc + 1 + b
+			if dest <= lastpc && dest > jmptarget {
+				jmptarget = dest
+			}
+		case: // any ordinary instruction that writes A
+			change = test_a_mode(op) && reg == a
+		}
+		if change {
+			setreg = dbg_filterpc(pc, jmptarget)
+		}
+	}
+	return setreg
+}
+
+// The core name search for register `reg` as of `ppc^`: locals, then a symbolic
+// trace through MOVE / GETUPVAL / LOADK -- reference Lua's `basicgetobjname`. On
+// success returns a non-empty kind and updates `ppc^` to the defining pc; a ""
+// kind means "no reasonable name" (reference's NULL).
+@(private = "file")
+dbg_basicgetobjname :: proc(p: ^Proto, ppc: ^int, reg: int) -> (kind: string, name: string) {
+	pc := ppc^
+	local := luaF_getlocalname(p, reg + 1, pc)
+	if local != nil { // is it a live local?
+		return "local", string(str_slice(local))
+	}
+	// Otherwise replay the bytecode to find who last wrote the register.
+	pc = dbg_findsetreg(p, pc, reg)
+	ppc^ = pc
+	if pc != -1 {
+		i := p.code[pc]
+		op := get_opcode(i)
+		#partial switch op {
+		case .MOVE:
+			b := getarg_B(i) // moved from register b into a
+			if b < getarg_A(i) {
+				return dbg_basicgetobjname(p, ppc, b) // chase the source
+			}
+		case .GETUPVAL:
+			return "upvalue", dbg_upvalname(p, getarg_B(i))
+		case .LOADK:
+			return dbg_kname(p, getarg_Bx(i))
+		case .LOADKX:
+			return dbg_kname(p, getarg_Ax(p.code[pc + 1]))
+		}
+	}
+	return "", "" // could not find a reasonable name
+}
+
+// A name for the register used as a key `c` -- reference Lua's `rname`. Only a
+// constant name is meaningful here; anything else is reported as "?".
+@(private = "file")
+dbg_rname :: proc(p: ^Proto, pc: int, c: int) -> string {
+	pc := pc
+	kind, name := dbg_basicgetobjname(p, &pc, c)
+	if kind != "constant" {
+		return "?"
+	}
+	return name
+}
+
+// Decide whether the table indexed by instruction `i` is the `_ENV` upvalue (making
+// the access a global) or an ordinary field -- reference Lua's `isEnv`.
+@(private = "file")
+dbg_isEnv :: proc(p: ^Proto, pc: int, i: Instruction, isup: bool) -> string {
+	t := getarg_B(i) // the table operand
+	valid := false
+	name := ""
+	if isup {
+		name = dbg_upvalname(p, t)
+		valid = true
+	} else {
+		pc2 := pc
+		kind, nm := dbg_basicgetobjname(p, &pc2, t)
+		// The name only counts if the table is itself a local or an upvalue.
+		if kind == "local" || kind == "upvalue" {
+			name = nm
+			valid = true
+		}
+	}
+	if valid && name == LUA_ENV {
+		return "global"
+	}
+	return "field"
+}
+
+// Extend `basicgetobjname` to also name values produced by table reads -- reference
+// Lua's `getobjname`. Returns ("", "") when no name can be proven.
+@(private = "file")
+dbg_getobjname :: proc(p: ^Proto, lastpc: int, reg: int) -> (kind: string, name: string) {
+	lastpc := lastpc
+	kind, name = dbg_basicgetobjname(p, &lastpc, reg)
+	if kind != "" {
+		return kind, name
+	}
+	if lastpc != -1 {
+		i := p.code[lastpc]
+		op := get_opcode(i)
+		#partial switch op {
+		case .GETTABUP:
+			_, nm := dbg_kname(p, getarg_C(i))
+			return dbg_isEnv(p, lastpc, i, true), nm
+		case .GETTABLE:
+			nm := dbg_rname(p, lastpc, getarg_C(i))
+			return dbg_isEnv(p, lastpc, i, false), nm
+		case .GETI:
+			return "field", "integer index"
+		case .GETFIELD:
+			_, nm := dbg_kname(p, getarg_C(i))
+			return dbg_isEnv(p, lastpc, i, false), nm
+		case .SELF:
+			_, nm := dbg_kname(p, getarg_C(i))
+			return "method", nm
+		}
+	}
+	return "", ""
+}
+
+// Name a function from the instruction that called it -- reference Lua's
+// `funcnamefromcode`. Direct calls resolve the callee register; instructions that
+// dispatch through a metamethod report that metamethod's name. "" kind = none.
+@(private = "file")
+dbg_funcnamefromcode :: proc(L: ^Lua_State, p: ^Proto, pc: int) -> (kind: string, name: string) {
+	i := p.code[pc]
+	tm := -1
+	#partial switch get_opcode(i) {
+	case .CALL, .TAILCALL:
+		return dbg_getobjname(p, pc, getarg_A(i)) // the function's own name
+	case .TFORCALL:
+		return "for iterator", "for iterator"
+	// The remaining instructions can only "call" through a metamethod.
+	case .SELF, .GETTABUP, .GETTABLE, .GETI, .GETFIELD:
+		tm = TM_INDEX
+	case .SETTABUP, .SETTABLE, .SETI, .SETFIELD:
+		tm = TM_NEWINDEX
+	case .MMBIN, .MMBINI, .MMBINK:
+		tm = getarg_C(i) // the event id is encoded in C
+	case .UNM:
+		tm = TM_UNM
+	case .BNOT:
+		tm = TM_BNOT
+	case .LEN:
+		tm = TM_LEN
+	case .CONCAT:
+		tm = TM_CONCAT
+	case .EQ:
+		tm = TM_EQ
+	// (no OP_EQI/OP_EQK: those never invoke a metamethod)
+	case .LT, .LTI, .GTI:
+		tm = TM_LT
+	case .LE, .LEI, .GEI:
+		tm = TM_LE
+	case .CLOSE, .RETURN:
+		tm = TM_CLOSE
+	case:
+		return "", "" // no reasonable name
+	}
+	// Metamethod names are stored as "__event"; reference skips the "__" prefix.
+	return "metamethod", string(str_slice(L.g.tmname[tm]))[2:]
+}
+
+// Name a function from how the *calling* frame reached it -- reference Lua's
+// `funcnamefromcall`. `ci_idx` is the caller frame. Hooks and finalizers report a
+// synthetic name; ordinary Lua callers defer to `funcnamefromcode`.
+@(private = "file")
+dbg_funcnamefromcall :: proc(L: ^Lua_State, ci_idx: int) -> (kind: string, name: string) {
+	ci := &L.frames[ci_idx]
+	if (ci.callstatus & CIST_HOOKED) != 0 {
+		return "hook", "?"
+	}
+	if (ci.callstatus & CIST_FIN) != 0 {
+		return "metamethod", "__gc"
+	}
+	if is_lua_frame(ci) {
+		return dbg_funcnamefromcode(L, ci_func(L, ci).p, currentpc(ci))
+	}
+	return "", ""
+}
+
+// The public name lookup for a described frame -- reference Lua's `getfuncname`.
+// A tail-called frame has no caller to inspect, and a function pulled off the stack
+// (`ci_idx < 0`) has no frame at all; both yield no name.
+@(private = "file")
+dbg_getfuncname :: proc(L: ^Lua_State, ci_idx: int) -> (kind: string, name: string) {
+	if ci_idx <= 0 { // no described frame, or no caller below it
+		return "", ""
+	}
+	if (L.frames[ci_idx].callstatus & CIST_TAIL) != 0 {
+		return "", "" // a tail call overwrote its caller: nothing to read
+	}
+	return dbg_funcnamefromcall(L, ci_idx - 1)
+}
+
+// Is `o` one of the current Lua frame's upvalues? If so, name it -- reference
+// Lua's `getupvalname`. "" kind means "not an upvalue".
+@(private = "file")
+dbg_getupvalname :: proc(L: ^Lua_State, ci_idx: int, o: ^TValue) -> (kind: string, name: string) {
+	c := ci_func(L, &L.frames[ci_idx])
+	for k in 0 ..< int(c.nupvalues) {
+		if upval_value(c.upvals[k]) == o {
+			return "upvalue", dbg_upvalname(c.p, k)
+		}
+	}
+	return "", ""
+}
+
+// Where in the current frame's register window does `o` live, if anywhere? Returns
+// the register number, or -1 -- reference Lua's `instack`.
+@(private = "file")
+dbg_instack :: proc(L: ^Lua_State, ci_idx: int, o: ^TValue) -> int {
+	ci := &L.frames[ci_idx]
+	base := ci.func + 1
+	for pos := 0; base + pos < ci.top; pos += 1 {
+		if stack_value(L, base + pos) == o {
+			return pos
+		}
+	}
+	return -1
+}
+
+// Format a "( kind 'name')" hint, or "" when there is no information -- reference
+// Lua's `formatvarinfo`.
+@(private = "file")
+dbg_formatvarinfo :: proc(L: ^Lua_State, kind: string, name: string) -> string {
+	if kind == "" {
+		return ""
+	}
+	return string(str_slice(luaO_pushfstring(L, " (%s '%s')", kind, name)))
+}
+
+// Build a human description of where value `o` came from ("global 'x'", etc.) to
+// append to a type error -- reference Lua's `varinfo`. Best-effort: an upvalue, a
+// register traced back to a name, or nothing.
 varinfo :: proc(L: ^Lua_State, o: ^TValue) -> string {
-	return ""
+	ci_idx := L.ci
+	kind := ""
+	name := ""
+	if is_lua_frame(&L.frames[ci_idx]) {
+		kind, name = dbg_getupvalname(L, ci_idx, o) // an upvalue?
+		if kind == "" { // no: try a register
+			reg := dbg_instack(L, ci_idx, o)
+			if reg >= 0 {
+				kind, name = dbg_getobjname_frame(L, ci_idx, reg)
+			}
+		}
+	}
+	return dbg_formatvarinfo(L, kind, name)
+}
+
+// A thin wrapper so `varinfo` can call `getobjname` with a frame index (it needs
+// the frame's proto and current pc).
+@(private = "file")
+dbg_getobjname_frame :: proc(L: ^Lua_State, ci_idx: int, reg: int) -> (kind: string, name: string) {
+	ci := &L.frames[ci_idx]
+	return dbg_getobjname(ci_func(L, ci).p, currentpc(ci), reg)
 }
 
 // ---------------------------------------------------------------------------
@@ -486,11 +799,13 @@ auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_
 			ar.ftransfer = 0
 			ar.ntransfer = 0
 		case 'n':
-			// Name guessing (getfuncname) is intentionally minimal for now: we
-			// report no name rather than a fabricated one. The fields are honest
-			// empty strings; enriching them is a later debug-layer refinement.
-			ar.name = ""
-			ar.namewhat = ""
+			// Recover how this function was reached: its name and the kind of
+			// reference (local/global/field/method/upvalue/metamethod/...),
+			// exactly as reference Lua's `getfuncname`. When nothing can be
+			// proven we honestly report an empty name.
+			kind, nm := dbg_getfuncname(L, ci_idx)
+			ar.namewhat = kind
+			ar.name = nm
 		case 'f', 'L':
 			// Handled by the caller (they push onto the stack).
 		case:

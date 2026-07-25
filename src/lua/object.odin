@@ -1658,12 +1658,18 @@ luaO_chunkid :: proc(out: []u8, source: string) -> int {
 		}
 	}
 
-	if srclen == 0 {
-		return 0
+	// Reference reads `*source` -- the first byte, or the NUL terminator when
+	// the source name is the empty string. An empty name is neither '=' nor
+	// '@', so it takes the "string" branch below and renders as `[string ""]`.
+	// We must NOT short-circuit here (an early `return 0` would drop the label).
+	marker: u8 = 0
+	body := ""
+	bodylen := 0
+	if srclen > 0 {
+		marker = source[0]
+		body = source[1:] // everything after the marker byte
+		bodylen = srclen - 1
 	}
-	marker := source[0]
-	body := source[1:] // everything after the marker byte
-	bodylen := srclen - 1
 
 	if marker == '=' { // literal, verbatim source name
 		if bodylen < bufflen { // small enough: copy it all
