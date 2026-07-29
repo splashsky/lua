@@ -89,7 +89,7 @@ convergeephemerons :: proc(g: ^Global_State) {
 		for next != nil {
 			t := (^Table)(next)
 			next = t.gclist // the list is rebuilt during the loop
-			set2black(&t.header) // out of the list (for now)
+			set2black(obj2gco(t)) // out of the list (for now)
 			if traverse_ephemeron(g, t, dir) { // marked some value?
 				propagate_all(g) // propagate those marks
 				changed = true // and revisit every ephemeron table again

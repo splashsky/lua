@@ -141,7 +141,7 @@ luaT_init :: proc(L: ^Lua_State) -> Thread_Status {
 			return throw(L, .Err_Mem)
 		}
 		g.tmname[i] = ts
-		luaC_fix(L, &ts.header) // never collect these names
+		luaC_fix(L, obj2gco(ts)) // never collect these names
 	}
 	return .Ok
 }

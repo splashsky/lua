@@ -568,7 +568,7 @@ addk :: proc(fs: ^FuncState, f: ^Proto, v: ^TValue) -> int {
 	set_obj(&f.k[k], v)
 	fs.nk += 1
 	if is_collectable(v) { 	// keep the GC's black/white invariant across the store
-		luaC_barrier(L, &f.header, v.value_.gc)
+		luaC_barrier(L, obj2gco(f), v.value_.gc)
 	}
 	return k
 }
@@ -657,7 +657,7 @@ boolT :: proc(fs: ^FuncState) -> int {
 nilK :: proc(fs: ^FuncState) -> int {
 	k, v: TValue
 	set_nil(&v)
-	set_gc(&k, &fs.kcache.header) // use the table itself as the key
+	set_gc(&k, obj2gco(fs.kcache)) // use the table itself as the key
 	return k2proto(fs, &k, &v)
 }
 

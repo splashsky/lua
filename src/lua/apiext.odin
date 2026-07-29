@@ -108,7 +108,7 @@ lua_upvaluejoin :: proc(L: ^Lua_State, fidx1: int, n1: int, fidx2: int, n2: int)
 	// a misbehaving direct C-API caller.
 	assert(ok1 && ok2, "invalid upvalue index")
 	up1^ = up2^
-	luaC_barrier(L, &f1.header, &up1^.header)
+	luaC_barrier(L, obj2gco(f1), obj2gco(up1^))
 }
 
 // --------------------------------------------------------------------------------

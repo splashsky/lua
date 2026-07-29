@@ -879,7 +879,7 @@ collectvalidlines :: proc(L: ^Lua_State, fv: ^TValue) {
 	}
 	p := lua_closure_value(fv).p
 	t := luaH_new(L)
-	set_gc(stack_value(L, L.top), &t.header)
+	set_gc(stack_value(L, L.top), obj2gco(t))
 	L.top += 1
 	if p.lineinfo != nil {
 		active: TValue

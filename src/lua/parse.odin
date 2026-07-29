@@ -475,7 +475,7 @@ registerlocalvar :: proc(ls: ^LexState, fs: ^FuncState, varname: ^TString) -> i1
 	idx := fs.ndebugvars
 	f.locvars[idx].varname = varname
 	f.locvars[idx].startpc = fs.pc
-	luaC_barrier(ls.L, &f.header, &varname.header) // f now points at varname
+	luaC_barrier(ls.L, obj2gco(f), obj2gco(varname)) // f now points at varname
 	fs.ndebugvars += 1
 	return idx
 }
@@ -656,7 +656,7 @@ newupvalue :: proc(fs: ^FuncState, name: ^TString, v: ^Expdesc) -> int {
 		up.kind = prev.f.upvalues[v.u.info].kind
 	}
 	up.name = name
-	luaC_barrier(fs.ls.L, &fs.f.header, &name.header)
+	luaC_barrier(fs.ls.L, obj2gco(fs.f), obj2gco(name))
 	return fs.nups - 1
 }
 
@@ -1025,7 +1025,7 @@ addprototype :: proc(ls: ^LexState) -> ^Proto {
 	clp := luaF_newproto(L)
 	f.p[fs.np] = clp
 	fs.np += 1
-	luaC_barrier(L, &f.header, &clp.header)
+	luaC_barrier(L, obj2gco(f), obj2gco(clp))
 	return clp
 }
 
@@ -1065,10 +1065,10 @@ open_func :: proc(ls: ^LexState, fs: ^FuncState, bl: ^BlockCnt) {
 	fs.firstlabel = ls.dyd.label.n
 	fs.bl = nil
 	f.source = ls.source
-	luaC_barrier(L, &f.header, &f.source.header)
+	luaC_barrier(L, obj2gco(f), obj2gco(f.source))
 	f.maxstacksize = 2 // registers 0/1 are always valid
 	fs.kcache = luaH_new(L) // per-function constant cache
-	set_gc(stack_value(L, L.top), &fs.kcache.header) // anchor it on the stack
+	set_gc(stack_value(L, L.top), obj2gco(fs.kcache)) // anchor it on the stack
 	inc_top(L)
 	enterblock(fs, bl, 0)
 }
@@ -2357,7 +2357,7 @@ mainfunc :: proc(ls: ^LexState, fs: ^FuncState) {
 	env.idx = 0
 	env.kind = VDKREG
 	env.name = ls.envn
-	luaC_barrier(ls.L, &fs.f.header, &env.name.header)
+	luaC_barrier(ls.L, obj2gco(fs.f), obj2gco(env.name))
 	luaX_next(ls) // read the first token
 	statlist(ls) // parse the body
 	check(ls, TK_EOS)
@@ -2382,13 +2382,13 @@ luaY_parser :: proc(
 	set_lua_closure(stack_value(L, L.top), cl) // anchor it against collection
 	inc_top(L)
 	lexstate.h = luaH_new(L) // scanner's string-anchoring table
-	set_gc(stack_value(L, L.top), &lexstate.h.header) // anchor it
+	set_gc(stack_value(L, L.top), obj2gco(lexstate.h)) // anchor it
 	inc_top(L)
 	funcstate.f = luaF_newproto(L)
 	cl.p = funcstate.f
-	luaC_barrier(L, &cl.header, &cl.p.header)
+	luaC_barrier(L, obj2gco(cl), obj2gco(cl.p))
 	funcstate.f.source = luaS_new(L, name) // create and anchor the source name
-	luaC_barrier(L, &funcstate.f.header, &funcstate.f.source.header)
+	luaC_barrier(L, obj2gco(funcstate.f), obj2gco(funcstate.f.source))
 	lexstate.buff = buff
 	lexstate.dyd = dyd
 	dyd.actvar.n = 0

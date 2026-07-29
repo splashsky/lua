@@ -104,9 +104,9 @@ gc_phase7_weak_value_cleared :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 
 	weak := lua.luaH_new(L)
-	push_root(L, &weak.header)
+	push_root(L, lua.obj2gco(weak))
 	mt := lua.luaH_new(L)
-	push_root(L, &mt.header)
+	push_root(L, lua.obj2gco(mt))
 
 	// Install __mode = "v" on the weak table's metatable.
 	modekey := lua.luaS_new(L, "__mode")
@@ -120,12 +120,12 @@ gc_phase7_weak_value_cleared :: proc(t: ^testing.T) {
 	// key 1 -> a table nothing else references (weakly held, must be cleared).
 	orphan := lua.luaH_new(L)
 	ov: lua.TValue
-	lua.set_gc(&ov, &orphan.header)
+	lua.set_gc(&ov, lua.obj2gco(orphan))
 	testing.expect(t, lua.luaH_setint(L, weak, 1, &ov) == .Ok)
 
 	// key 2 -> a string we root on the stack (strongly held, must survive).
 	kept := lua.luaS_new(L, "kept-weak-value")
-	push_root(L, &kept.header)
+	push_root(L, lua.obj2gco(kept))
 	kv: lua.TValue
 	lua.set_string(&kv, kept)
 	testing.expect(t, lua.luaH_setint(L, weak, 2, &kv) == .Ok)
@@ -173,7 +173,7 @@ gc_phase7_finalizer_runs :: proc(t: ^testing.T) {
 	// Root the metatable for as long as we are wiring it up; the finalizable
 	// table itself is deliberately left unrooted.
 	mt := lua.luaH_new(L)
-	push_root(L, &mt.header)
+	push_root(L, lua.obj2gco(mt))
 
 	gckey := lua.luaS_new(L, "__gc")
 	gk: lua.TValue
@@ -184,7 +184,7 @@ gc_phase7_finalizer_runs :: proc(t: ^testing.T) {
 
 	victim := lua.luaH_new(L)
 	victim.metatable = mt
-	lua.luaC_checkfinalizer(L, &victim.header, mt)
+	lua.luaC_checkfinalizer(L, lua.obj2gco(victim), mt)
 
 	// The victim is unreachable: collecting must separate it, resurrect it for
 	// the finalizer, and run `__gc` once.

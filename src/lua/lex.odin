@@ -216,10 +216,10 @@ buff_remove :: #force_inline proc(ls: ^LexState, n: uint) {
 // later; `_ENV` is fixed but left with `extra == 0` so it stays a normal name.
 luaX_init :: proc(L: ^Lua_State) {
 	e := luaS_new(L, LUA_ENV) // create the env name
-	luaC_fix(L, &e.header) // never collect this name
+	luaC_fix(L, obj2gco(e)) // never collect this name
 	for i in 0 ..< NUM_RESERVED {
 		ts := luaS_new(L, luaX_tokens[i])
-		luaC_fix(L, &ts.header) // reserved words are never collected
+		luaC_fix(L, obj2gco(ts)) // reserved words are never collected
 		ts.extra = u8(i + 1) // mark as reserved word #(i+1)
 	}
 }

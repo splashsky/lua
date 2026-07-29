@@ -122,14 +122,18 @@ tofinalize :: #force_inline proc "contextless" (o: ^GCObject) -> bool {
 // GCObject <-> typed-object conversions
 // ---------------------------------------------------------------------------
 //
-// Every collectable type embeds `GCObject` as its first field, so a pointer to
-// the object and a pointer to its header share an address. These helpers make the
-// punning explicit and searchable instead of scattering raw casts. `obj2gco`
-// turns any typed object pointer into a `^GCObject`; the typed `gco2*` casts go
-// the other way and assume the caller has already checked the tag.
+// Every collectable type spells out the three `GCObject` fields at offset zero,
+// so its pointer and a header pointer share an address. Keep this conversion
+// constrained to that closed set: accepting rawptr would make it too easy to
+// manufacture a GC header from an unrelated allocation. Code using the result
+// must touch only `next`, `tt`, and `marked`; copying the whole 16-byte
+// `GCObject` would overwrite concrete fields packed into its trailing padding.
 
-obj2gco :: #force_inline proc "contextless" (o: rawptr) -> ^GCObject {
-	return (^GCObject)(o)
+obj2gco :: #force_inline proc "contextless" (x: ^$T) -> ^GCObject
+	where T == Table || T == TString || T == Udata || T == UpVal ||
+	      T == CClosure || T == LClosure || T == Proto || T == Lua_State
+{
+	return (^GCObject)(x)
 }
 
 // ---------------------------------------------------------------------------
@@ -332,9 +336,9 @@ reallymarkobject :: proc(g: ^Global_State, o: ^GCObject) {
 	case VUPVAL:
 		uv := (^UpVal)(o)
 		if uv.open {
-			set2gray(uv) // open upvalues are revisited via their thread
+			set2gray(obj2gco(uv)) // open upvalues are revisited via their thread
 		} else {
-			set2black(uv)
+			set2black(obj2gco(uv))
 		}
 		mark_value(g, upval_value(uv)) // mark the referenced value
 
@@ -349,7 +353,7 @@ reallymarkobject :: proc(g: ^Global_State, o: ^GCObject) {
 		u := (^Udata)(o)
 		if u.nuvalue == 0 {
 			if u.metatable != nil {
-				mark_object_n(g, &u.metatable.header)
+				mark_object_n(g, obj2gco(u.metatable))
 			}
 			set2black(o)
 		} else {
@@ -481,12 +485,12 @@ iscleared :: proc(g: ^Global_State, o: ^GCObject) -> bool {
 // `traverseudata`.
 traverse_udata :: proc(g: ^Global_State, u: ^Udata) -> L_Mem {
 	if u.metatable != nil {
-		mark_object_n(g, &u.metatable.header)
+		mark_object_n(g, obj2gco(u.metatable))
 	}
 	for i in 0 ..< int(u.nuvalue) {
 		mark_value(g, udata_uv(u, i))
 	}
-	genlink(g, &u.header)
+	genlink(g, obj2gco(u))
 	return 1 + L_Mem(u.nuvalue)
 }
 
@@ -535,7 +539,7 @@ traverse_strong_table :: proc(g: ^Global_State, t: ^Table) {
 			mark_value(g, &n.val)
 		}
 	}
-	genlink(g, &t.header)
+	genlink(g, obj2gco(t))
 }
 
 // Scan a table with weak values (strong keys). Keys are marked; if any value is
@@ -559,11 +563,11 @@ traverse_weakvalue :: proc(g: ^Global_State, t: ^Table) {
 		}
 	}
 	if g.gcstate == GCSpropagate {
-		linkobjgclist(&t.header, &g.grayagain)
+		linkobjgclist(obj2gco(t), &g.grayagain)
 	} else if hasclears {
-		linkobjgclist(&t.header, &g.weak)
+		linkobjgclist(obj2gco(t), &g.weak)
 	} else {
-		genlink(g, &t.header)
+		genlink(g, obj2gco(t))
 	}
 }
 
@@ -592,13 +596,13 @@ traverse_ephemeron :: proc(g: ^Global_State, t: ^Table, inv: bool) -> bool {
 		}
 	}
 	if g.gcstate == GCSpropagate {
-		linkobjgclist(&t.header, &g.grayagain)
+		linkobjgclist(obj2gco(t), &g.grayagain)
 	} else if hasww {
-		linkobjgclist(&t.header, &g.ephemeron)
+		linkobjgclist(obj2gco(t), &g.ephemeron)
 	} else if hasclears {
-		linkobjgclist(&t.header, &g.allweak)
+		linkobjgclist(obj2gco(t), &g.allweak)
 	} else {
-		genlink(g, &t.header)
+		genlink(g, obj2gco(t))
 	}
 	return marked
 }
@@ -635,7 +639,7 @@ getmode :: proc(g: ^Global_State, t: ^Table) -> int {
 // Returns the traversal work estimate. Reference Lua's `traversetable`.
 traverse_table :: proc(g: ^Global_State, t: ^Table) -> L_Mem {
 	if t.metatable != nil {
-		mark_object_n(g, &t.metatable.header)
+		mark_object_n(g, obj2gco(t.metatable))
 	}
 	switch getmode(g, t) {
 	case 0:
@@ -648,9 +652,9 @@ traverse_table :: proc(g: ^Global_State, t: ^Table) -> L_Mem {
 		// All weak: nothing to traverse now, but during propagate the
 		// metatable still needs an atomic revisit.
 		if g.gcstate == GCSpropagate {
-			linkobjgclist(&t.header, &g.grayagain)
+			linkobjgclist(obj2gco(t), &g.grayagain)
 		} else {
-			linkobjgclist(&t.header, &g.allweak)
+			linkobjgclist(obj2gco(t), &g.allweak)
 		}
 	}
 	return 1 + 2 * L_Mem(sizenode(t)) + L_Mem(t.asize)
@@ -659,12 +663,12 @@ traverse_table :: proc(g: ^Global_State, t: ^Table) -> L_Mem {
 // Scan a Lua closure: its prototype and each of its upvalues.
 traverse_lclosure :: proc(g: ^Global_State, cl: ^LClosure) -> L_Mem {
 	if cl.p != nil {
-		mark_object_n(g, &cl.p.header)
+		mark_object_n(g, obj2gco(cl.p))
 	}
 	for i in 0 ..< int(cl.nupvalues) {
 		uv := cl.upvals[i]
 		if uv != nil {
-			mark_object_n(g, &uv.header)
+			mark_object_n(g, obj2gco(uv))
 		}
 	}
 	return 1 + L_Mem(cl.nupvalues)
@@ -682,24 +686,24 @@ traverse_cclosure :: proc(g: ^Global_State, cl: ^CClosure) -> L_Mem {
 // and local-variable names. Reference Lua's `traverseproto`.
 traverse_proto :: proc(g: ^Global_State, f: ^Proto) -> L_Mem {
 	if f.source != nil {
-		mark_object_n(g, &f.source.header)
+		mark_object_n(g, obj2gco(f.source))
 	}
 	for i in 0 ..< f.sizek {
 		mark_value(g, &f.k[i])
 	}
 	for i in 0 ..< f.sizeupvalues {
 		if f.upvalues[i].name != nil {
-			mark_object_n(g, &f.upvalues[i].name.header)
+			mark_object_n(g, obj2gco(f.upvalues[i].name))
 		}
 	}
 	for i in 0 ..< f.sizep {
 		if f.p[i] != nil {
-			mark_object_n(g, &f.p[i].header)
+			mark_object_n(g, obj2gco(f.p[i]))
 		}
 	}
 	for i in 0 ..< f.sizelocvars {
 		if f.locvars[i].varname != nil {
-			mark_object_n(g, &f.locvars[i].varname.header)
+			mark_object_n(g, obj2gco(f.locvars[i].varname))
 		}
 	}
 	return 1 + L_Mem(f.sizek) + L_Mem(f.sizeupvalues) + L_Mem(f.sizep) + L_Mem(f.sizelocvars)
@@ -712,8 +716,8 @@ traverse_proto :: proc(g: ^Global_State, f: ^Proto) -> L_Mem {
 // the stack may be shrunk, and the thread is re-linked into `twups` if it still has
 // open upvalues. Reference Lua's `traversethread`.
 traverse_thread :: proc(g: ^Global_State, th: ^Lua_State) -> L_Mem {
-	if isold(&th.header) || g.gcstate == GCSpropagate {
-		linkobjgclist(&th.header, &g.grayagain)
+	if isold(obj2gco(th)) || g.gcstate == GCSpropagate {
+		linkobjgclist(obj2gco(th), &g.grayagain)
 	}
 	if th.stack == nil {
 		return 1 // a thread that never got its stack (mid-construction)
@@ -722,7 +726,7 @@ traverse_thread :: proc(g: ^Global_State, th: ^Lua_State) -> L_Mem {
 		mark_value(g, &th.stack[i].val)
 	}
 	for uv := th.openupval; uv != nil; uv = uv.open_next {
-		mark_object_n(g, &uv.header)
+		mark_object_n(g, obj2gco(uv))
 	}
 	if g.gcstate == GCSatomic { // final traversal?
 		if !g.gcemergency {
@@ -859,7 +863,7 @@ freeobj :: proc(L: ^Lua_State, o: ^GCObject) {
 markmt :: proc(g: ^Global_State) {
 	for i in 0 ..< NUM_TYPES {
 		if g.mt[i] != nil {
-			mark_object_n(g, &g.mt[i].header)
+			mark_object_n(g, obj2gco(g.mt[i]))
 		}
 	}
 }
@@ -880,13 +884,13 @@ remarkupvals :: proc(g: ^Global_State) {
 	p := &g.twups
 	for p^ != nil {
 		thread := p^
-		if !is_white(&thread.header) && thread.openupval != nil {
+		if !is_white(obj2gco(thread)) && thread.openupval != nil {
 			p = &thread.twups // keep marked thread with upvalues in the list
 		} else {
 			p^ = thread.twups // unlink...
 			thread.twups = thread // ...and mark it out of the list
 			for uv := thread.openupval; uv != nil; uv = uv.open_next {
-				if !is_white(&uv.header) { // already visited?
+				if !is_white(obj2gco(uv)) { // already visited?
 					mark_value(g, upval_value(uv))
 				}
 			}

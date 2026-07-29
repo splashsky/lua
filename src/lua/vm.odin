@@ -377,7 +377,7 @@ luaV_finishset :: proc(L: ^Lua_State, t_in: ^TValue, key: ^TValue, val: ^TValue)
 			if !is_empty(slot) { // present: plain update, no metamethod
 				set_obj(slot, val)
 				if is_collectable(val) {
-					luaC_barrierback(L, &h.header)
+					luaC_barrierback(L, obj2gco(h))
 				}
 				return
 			}
@@ -386,7 +386,7 @@ luaV_finishset :: proc(L: ^Lua_State, t_in: ^TValue, key: ^TValue, val: ^TValue)
 				luaH_set(L, h, key, val)
 				invalidateTMcache(h)
 				if is_collectable(val) {
-					luaC_barrierback(L, &h.header)
+					luaC_barrierback(L, obj2gco(h))
 				}
 				return
 			}
@@ -424,7 +424,7 @@ vm_settable :: proc(L: ^Lua_State, ci_idx: int, pc: int, t: ^TValue, key: ^TValu
 		if !is_empty(slot) { // present: raw update, no __newindex
 			set_obj(slot, val)
 			if is_collectable(val) {
-				luaC_barrierback(L, &h.header)
+				luaC_barrierback(L, obj2gco(h))
 			}
 			return
 		}
@@ -591,7 +591,7 @@ pushclosure :: proc(L: ^Lua_State, p: ^Proto, encup: [^]^UpVal, base: int, ra: i
 		} else {
 			ncl.upvals[i] = encup[uv[i].idx]
 		}
-		luaC_barrier(L, &ncl.header, &ncl.upvals[i].header)
+		luaC_barrier(L, obj2gco(ncl), obj2gco(ncl.upvals[i]))
 	}
 }
 
@@ -800,7 +800,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				set_obj(upval_value(uv), stack_value(L, ra))
 				rav := stack_value(L, ra)
 				if is_collectable(rav) {
-					luaC_barrier(L, &uv.header, rav.value_.gc)
+					luaC_barrier(L, obj2gco(uv), rav.value_.gc)
 				}
 
 			case .GETTABUP:
@@ -1375,7 +1375,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 					set_obj(&h.array[last - 1], val)
 					last -= 1
 					if is_collectable(val) {
-						luaC_barrierback(L, &h.header)
+						luaC_barrierback(L, obj2gco(h))
 					}
 					n -= 1
 				}

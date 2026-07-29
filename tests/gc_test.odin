@@ -73,7 +73,7 @@ gc_keeps_rooted :: proc(t: ^testing.T) {
 
 	base := count_allgc(L)
 	tbl := lua.luaH_new(L)
-	push_root(L, &tbl.header)
+	push_root(L, lua.obj2gco(tbl))
 
 	lua.gc_full(L, false)
 	testing.expect_value(t, count_allgc(L), base + 1)
@@ -95,11 +95,11 @@ gc_keeps_value_reachable_through_table :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 
 	tbl := lua.luaH_new(L)
-	push_root(L, &tbl.header)
+	push_root(L, lua.obj2gco(tbl))
 
 	s := lua.luaS_new(L, "reachable-through-a-table-value")
 	sv: lua.TValue
-	lua.set_gc(&sv, &s.header)
+	lua.set_gc(&sv, lua.obj2gco(s))
 	st := lua.luaH_setint(L, tbl, 1, &sv)
 	testing.expect(t, st == .Ok)
 

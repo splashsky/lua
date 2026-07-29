@@ -69,7 +69,7 @@ setup_lexer :: proc(fx: ^Lexer_Fixture, source: string, chunkname: string) {
 	// Anchor table, rooted on the stack.
 	h := lua.luaH_new(L)
 	hv := lua.stack_value(L, L.top)
-	lua.set_gc(hv, &h.header)
+	lua.set_gc(hv, lua.obj2gco(h))
 	L.top += 1
 
 	lua.mbuffer_init(&fx.buff)

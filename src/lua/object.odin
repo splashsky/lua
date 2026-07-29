@@ -168,8 +168,9 @@ StackValue :: struct #raw_union {
 
 // The common header every collectable object begins with: a link in the GC's
 // sweep list, the object's own type tag, and its GC mark bits. Reference Lua's
-// `CommonHeader` / `GCObject`. Concrete objects (TString, Table, ...) embed this
-// as their first field so a `^GCObject` can point at any of them.
+// `CommonHeader` / `GCObject`. This standalone type is for the collector's typed
+// lists and links; concrete objects repeat these fields inline at the same
+// offsets so their own small fields can use the trailing padding.
 GCObject :: struct {
 	next:   ^GCObject,
 	tt:     Byte,
@@ -395,16 +396,26 @@ set_obj :: #force_inline proc "contextless" (dst: ^TValue, src: ^TValue) {
 // scalar Odin/C type, so the plain `TValue` *is* that maximally-aligned slot.
 UValue :: TValue
 
+// Keep the common GC fields inline, exactly as reference C's CommonHeader macro
+// does. This lets the small `nuvalue` field use the bytes that would otherwise be
+// padding inside a nested 16-byte `GCObject`; embedding the header again would
+// quietly add 8 bytes before every userdata payload.
 Udata :: struct {
-	using header: GCObject, // MUST be first: enables ^GCObject punning
-	nuvalue:      u16, // number of trailing user-value slots
-	len:          uint, // number of raw data bytes
-	metatable:    ^Table, // this userdata's own metatable (nil if none)
-	gclist:       ^GCObject, // GC gray-list thread
+	next:      ^GCObject,
+	tt:        u8,
+	marked:    u8,
+	nuvalue:   u16, // number of trailing user-value slots
+	len:       uint, // number of raw data bytes
+	metatable: ^Table, // this userdata's own metatable (nil if none)
+	gclist:    ^GCObject, // GC gray-list thread
 	// Inline after this header: `nuvalue` UValue slots, then `len` data bytes.
 }
 
-#assert(offset_of(Udata, header) == 0)
+#assert(offset_of(Udata, next) == 0)
+#assert(offset_of(Udata, tt) == 8)
+#assert(offset_of(Udata, marked) == 9)
+#assert(size_of(Udata) == 40)
+#assert(size_of(Udata) % align_of(UValue) == 0)
 
 // The byte size of a full-userdata block carrying `nuvalue` user values and `size`
 // data bytes -- reference Lua's `sizeudata`. Header + inline user values + data.
@@ -431,7 +442,7 @@ udata_mem :: #force_inline proc "contextless" (u: ^Udata) -> [^]u8 {
 // collectable, so `set_gc` tags the value with the userdata variant plus the
 // collectable bit.
 set_userdata :: #force_inline proc "contextless" (o: ^TValue, u: ^Udata) {
-	set_gc(o, &u.header)
+	set_gc(o, obj2gco(u))
 }
 
 // Recover the `^Udata` a value points at -- reference Lua's `uvalue`.

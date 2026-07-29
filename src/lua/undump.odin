@@ -162,7 +162,7 @@ load_string :: proc(S: ^LoadState, p: ^Proto, sl: ^^TString) {
 		}
 		ts = str_value(&stv)
 		sl^ = ts
-		luaC_barrier(L, &p.header, &ts.header)
+		luaC_barrier(L, obj2gco(p), obj2gco(ts))
 		return // do not save it again
 	} else if size - 1 <= MAXSHORTLEN { // short string?
 		real := size - 1
@@ -170,12 +170,12 @@ load_string :: proc(S: ^LoadState, p: ^Proto, sl: ^^TString) {
 		load_block(S, &buff[0], real + 1)
 		ts = luaS_newlstr(L, &buff[0], real)
 		sl^ = ts
-		luaC_barrier(L, &p.header, &ts.header)
+		luaC_barrier(L, obj2gco(p), obj2gco(ts))
 	} else { // long string: allocate then read directly into its buffer
 		real := size - 1
 		ts = luaS_createlngstrobj(L, real)
 		sl^ = ts // anchor before the read (which can GC)
-		luaC_barrier(L, &p.header, &ts.header)
+		luaC_barrier(L, obj2gco(p), obj2gco(ts))
 		load_block(S, str_bytes(ts), real + 1) // content plus NUL, in place
 	}
 	// Record the newly-loaded string for future reuse references.
@@ -183,7 +183,7 @@ load_string :: proc(S: ^LoadState, p: ^Proto, sl: ^^TString) {
 	sv: TValue
 	set_string(&sv, ts)
 	luaH_setint(L, S.h, Integer(S.nstr), &sv)
-	luaC_barrierback(L, &S.h.header)
+	luaC_barrierback(L, obj2gco(S.h))
 }
 
 // Read the bytecode. Reference `loadCode`.
@@ -246,7 +246,7 @@ load_protos :: proc(S: ^LoadState, f: ^Proto) {
 	}
 	for i in 0 ..< n {
 		f.p[i] = luaF_newproto(S.L)
-		luaC_barrier(S.L, &f.header, &f.p[i].header)
+		luaC_barrier(S.L, obj2gco(f), obj2gco(f.p[i]))
 		load_function(S, f.p[i])
 	}
 }
@@ -411,14 +411,14 @@ luaU_undump :: proc(L: ^Lua_State, z: ^Zio, name: string, fixed: bool) -> ^LClos
 	S.offset = 1 // the first byte was already read by the parser
 	check_header(&S)
 	cl := luaF_newLclosure(L, int(load_byte(&S)))
-	set_gc(stack_value(L, L.top), &cl.header) // anchor the closure
+	set_gc(stack_value(L, L.top), obj2gco(cl)) // anchor the closure
 	inc_top(L)
 	S.h = luaH_new(L) // create the saved-string list
 	S.nstr = 0
-	set_gc(stack_value(L, L.top), &S.h.header) // anchor it too
+	set_gc(stack_value(L, L.top), obj2gco(S.h)) // anchor it too
 	inc_top(L)
 	cl.p = luaF_newproto(L)
-	luaC_barrier(L, &cl.header, &cl.p.header)
+	luaC_barrier(L, obj2gco(cl), obj2gco(cl.p))
 	load_function(&S, cl.p)
 	if int(cl.nupvalues) != cl.p.sizeupvalues {
 		undump_error(&S, "corrupted chunk")

@@ -330,7 +330,7 @@ dump_header :: proc(D: ^DumpState) {
 luaU_dump :: proc(L: ^Lua_State, f: ^Proto, writer: Lua_Writer, data: rawptr, strip: bool) -> i32 {
 	D: DumpState
 	D.h = luaH_new(L) // aux. table tracking strings already dumped
-	set_gc(stack_value(L, L.top), &D.h.header) // anchor it against GC
+	set_gc(stack_value(L, L.top), obj2gco(D.h)) // anchor it against GC
 	inc_top(L)
 	D.L = L
 	D.writer = writer

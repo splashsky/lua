@@ -39,10 +39,10 @@ udata_gettmbyobj_uses_own_metatable :: proc(t: ^testing.T) {
 	u := new_udata(L)
 	uo: lua.TValue
 	lua.set_userdata(&uo, u)
-	push_root(L, &u.header)
+	push_root(L, lua.obj2gco(u))
 
 	mt := lua.luaH_new(L)
-	push_root(L, &mt.header)
+	push_root(L, lua.obj2gco(mt))
 	sentinel: lua.TValue
 	lua.set_string(&sentinel, lua.luaS_new(L, "userdata-index-hook"))
 	set_str_field(L, mt, "__index", &sentinel)
@@ -68,13 +68,13 @@ udata_objtypename_reports_name :: proc(t: ^testing.T) {
 	u := new_udata(L)
 	uo: lua.TValue
 	lua.set_userdata(&uo, u)
-	push_root(L, &u.header)
+	push_root(L, lua.obj2gco(u))
 
 	// Without a metatable, the generic type name is used.
 	testing.expect_value(t, lua.luaT_objtypename(L, &uo), "userdata")
 
 	mt := lua.luaH_new(L)
-	push_root(L, &mt.header)
+	push_root(L, lua.obj2gco(mt))
 	nameval: lua.TValue
 	lua.set_string(&nameval, lua.luaS_new(L, "Point"))
 	set_str_field(L, mt, "__name", &nameval)
@@ -99,11 +99,11 @@ udata_eq_metamethod_honored :: proc(t: ^testing.T) {
 	bo: lua.TValue
 	lua.set_userdata(&ao, a)
 	lua.set_userdata(&bo, b)
-	push_root(L, &a.header)
-	push_root(L, &b.header)
+	push_root(L, lua.obj2gco(a))
+	push_root(L, lua.obj2gco(b))
 
 	mt := lua.luaH_new(L)
-	push_root(L, &mt.header)
+	push_root(L, lua.obj2gco(mt))
 	eqval: lua.TValue
 	lua.set_c_function(&eqval, udata_eq_true)
 	set_str_field(L, mt, "__eq", &eqval)
@@ -154,14 +154,14 @@ udata_gc_finalizer_runs :: proc(t: ^testing.T) {
 	udata_final_count = 0
 
 	mt := lua.luaH_new(L)
-	push_root(L, &mt.header)
+	push_root(L, lua.obj2gco(mt))
 	gcval: lua.TValue
 	lua.set_c_function(&gcval, udata_finalizer)
 	set_str_field(L, mt, "__gc", &gcval)
 
 	victim := new_udata(L) // deliberately not rooted
 	victim.metatable = mt
-	lua.luaC_checkfinalizer(L, &victim.header, mt)
+	lua.luaC_checkfinalizer(L, lua.obj2gco(victim), mt)
 
 	lua.lua_gc(L, lua.LUA_GCCOLLECT)
 	testing.expect_value(t, udata_final_count, 1)

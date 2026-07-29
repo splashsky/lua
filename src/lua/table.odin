@@ -42,8 +42,12 @@ Node :: struct {
 // be cast back to `^Node` (reference's `nodefromval`). `luaH_next` relies on this.
 #assert(offset_of(Node, val) == 0)
 
-// A Lua table. The header comes first (GC punning). See the file banner for how
-// the array/hash parts are represented.
+// A Lua table. The three common GC-header fields are written out inline rather
+// than embedded as a `GCObject`. That is deliberately a little repetitive:
+// reference C's CommonHeader macro is inline too, so `flags`, `lsizenode`, and
+// `asize` fill its trailing padding. Nesting a `GCObject` here would silently
+// reserve all 16 bytes for the header and re-inflate every table by 8 bytes.
+// See the file banner for how the array/hash parts are represented.
 //
 //   * `flags`     -- the fast-metamethod-absence cache (low bits) plus BITDUMMY
 //     (bit 6), which records that the hash part is the shared empty `dummy_node`.
@@ -56,18 +60,23 @@ Node :: struct {
 //   * `metatable` -- this table's metatable, or nil.
 //   * `gclist`    -- threads the table onto the GC's gray worklist while marking.
 Table :: struct {
-	using header: GCObject,
-	flags:        u8,
-	lsizenode:    u8,
-	asize:        u32,
-	array:        [^]TValue,
-	node:         [^]Node,
-	len_hint:     u32,
-	metatable:    ^Table,
-	gclist:       ^GCObject,
+	next:      ^GCObject,
+	tt:        u8,
+	marked:    u8,
+	flags:     u8,
+	lsizenode: u8,
+	asize:     u32,
+	len_hint:  u32,
+	array:     [^]TValue,
+	node:      [^]Node,
+	metatable: ^Table,
+	gclist:    ^GCObject,
 }
 
-#assert(offset_of(Table, header) == 0)
+#assert(offset_of(Table, next) == 0)
+#assert(offset_of(Table, tt) == 8)
+#assert(offset_of(Table, marked) == 9)
+#assert(size_of(Table) == 56)
 
 // Bit 6 of `flags`: the hash part is the shared dummy node. Reference `BITDUMMY`.
 BITDUMMY :: 1 << 6
@@ -77,10 +86,10 @@ is_dummy :: #force_inline proc "contextless" (t: ^Table) -> bool {
 }
 
 // Point a value at a table -- reference Lua's `sethvalue`. The value's tag is the
-// table tag plus the collectable bit; the header sits at offset 0, so `&t.header`
-// is the object the value references.
+// table tag plus the collectable bit; the inline header sits at offset 0, so
+// `obj2gco` yields the object the value references.
 set_table :: #force_inline proc "contextless" (o: ^TValue, t: ^Table) {
-	set_gc(o, &t.header)
+	set_gc(o, obj2gco(t))
 }
 
 // `sizenode == 2^lsizenode`, reference's `sizenode`/`twoto`. Even the dummy has
@@ -650,7 +659,7 @@ luaH_newkey :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, value: ^TValue) -> T
 	if no_variant(key.tt_) == TSTRING {
 		invalidateTMcache(t)
 	}
-	luaC_barrierback(L, &t.header)
+	luaC_barrierback(L, obj2gco(t))
 	return .Ok
 }
 
@@ -664,7 +673,7 @@ luaH_setint :: proc(L: ^Lua_State, t: ^Table, key: Integer, value: ^TValue) -> T
 	if ik > 0 {
 		set_obj(&t.array[ik - 1], value)
 		if is_collectable(value) {
-			luaC_barrierback(L, &t.header)
+			luaC_barrierback(L, obj2gco(t))
 		}
 		return .Ok
 	}
@@ -672,7 +681,7 @@ luaH_setint :: proc(L: ^Lua_State, t: ^Table, key: Integer, value: ^TValue) -> T
 	if !is_absent(slot) {
 		set_obj(slot, value)
 		if is_collectable(value) {
-			luaC_barrierback(L, &t.header)
+			luaC_barrierback(L, obj2gco(t))
 		}
 		return .Ok
 	}
@@ -707,7 +716,7 @@ luaH_set :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, value: ^TValue) -> Thre
 	if !is_absent(slot) {
 		set_obj(slot, value)
 		if is_collectable(value) {
-			luaC_barrierback(L, &t.header)
+			luaC_barrierback(L, obj2gco(t))
 		}
 		return .Ok
 	}

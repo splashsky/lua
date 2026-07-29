@@ -72,9 +72,13 @@ MAXSTRTB :: 1 << 26
 // The string object
 // ---------------------------------------------------------------------------
 
-// A Lua string. The header must come first so a `^GCObject` can alias it. The
-// character bytes are NOT a field here -- they live in the same heap block right
-// after this struct (see the file header) and are reached through `str_bytes`.
+// A Lua string. The common `next`, `tt`, and `marked` fields are intentionally
+// written inline instead of embedding a `GCObject`. Reference C's CommonHeader
+// macro does the same thing, allowing `extra` and `hash` to occupy the header's
+// would-be padding; nesting the header would make every string 8 bytes larger.
+// The character bytes are NOT a field here -- they live in the same heap block
+// right after this struct (see the file header) and are reached through
+// `str_bytes`.
 //
 // Fields:
 //   * `extra` -- for short strings, a nonzero value marks a reserved word (the
@@ -87,12 +91,19 @@ MAXSTRTB :: 1 << 26
 //   * `hnext` -- intern-chain link (short strings only): the next string sharing
 //     this bucket in the global string table.
 TString :: struct {
-	using header: GCObject,
-	extra:        u8,
-	hash:         u32,
-	len:          uint,
-	hnext:        ^TString,
+	next:   ^GCObject,
+	tt:     u8,
+	marked: u8,
+	extra:  u8,
+	hash:   u32,
+	len:    uint,
+	hnext:  ^TString,
 }
+
+#assert(offset_of(TString, next) == 0)
+#assert(offset_of(TString, tt) == 8)
+#assert(offset_of(TString, marked) == 9)
+#assert(size_of(TString) == 32)
 
 // The number of bytes a string object of length `len` occupies: the header plus
 // the inline characters plus the trailing NUL we always append (so the bytes can
@@ -120,7 +131,7 @@ str_slice :: #force_inline proc "contextless" (ts: ^TString) -> []u8 {
 // Point a value at a string object. A thin typed wrapper over `set_gc` that
 // exists purely so call sites read as "store this string" -- reference `setsvalue`.
 set_string :: #force_inline proc "contextless" (o: ^TValue, ts: ^TString) {
-	set_gc(o, &ts.header)
+	set_gc(o, obj2gco(ts))
 }
 
 // View a string-typed value's payload as a `^TString` -- reference `tsvalue`.
@@ -304,8 +315,8 @@ internshrstr :: proc(L: ^Lua_State, str: [^]u8, l: uint) -> ^TString {
 	list := &tb.hash[str_mod(h, tb.size)]
 	for ts := list^; ts != nil; ts = ts.hnext {
 		if l == ts.len && mem_eq(str, str_bytes(ts), l) {
-			if is_dead(g, &ts.header) {
-				change_white(&ts.header) // resurrect a soon-to-be-swept string
+			if is_dead(g, obj2gco(ts)) {
+				change_white(obj2gco(ts)) // resurrect a soon-to-be-swept string
 			}
 			return ts
 		}
@@ -425,7 +436,7 @@ luaS_clearcache :: proc(g: ^Global_State) {
 	for i in 0 ..< STRCACHE_N {
 		for j in 0 ..< STRCACHE_M {
 			p := g.strcache[i][j]
-			if p != nil && is_white(&p.header) {
+			if p != nil && is_white(obj2gco(p)) {
 				g.strcache[i][j] = g.memerrmsg
 			}
 		}
@@ -453,7 +464,7 @@ luaS_init :: proc(L: ^Lua_State) -> Thread_Status {
 	if g.memerrmsg == nil {
 		return throw(L, .Err_Mem)
 	}
-	luaC_fix(L, &g.memerrmsg.header)
+	luaC_fix(L, obj2gco(g.memerrmsg))
 
 	for i in 0 ..< STRCACHE_N {
 		for j in 0 ..< STRCACHE_M {

@@ -89,7 +89,7 @@ table_string_key_roundtrip :: proc(t: ^testing.T) {
 	val: lua.TValue
 	lua.set_int(&val, 42)
 	kv: lua.TValue
-	lua.set_gc(&kv, &key.header)
+	lua.set_gc(&kv, lua.obj2gco(key))
 	st := lua.luaH_set(L, tbl, &kv, &val)
 	testing.expect(t, st == .Ok)
 
@@ -175,7 +175,7 @@ table_bulk_insert_rehashes_losslessly :: proc(t: ^testing.T) {
 set_str_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, name: string, v: lua.Integer) {
 	key := lua.luaS_new(L, name)
 	kv: lua.TValue
-	lua.set_gc(&kv, &key.header)
+	lua.set_gc(&kv, lua.obj2gco(key))
 	val: lua.TValue
 	lua.set_int(&val, v)
 	st := lua.luaH_set(L, tbl, &kv, &val)
@@ -186,7 +186,7 @@ set_str_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, name: string, v: lua.Int
 clear_str_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, name: string) {
 	key := lua.luaS_new(L, name)
 	kv: lua.TValue
-	lua.set_gc(&kv, &key.header)
+	lua.set_gc(&kv, lua.obj2gco(key))
 	val: lua.TValue
 	lua.set_nil(&val)
 	st := lua.luaH_set(L, tbl, &kv, &val)

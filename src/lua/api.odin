@@ -624,7 +624,7 @@ lua_pushlightuserdata :: proc(L: ^Lua_State, p: rawptr) {
 // Push the running thread and report whether it is the main thread -- reference
 // `lua_pushthread`.
 lua_pushthread :: proc(L: ^Lua_State) -> bool {
-	set_gc(stack_value(L, L.top), &L.header)
+	set_gc(stack_value(L, L.top), obj2gco(L))
 	api_incr_top(L)
 	return L == &L.g.main_thread.l
 }
@@ -753,7 +753,7 @@ lua_rawgetp :: proc(L: ^Lua_State, idx: int, p: rawptr) -> int {
 // `lua_createtable`.
 lua_createtable :: proc(L: ^Lua_State, narray, nrec: int) {
 	t := luaH_new(L)
-	set_gc(stack_value(L, L.top), &t.header)
+	set_gc(stack_value(L, L.top), obj2gco(t))
 	api_incr_top(L)
 	if narray > 0 || nrec > 0 {
 		luaH_resize(L, t, u32(narray), u32(nrec))
@@ -807,7 +807,7 @@ lua_getmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
 	if mt == nil {
 		return false
 	}
-	set_gc(stack_value(L, L.top), &mt.header)
+	set_gc(stack_value(L, L.top), obj2gco(mt))
 	api_incr_top(L)
 	return true
 }
@@ -827,7 +827,7 @@ api_set :: proc(L: ^Lua_State, t: ^TValue, key: ^TValue, val: ^TValue) {
 		if !is_empty(slot) {
 			set_obj(slot, val)
 			if is_collectable(val) {
-				luaC_barrierback(L, &h.header)
+				luaC_barrierback(L, obj2gco(h))
 			}
 			return
 		}
@@ -882,7 +882,7 @@ lua_rawset :: proc(L: ^Lua_State, idx: int) {
 	h := table_value(t)
 	luaH_set(L, h, stack_value(L, L.top - 2), stack_value(L, L.top - 1))
 	invalidateTMcache(h)
-	luaC_barrierback(L, &h.header)
+	luaC_barrierback(L, obj2gco(h))
 	L.top -= 2
 }
 
@@ -892,7 +892,7 @@ lua_rawseti :: proc(L: ^Lua_State, idx: int, n: Integer) {
 	api_check(is_table(t), "table expected")
 	h := table_value(t)
 	luaH_setint(L, h, n, stack_value(L, L.top - 1))
-	luaC_barrierback(L, &h.header)
+	luaC_barrierback(L, obj2gco(h))
 	L.top -= 1
 }
 
@@ -905,7 +905,7 @@ lua_rawsetp :: proc(L: ^Lua_State, idx: int, p: rawptr) {
 	key: TValue
 	set_light_userdata(&key, p)
 	luaH_set(L, h, &key, stack_value(L, L.top - 1))
-	luaC_barrierback(L, &h.header)
+	luaC_barrierback(L, obj2gco(h))
 	L.top -= 1
 }
 
@@ -937,15 +937,15 @@ lua_setmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
 		h := table_value(o)
 		h.metatable = mt
 		if mt != nil {
-			luaC_barrier(L, &h.header, &mt.header)
-			luaC_checkfinalizer(L, &h.header, mt)
+			luaC_barrier(L, obj2gco(h), obj2gco(mt))
+			luaC_checkfinalizer(L, obj2gco(h), mt)
 		}
 	case TUSERDATA:
 		u := udata_value(o)
 		u.metatable = mt
 		if mt != nil {
-			luaC_barrier(L, &u.header, &mt.header)
-			luaC_checkfinalizer(L, &u.header, mt)
+			luaC_barrier(L, obj2gco(u), obj2gco(mt))
+			luaC_checkfinalizer(L, obj2gco(u), mt)
 		}
 	case:
 		L.g.mt[base_type(o)] = mt
@@ -966,7 +966,7 @@ lua_setiuservalue :: proc(L: ^Lua_State, idx: int, n: int) -> bool {
 		res = false
 	} else {
 		set_obj(udata_uv(u, n - 1), stack_value(L, L.top - 1))
-		luaC_barrierback(L, &u.header)
+		luaC_barrierback(L, obj2gco(u))
 		res = true
 	}
 	L.top -= 1
@@ -1156,7 +1156,7 @@ lua_load :: proc(
 		if f.nupvalues >= 1 {
 			gt := getGtable(L) // the globals table value
 			set_obj(upval_value(f.upvals[0]), gt)
-			luaC_barrier(L, &f.upvals[0].header, gc_value(gt))
+			luaC_barrier(L, obj2gco(f.upvals[0]), gc_value(gt))
 		}
 	}
 	return status
@@ -1287,7 +1287,7 @@ lua_setallocf :: proc(L: ^Lua_State, f: Alloc_Proc, ud: rawptr) {
 // `lua_newthread`.
 lua_newthread :: proc(L: ^Lua_State) -> ^Lua_State {
 	th := luaE_newthread(L)
-	set_gc(stack_value(L, L.top), &th.header)
+	set_gc(stack_value(L, L.top), obj2gco(th))
 	api_incr_top(L)
 	return th
 }
@@ -1315,7 +1315,7 @@ aux_upvalue :: proc(fi: ^TValue, n: int) -> (name: string, val: ^TValue, owner: 
 		}
 		// Native closures capture nameless values -- reference reports "" for a
 		// C upvalue (distinct from the "(no name)" a stripped Lua closure gives).
-		return "", &f.upvalue[n - 1], &f.header
+		return "", &f.upvalue[n - 1], obj2gco(f)
 	case VLCL:
 		f := lua_closure_value(fi)
 		p := f.p
@@ -1327,7 +1327,7 @@ aux_upvalue :: proc(fi: ^TValue, n: int) -> (name: string, val: ^TValue, owner: 
 		// placeholder "(no name)" rather than an empty string.
 		nm := p.upvalues[n - 1].name
 		name = nm == nil ? "(no name)" : string(str_slice(nm))
-		return name, upval_value(f.upvals[n - 1]), &f.header
+		return name, upval_value(f.upvals[n - 1]), obj2gco(f)
 	case:
 		return "", nil, nil
 	}

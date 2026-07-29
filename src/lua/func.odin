@@ -70,8 +70,13 @@ PF_FIXED :: 4 // prototype has parts in fixed (non-freeable) memory
 // The reference struct stores each array as a raw pointer plus a matching `size*`
 // count. We keep that shape exactly (multipointers `[^]T` + `int` counts) so the
 // dumper/undumper in Phase 8 can serialize it field-for-field, byte-compatibly.
+// The common GC fields are spelled out inline, not embedded as `GCObject`, on
+// purpose: reference C's CommonHeader macro is inline and lets the prototype's
+// three byte fields occupy its padding. A nested header would add 8 bytes.
 Proto :: struct {
-	using header:    GCObject, // MUST be first: enables ^GCObject punning
+	next:            ^GCObject,
+	tt:              u8,
+	marked:          u8,
 	numparams:       u8, // number of fixed (named) parameters
 	flag:            u8, // PF_* bits
 	maxstacksize:    u8, // registers this function needs
@@ -96,7 +101,10 @@ Proto :: struct {
 }
 
 // The GC punning promise, same as every other collectable object.
-#assert(offset_of(Proto, header) == 0)
+#assert(offset_of(Proto, next) == 0)
+#assert(offset_of(Proto, tt) == 8)
+#assert(offset_of(Proto, marked) == 9)
+#assert(size_of(Proto) == 160)
 
 // ---------------------------------------------------------------------------
 // Upvalues
@@ -121,21 +129,29 @@ MAXUPVAL :: 255
 // the state explicitly instead: `open` says which case we're in, and an open
 // upvalue names its slot by `(thread, stk_index)`, resolved against the live
 // backing array only at the moment of access.
+// These three header fields stay inline so `open` can pack into the same tail
+// padding, just as it does after CommonHeader in reference C. Replacing them with
+// a tidier nested `GCObject` would silently make every upvalue 8 bytes larger.
 UpVal :: struct {
-	using header: GCObject, // MUST be first: enables ^GCObject punning
-	open:         bool, // true while the captured slot is still on a stack
-	thread:       ^Lua_State, // (open only) the thread whose stack holds the slot
-	stk_index:    int, // (open only) index of that slot
-	value:        TValue, // (closed only) the upvalue's own storage
+	next:      ^GCObject,
+	tt:        u8,
+	marked:    u8,
+	open:      bool, // true while the captured slot is still on a stack
+	thread:    ^Lua_State, // (open only) the thread whose stack holds the slot
+	stk_index: int, // (open only) index of that slot
+	value:     TValue, // (closed only) the upvalue's own storage
 	// Open upvalues are threaded on their thread's `openupval` list, kept sorted
 	// by descending stack index. `open_prev` points at whatever link refers to us
 	// (either the previous node's `open_next` or the thread's list head) so we can
 	// splice ourselves out in O(1). Reference Lua's `u.open.next` / `previous`.
-	open_next:    ^UpVal,
-	open_prev:    ^^UpVal,
+	open_next: ^UpVal,
+	open_prev: ^^UpVal,
 }
 
-#assert(offset_of(UpVal, header) == 0)
+#assert(offset_of(UpVal, next) == 0)
+#assert(offset_of(UpVal, tt) == 8)
+#assert(offset_of(UpVal, marked) == 9)
+#assert(size_of(UpVal) == 64)
 
 // Resolve an upvalue to the `TValue` it currently stands for -- reference Lua's
 // `uplevel`/`upisopen` pair collapsed into one accessor. Open upvalues forward to
@@ -158,28 +174,46 @@ upval_value :: #force_inline proc "contextless" (uv: ^UpVal) -> ^TValue {
 // capture by value). Like reference Lua, the upvalue vector is allocated inline,
 // right after the struct, so one allocation holds the whole closure. `upvalue`
 // points at that trailing region.
+// Keep CommonHeader's fields inline so `nupvalues` occupies its trailing
+// padding, matching reference C. Embedding a 16-byte `GCObject` would waste that
+// space and move the inline TValue payload 8 bytes farther away.
 CClosure :: struct {
-	using header: GCObject, // MUST be first
-	nupvalues:    u8, // number of captured values
-	gclist:       ^GCObject, // GC gray-list thread
-	f:            C_Function, // the native function
-	upvalue:      [^]TValue, // inline captured values (single-block, see below)
+	next:      ^GCObject,
+	tt:        u8,
+	marked:    u8,
+	nupvalues: u8, // number of captured values
+	gclist:    ^GCObject, // GC gray-list thread
+	f:         C_Function, // the native function
+	upvalue:   [^]TValue, // inline captured values (single-block, see below)
 }
 
-#assert(offset_of(CClosure, header) == 0)
+#assert(offset_of(CClosure, next) == 0)
+#assert(offset_of(CClosure, tt) == 8)
+#assert(offset_of(CClosure, marked) == 9)
+#assert(size_of(CClosure) == 40)
+#assert(size_of(CClosure) % align_of(TValue) == 0)
 
 // A *Lua closure* -- reference Lua's `LClosure`. A prototype plus a vector of
 // *shared upvalue objects* (Lua closures capture by reference, via `UpVal`).
 // Again the upvalue-pointer vector is allocated inline after the struct.
+// As above, these fields deliberately mirror the inline C CommonHeader so
+// `nupvalues` packs into its padding. Do not "tidy" them into a nested header:
+// that would add 8 bytes to every Lua closure and shift its trailing vector.
 LClosure :: struct {
-	using header: GCObject, // MUST be first
-	nupvalues:    u8, // number of upvalues (must equal p.sizeupvalues)
-	gclist:       ^GCObject, // GC gray-list thread
-	p:            ^Proto, // the shared prototype
-	upvals:       [^]^UpVal, // inline vector of shared upvalues
+	next:      ^GCObject,
+	tt:        u8,
+	marked:    u8,
+	nupvalues: u8, // number of upvalues (must equal p.sizeupvalues)
+	gclist:    ^GCObject, // GC gray-list thread
+	p:         ^Proto, // the shared prototype
+	upvals:    [^]^UpVal, // inline vector of shared upvalues
 }
 
-#assert(offset_of(LClosure, header) == 0)
+#assert(offset_of(LClosure, next) == 0)
+#assert(offset_of(LClosure, tt) == 8)
+#assert(offset_of(LClosure, marked) == 9)
+#assert(size_of(LClosure) == 40)
+#assert(size_of(LClosure) % align_of(^UpVal) == 0)
 
 // Byte size of a C closure carrying `n` captured values -- reference Lua's
 // `sizeCclosure`. The struct header plus the inline value vector.
@@ -194,12 +228,12 @@ size_lclosure :: #force_inline proc "contextless" (n: int) -> uint {
 
 // Point a value at a Lua closure -- reference Lua's `setclLvalue`.
 set_lua_closure :: #force_inline proc "contextless" (o: ^TValue, cl: ^LClosure) {
-	set_gc(o, &cl.header)
+	set_gc(o, obj2gco(cl))
 }
 
 // Point a value at a C closure -- reference Lua's `setclCvalue`.
 set_c_closure :: #force_inline proc "contextless" (o: ^TValue, cl: ^CClosure) {
-	set_gc(o, &cl.header)
+	set_gc(o, obj2gco(cl))
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +301,7 @@ luaF_initupvals :: proc(L: ^Lua_State, cl: ^LClosure) -> Thread_Status {
 		uv.open_prev = nil
 		set_nil(&uv.value) // ...holding nil
 		cl.upvals[i] = uv
-		luaC_barrier(L, &cl.header, &uv.header)
+		luaC_barrier(L, obj2gco(cl), obj2gco(uv))
 	}
 	return .Ok
 }
@@ -355,10 +389,10 @@ luaF_closeupval :: proc(L: ^Lua_State, level: int) {
 		uv.thread = nil
 		// Preserve the GC invariant: a closed upvalue can never be gray, and if
 		// it was already black we must barrier the value it now owns.
-		if !is_white(&uv.header) {
-			set2black(&uv.header)
+		if !is_white(obj2gco(uv)) {
+			set2black(obj2gco(uv))
 			if is_collectable(&uv.value) {
-				luaC_barrier(L, &uv.header, uv.value.value_.gc)
+				luaC_barrier(L, obj2gco(uv), uv.value.value_.gc)
 			}
 		}
 	}

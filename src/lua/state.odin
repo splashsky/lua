@@ -215,14 +215,19 @@ Warn_Proc :: #type proc "c" (ud: rawptr, msg: cstring, tocont: i32)
 // owns a value stack and a call-frame stack, both growable arrays addressed by
 // index, plus the status/error/hook bookkeeping for this line of execution.
 //
-// It is itself a collectable object (a thread has GC type `VTHREAD`), so it
-// begins with the common GC header -- that first-field placement lets a
-// `^GCObject` alias any `^Lua_State` (asserted just below).
+// It is itself a collectable object (a thread has GC type `VTHREAD`). The three
+// common header fields are deliberately written inline rather than embedding a
+// `GCObject`: that mirrors reference C's CommonHeader macro and leaves its tail
+// padding available to the thread's own small fields. Lua_State happens not to
+// shrink because the following status and pointer alignment preserve its size,
+// but keeping the representation consistent prevents a future layout regression.
 Lua_State :: struct {
-	using header: GCObject, // MUST be first: enables ^GCObject punning
-	status:       Thread_Status, // last status of this thread
-	allowhook:    u8, // whether debug hooks may fire (Phase 5)
-	g:            ^Global_State, // the shared state this thread belongs to
+	next:            ^GCObject,
+	tt:              u8,
+	marked:          u8,
+	status:          Thread_Status, // last status of this thread
+	allowhook:       u8, // whether debug hooks may fire (Phase 5)
+	g:               ^Global_State, // the shared state this thread belongs to
 
 	// value stack ------------------------------------------------------
 	// `stack` is the base of an allocation of `stack_size + EXTRA_STACK`
@@ -230,9 +235,9 @@ Lua_State :: struct {
 	// the extra tail slots are the reserve error-handling headroom. `top`
 	// is the index of the first free slot. All three are indices, never
 	// pointers, so a reallocation never invalidates anything.
-	stack:        [^]StackValue,
-	stack_size:   int,
-	top:          int,
+	stack:           [^]StackValue,
+	stack_size:      int,
+	top:             int,
 
 	// call-frame stack -------------------------------------------------
 	frames:          [^]Call_Info,
@@ -241,31 +246,34 @@ Lua_State :: struct {
 	nci:             int, // number of frames currently in use
 
 	// to-be-closed variables + open upvalues ---------------------------
-	tbclist:   int, // stack index of the newest to-be-closed slot
-	openupval: ^UpVal, // list head of this thread's open upvalues (by index)
+	tbclist:         int, // stack index of the newest to-be-closed slot
+	openupval:       ^UpVal, // list head of this thread's open upvalues (by index)
 
 	// control ----------------------------------------------------------
-	n_ccalls:             u32, // nested non-yieldable calls (overflow guard)
-	errfunc:              int, // stack index of the current message handler
-	oldpc:                int, // last program counter (for hooks/line info)
-	errorJmp:             ^Lua_Longjmp, // innermost active protected boundary (nil if none)
+	n_ccalls:        u32, // nested non-yieldable calls (overflow guard)
+	errfunc:         int, // stack index of the current message handler
+	oldpc:           int, // last program counter (for hooks/line info)
+	errorJmp:        ^Lua_Longjmp, // innermost active protected boundary (nil if none)
 
 	// debug hooks (Phase 5) --------------------------------------------
-	hook:          Hook_Proc, // the installed hook, if any
-	hookmask:      i32, // which hook events are enabled (LUA_MASK*)
-	basehookcount: i32, // reload value for the instruction-count hook
-	hookcount:     i32, // instructions remaining until the next count hook
+	hook:            Hook_Proc, // the installed hook, if any
+	hookmask:        i32, // which hook events are enabled (LUA_MASK*)
+	basehookcount:   i32, // reload value for the instruction-count hook
+	hookcount:       i32, // instructions remaining until the next count hook
 	// values transferred to/from a call, for the call/return hooks
-	transfer_first: int, // offset of the first transferred value
-	transfer_n:     int, // number of transferred values
+	transfer_first:  int, // offset of the first transferred value
+	transfer_n:      int, // number of transferred values
 
-	twups:  ^Lua_State, // link in the list of threads with open upvalues
-	gclist: ^GCObject, // GC gray-list thread (a thread has children to scan)
+	twups:           ^Lua_State, // link in the list of threads with open upvalues
+	gclist:          ^GCObject, // GC gray-list thread (a thread has children to scan)
 }
 
 // The GC-punning promise: a `^Lua_State` must be reinterpretable as a
-// `^GCObject`, which is only sound if the header sits at offset zero.
-#assert(offset_of(Lua_State, header) == 0)
+// `^GCObject`, which is only sound when these fields have the common offsets.
+#assert(offset_of(Lua_State, next) == 0)
+#assert(offset_of(Lua_State, tt) == 8)
+#assert(offset_of(Lua_State, marked) == 9)
+#assert(size_of(Lua_State) == 192)
 
 // ---------------------------------------------------------------------------
 // The shared global state
@@ -283,6 +291,8 @@ LX :: struct {
 	extra: [LUA_EXTRASPACE]u8,
 	l:     Lua_State,
 }
+
+#assert(offset_of(LX, l) == LUA_EXTRASPACE)
 
 // `Global_State` is the state shared by every thread in one Lua universe --
 // reference Lua's `global_State`. It holds the allocator, the GC's accounting and
@@ -557,7 +567,7 @@ init_registry :: proc(L: ^Lua_State) -> Thread_Status {
 	if registry == nil {
 		return throw(L, .Err_Mem)
 	}
-	set_gc(&g.registry, &registry.header)
+	set_gc(&g.registry, obj2gco(registry))
 	if luaH_resize(L, registry, LUA_RIDX_LAST, 0) != .Ok {
 		return .Err_Mem
 	}
@@ -569,7 +579,7 @@ init_registry :: proc(L: ^Lua_State) -> Thread_Status {
 		return .Err_Mem
 	}
 	// registry[LUA_RIDX_MAINTHREAD] = the main thread.
-	set_gc(&aux, &L.header)
+	set_gc(&aux, obj2gco(L))
 	if luaH_setint(L, registry, LUA_RIDX_MAINTHREAD, &aux) != .Ok {
 		return .Err_Mem
 	}
@@ -578,7 +588,7 @@ init_registry :: proc(L: ^Lua_State) -> Thread_Status {
 	if globals == nil {
 		return throw(L, .Err_Mem)
 	}
-	set_gc(&aux, &globals.header)
+	set_gc(&aux, obj2gco(globals))
 	if luaH_setint(L, registry, LUA_RIDX_GLOBALS, &aux) != .Ok {
 		return .Err_Mem
 	}
@@ -634,7 +644,7 @@ new_state :: proc(alloc: Allocator) -> ^Lua_State {
 	g.currentwhite = 1 << WHITE0BIT
 	L.marked = luaC_white(g)
 
-	g.allgc = &L.header // the main thread is (so far) the only object
+	g.allgc = obj2gco(L) // the main thread is (so far) the only object
 	L.next = nil
 	// TODO(phase-5): mark the main thread non-yieldable (reference incnny sets
 	// the high half of nCcalls) once the yieldability model exists.
@@ -758,11 +768,11 @@ luaE_newthread :: proc(L: ^Lua_State) -> ^Lua_State {
 	L1.tt = VTHREAD
 	L1.marked = luaC_white(g)
 	L1.next = g.allgc
-	g.allgc = &L1.header
+	g.allgc = obj2gco(L1)
 
 	// Anchor the fresh thread on the parent stack so it can't be collected before
 	// the caller gets a reference to it.
-	set_gc(stack_value(L, L.top), &L1.header)
+	set_gc(stack_value(L, L.top), obj2gco(L1))
 	inc_top(L)
 
 	preinit_thread(L1, g)
