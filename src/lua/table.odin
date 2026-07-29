@@ -139,6 +139,89 @@ MAXABITS :: 31
 MAXHBITS :: 30
 MAXASIZE :: u32(1) << MAXABITS
 
+// The largest hash part we can actually allocate: the smaller of 2^MAXHBITS slots
+// and however many `Node`s fit in a `uint` worth of bytes. Reference `MAXHSIZE`
+// (`luaM_limitN(1 << MAXHBITS, Node)`). On 64-bit the first term always wins; the
+// second is what keeps a 32-bit build from overflowing its size computation.
+MAXHSIZE :: min(uint(1) << MAXHBITS, max(uint) / size_of(Node))
+
+// ---------------------------------------------------------------------------
+// The `lastfree` cursor
+// ---------------------------------------------------------------------------
+//
+// Finding a free slot for a colliding key is the one hash operation that could
+// otherwise scan the whole node array. Reference Lua keeps a `lastfree` cursor
+// that only ever moves *downward* across a node vector's lifetime, so the total
+// scanning work while filling a hash part is O(size) rather than O(size) per
+// insertion. Dropping it (as our first cut did) silently turns N insertions into
+// O(N^2) work -- correct, but quadratic.
+//
+// Two details are worth spelling out, because they are what make the descending
+// cursor safe and cheap:
+//
+//   * A slot's key only ever goes nil -> occupied within one vector's lifetime.
+//     Deleting a key keeps the key and empties the *value* (it becomes a "dead"
+//     key), and only `setnodevector` ever writes nil keys -- into a brand-new
+//     vector. So a slot below the cursor can never become free again behind our
+//     back, and never revisiting it is sound.
+//   * Reference stores the cursor *inside the node block*, in a small box sitting
+//     immediately before the nodes, rather than in the `Table` struct. We mirror
+//     that exactly: it keeps `Table` the same size for the many tables that have
+//     no hash part, it makes `exchangehashpart` carry the cursor along for free
+//     (swapping the `node` pointer moves the box with it), and it keeps our
+//     memory accounting byte-identical to reference's `sizehash`.
+//
+// Only hash parts of at least 2^LIMFORLAST slots carry the box; smaller ones are
+// cheap enough to scan exhaustively, so reference doesn't pay the 8 bytes for
+// them. Reference `LIMFORLAST` / `Limbox` / `haslastfree` / `getlastfree`.
+LIMFORLAST :: 3 // log2 of the real limit (8 slots)
+
+// Bytes reserved ahead of the node array for the cursor. Reference sizes its
+// `Limbox` union as `offsetof(struct { Node *dummy; Node follows; }, follows)` --
+// i.e. a pointer's worth, rounded up so whatever follows is still Node-aligned.
+// We spell that rounding out directly.
+LIMBOX_SIZE :: ((size_of(rawptr) + align_of(Node) - 1) / align_of(Node)) * align_of(Node)
+
+// The box must not disturb node alignment, and has to be roomy enough for the
+// cursor we actually store in it (an index rather than reference's pointer).
+#assert(LIMBOX_SIZE % align_of(Node) == 0)
+#assert(LIMBOX_SIZE >= size_of(u32))
+
+// Does this hash part carry a cursor? Reference `haslastfree`.
+@(private = "file")
+has_lastfree :: #force_inline proc "contextless" (t: ^Table) -> bool {
+	return t.lsizenode >= LIMFORLAST
+}
+
+// Bytes of cursor box in front of `t`'s nodes -- reference `extraLastfree`.
+@(private = "file")
+extra_lastfree :: #force_inline proc "contextless" (t: ^Table) -> uint {
+	return has_lastfree(t) ? LIMBOX_SIZE : 0
+}
+
+// The size in bytes of `t`'s whole node allocation, box included -- reference
+// `sizehash`. Used both to free the block and to report a table's footprint, so
+// it must agree exactly with what `setnodevector` asked the allocator for.
+// Meaningless for the shared dummy, whose callers all guard with `is_dummy`.
+sizehash :: #force_inline proc "contextless" (t: ^Table) -> uint {
+	return uint(sizenode(t)) * size_of(Node) + extra_lastfree(t)
+}
+
+// The address the allocator actually handed us: the nodes, backed up over the box.
+@(private = "file")
+hash_block :: #force_inline proc "contextless" (t: ^Table) -> rawptr {
+	return rawptr(uintptr(t.node) - uintptr(extra_lastfree(t)))
+}
+
+// Where the cursor lives. Reference stores a `Node *`; because our nodes are
+// addressed by index (relative `next` offsets and all), we store the index
+// instead. The two spellings line up one for one: reference's "cursor is still
+// above the first node" is our `index > 0`, and its `--getlastfree(t)` is our
+// `index -= 1`. Only valid when `has_lastfree(t)`.
+@(private = "file")
+lastfree_ref :: #force_inline proc "contextless" (t: ^Table) -> ^u32 {
+	return (^u32)(rawptr(uintptr(t.node) - LIMBOX_SIZE))
+}
 // ---------------------------------------------------------------------------
 // Node key helpers
 // ---------------------------------------------------------------------------
@@ -460,14 +543,28 @@ luaH_getstr :: proc "contextless" (t: ^Table, key: ^TString, res: ^TValue) {
 // Insertion into the hash part
 // ---------------------------------------------------------------------------
 
-// Find any free (nil-key) hash slot -- reference Lua's `getfreepos`. We always do
-// the simple linear scan (reference optimizes larger tables with a `lastfree`
-// cursor; correctness is identical). Returns an index, or -1 if the hash part is
-// full (or is the dummy).
+// Find any free (nil-key) hash slot -- reference Lua's `getfreepos`. Large hash
+// parts consult the descending `lastfree` cursor described above, which makes
+// filling a hash part linear overall instead of quadratic; small ones (under
+// 2^LIMFORLAST slots) carry no cursor and are simply scanned. Returns an index, or
+// -1 if the hash part is full (or is the dummy).
 @(private = "file")
 getfreepos :: proc "contextless" (t: ^Table) -> int {
 	if is_dummy(t) {
-		return -1
+		return -1 // the shared dummy owns no allocatable slots
+	}
+	if has_lastfree(t) {
+		// Walk down from the cursor, lowering it as we go. We decrement through
+		// the stored cursor itself (rather than a copy) so that even a fruitless
+		// step is remembered and never repeated -- reference's `--getlastfree(t)`.
+		lastfree := lastfree_ref(t)
+		for lastfree^ > 0 {
+			lastfree^ -= 1
+			if t.node[lastfree^].key_tt == VNIL {
+				return int(lastfree^)
+			}
+		}
+		return -1 // cursor reached the bottom: no free slot left
 	}
 	i := sizenode(t)
 	for i > 0 {
@@ -800,18 +897,26 @@ setnodevector :: proc(L: ^Lua_State, t: ^Table, size: u32) -> Thread_Status {
 		return .Ok
 	}
 	lsize := ceil_log2(size)
-	if int(lsize) > MAXHBITS {
+	if int(lsize) > MAXHBITS || uint(twoto(lsize)) > MAXHSIZE {
 		luaG_runerror(L, "table overflow")
 		return .Err_Run // unreachable: luaG_runerror throws
 	}
 	realsize := twoto(lsize)
-	block := state_realloc(L, nil, 0, uint(realsize) * size_of(Node))
+	// Hash parts at or above the cursor threshold get a `lastfree` box allocated
+	// in front of the nodes, in the same block. Note we key this off the local
+	// `lsize` rather than `has_lastfree(t)`: `t.lsizenode` isn't ours yet.
+	extra := uint(lsize >= LIMFORLAST ? LIMBOX_SIZE : 0)
+	block := state_realloc(L, nil, 0, uint(realsize) * size_of(Node) + extra)
 	if block == nil {
 		return throw(L, .Err_Mem)
 	}
-	t.node = ([^]Node)(block)
+	t.node = ([^]Node)(rawptr(uintptr(block) + uintptr(extra)))
 	t.lsizenode = lsize
 	t.flags &= ~Byte(BITDUMMY)
+	if extra != 0 {
+		// Start the cursor one past the last slot: everything is free.
+		lastfree_ref(t)^ = u32(realsize)
+	}
 	for i in 0 ..< realsize {
 		n := &t.node[i]
 		n.next = 0
@@ -824,7 +929,10 @@ setnodevector :: proc(L: ^Lua_State, t: ^Table, size: u32) -> Thread_Status {
 @(private = "file")
 freehash :: proc(L: ^Lua_State, t: ^Table) {
 	if !is_dummy(t) {
-		state_free(L, t.node, uint(sizenode(t)) * size_of(Node))
+		// Hand back the block the allocator gave us -- the nodes backed up over
+		// the cursor box -- and the matching byte count, so memory accounting
+		// balances out. Reference `freehash`.
+		state_free(L, hash_block(t), sizehash(t))
 	}
 }
 

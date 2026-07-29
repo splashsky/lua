@@ -775,7 +775,7 @@ objsize :: proc(o: ^GCObject) -> uint {
 		res := uint(size_of(Table))
 		res += uint(t.asize) * size_of(TValue)
 		if !is_dummy(t) {
-			res += uint(sizenode(t)) * size_of(Node)
+			res += sizehash(t) // nodes plus the `lastfree` box, as reference counts them
 		}
 		return res
 	case VLCL:
