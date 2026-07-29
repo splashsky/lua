@@ -532,11 +532,11 @@ traverse_strong_table :: proc(g: ^Global_State, t: ^Table) {
 	sz := sizenode(t)
 	for i in 0 ..< sz {
 		n := &t.node[i]
-		if is_empty(&n.val) {
+		if is_empty(node_val(n)) {
 			clearkey(n) // deleted slot: let a collectable key die
 		} else {
 			mark_key(g, n)
-			mark_value(g, &n.val)
+			mark_value(g, node_val(n))
 		}
 	}
 	genlink(g, obj2gco(t))
@@ -553,11 +553,11 @@ traverse_weakvalue :: proc(g: ^Global_State, t: ^Table) {
 	sz := sizenode(t)
 	for i in 0 ..< sz {
 		n := &t.node[i]
-		if is_empty(&n.val) {
+		if is_empty(node_val(n)) {
 			clearkey(n)
 		} else {
 			mark_key(g, n)
-			if !hasclears && iscleared(g, gcvalue_n(&n.val)) {
+			if !hasclears && iscleared(g, gcvalue_n(node_val(n))) {
 				hasclears = true // a white value: the table must be cleared
 			}
 		}
@@ -583,16 +583,16 @@ traverse_ephemeron :: proc(g: ^Global_State, t: ^Table, inv: bool) -> bool {
 		// `inv` walks the hash part in reverse (see convergeephemerons).
 		idx := inv ? nsize - 1 - i : i
 		n := &t.node[idx]
-		if is_empty(&n.val) {
+		if is_empty(node_val(n)) {
 			clearkey(n)
 		} else if iscleared(g, gckey_n(n)) { // key not (yet) reachable?
 			hasclears = true
-			if val_is_white(&n.val) {
+			if val_is_white(node_val(n)) {
 				hasww = true
 			}
-		} else if val_is_white(&n.val) { // reachable key, unmarked value
+		} else if val_is_white(node_val(n)) { // reachable key, unmarked value
 			marked = true
-			reallymarkobject(g, gc_value(&n.val))
+			reallymarkobject(g, gc_value(node_val(n)))
 		}
 	}
 	if g.gcstate == GCSpropagate {

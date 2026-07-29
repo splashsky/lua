@@ -25,22 +25,55 @@ import "core:math"
 // Node and Table
 // ---------------------------------------------------------------------------
 
-// One hash-part slot -- reference Lua's `Node`. It stores a value plus a *split*
-// key (the key's payload and tag as separate fields, so the value's own tag byte
-// stays adjacent to its payload). `next` is a *relative* offset, in Node units, to
-// the next slot in this bucket's collision chain (0 means "end of chain") --
-// reference Lua's `gnext`. Relative offsets survive the whole node block being
-// reallocated, which is why reference uses them and we do too.
-Node :: struct {
-	val:     TValue, // MUST be first: a `^TValue` at a node aliases its value
-	key_tt:  Byte, // the key's tag (reference's `key_tt_`)
-	key_val: Value, // the key's payload (reference's `key_val`)
-	next:    int, // relative chain offset to the next colliding node
+// Reference Lua overlays a split `NodeKey` with a proper `TValue` view named
+// `i_val`; this raw union is the direct Odin spelling of that representation.
+// Keeping the value payload/tag at bytes 0/8 lets the key tag, padding, and
+// relative chain offset occupy the otherwise-unused tail of a 16-byte `TValue`.
+//
+// That overlap is deliberate and dangerous: a `^TValue` returned by `node_val`
+// spans bytes 0..15, including `key_tt`, `_pad`, and `next`. Every write through
+// that value view MUST therefore be field-wise (the existing setters and
+// `set_obj` do this). An aggregate `TValue` store would overwrite the key tag and
+// collision chain. Do not "simplify" this union into an ordinary nested value or
+// copy a whole `TValue` through `node_val`.
+Node_Key :: struct {
+	value_:  Value,
+	tt_:     Byte,
+	key_tt:  Byte,
+	_pad:    [2]u8,
+	next:    i32,
+	key_val: Value,
 }
 
-// The `val` field sits at offset 0 so a `^TValue` pointing at a node's value can
-// be cast back to `^Node` (reference's `nodefromval`). `luaH_next` relies on this.
-#assert(offset_of(Node, val) == 0)
+Node :: struct #raw_union {
+	using u: Node_Key,
+	i_val:   TValue,
+}
+
+node_val :: #force_inline proc "contextless" (n: ^Node) -> ^TValue {
+	return &n.i_val
+}
+
+// Convert the signed relative chain displacement without ever routing a negative
+// offset through an unsigned type.
+node_next_index :: #force_inline proc "contextless" (i: int, n: ^Node) -> int {
+	return i + int(n.next)
+}
+
+// The value view starts at byte zero, so reference's `nodefromval` operation can
+// recover the containing node during `next` traversal.
+node_from_val :: #force_inline proc "contextless" (v: ^TValue) -> ^Node {
+	return (^Node)(v)
+}
+
+#assert(size_of(Node) == 24)
+#assert(align_of(Node) == 8)
+#assert(offset_of(Node_Key, value_) == 0)
+#assert(offset_of(Node_Key, tt_) == 8)
+#assert(offset_of(Node_Key, key_tt) == 9)
+#assert(offset_of(Node_Key, next) == 12)
+#assert(offset_of(Node_Key, key_val) == 16)
+#assert(offset_of(Node, i_val) == 0)
 
 // A Lua table. The three common GC-header fields are written out inline rather
 // than embedded as a `GCObject`. That is deliberately a little repetitive:
@@ -119,8 +152,10 @@ invalidateTMcache :: #force_inline proc "contextless" (t: ^Table) {
 // free-slot search never mistakes it for a usable slot. Reference `dummynode_`.
 @(private = "file")
 dummy_node := Node {
-	val    = TValue{tt_ = VEMPTY},
-	key_tt = TDEADKEY,
+	u = Node_Key {
+		tt_    = VEMPTY,
+		key_tt = TDEADKEY,
+	},
 }
 
 @(private = "file")
@@ -153,6 +188,8 @@ MAXASIZE :: u32(1) << MAXABITS
 // (`luaM_limitN(1 << MAXHBITS, Node)`). On 64-bit the first term always wins; the
 // second is what keeps a 32-bit build from overflowing its size computation.
 MAXHSIZE :: min(uint(1) << MAXHBITS, max(uint) / size_of(Node))
+
+#assert(MAXHSIZE - 1 <= uint(max(i32)))
 
 // ---------------------------------------------------------------------------
 // The `lastfree` cursor
@@ -428,13 +465,13 @@ getgeneric :: proc "contextless" (t: ^Table, key: ^TValue, deadok: bool) -> ^TVa
 	for {
 		n := &t.node[i]
 		if equalkey(key, n, deadok) {
-			return &n.val
+			return node_val(n)
 		}
 		nx := n.next
 		if nx == 0 {
 			return &absentkey
 		}
-		i += nx
+		i = node_next_index(i, n)
 	}
 }
 
@@ -446,13 +483,13 @@ getintfromhash :: proc "contextless" (t: ^Table, key: Integer) -> ^TValue {
 	for {
 		n := &t.node[i]
 		if n.key_tt == VNUMINT && n.key_val.i == key {
-			return &n.val
+			return node_val(n)
 		}
 		nx := n.next
 		if nx == 0 {
 			return &absentkey
 		}
-		i += nx
+		i = node_next_index(i, n)
 	}
 }
 
@@ -475,13 +512,13 @@ luaH_Hgetshortstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
 	for {
 		n := &t.node[i]
 		if n.key_tt == KTT_SHRSTR && (^TString)(n.key_val.gc) == key {
-			return &n.val
+			return node_val(n)
 		}
 		nx := n.next
 		if nx == 0 {
 			return &absentkey
 		}
-		i += nx
+		i = node_next_index(i, n)
 	}
 }
 
@@ -593,7 +630,7 @@ getfreepos :: proc "contextless" (t: ^Table) -> int {
 @(private = "file")
 insertkey :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) -> bool {
 	mp := mainposition_i(t, key)
-	if !is_empty(&t.node[mp].val) || is_dummy(t) {
+	if !is_empty(node_val(&t.node[mp])) || is_dummy(t) {
 		free := getfreepos(t)
 		if free < 0 {
 			return false // no room; caller must rehash
@@ -602,28 +639,28 @@ insertkey :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) -> boo
 		if othern != mp {
 			// The occupant is out of its main position: relocate it to `free`
 			// and give `mp` back to the new key.
-			for othern + t.node[othern].next != mp {
-				othern += t.node[othern].next // find the node that chains to mp
+			for node_next_index(othern, &t.node[othern]) != mp {
+				othern = node_next_index(othern, &t.node[othern]) // find the node that chains to mp
 			}
-			t.node[othern].next = free - othern // rechain predecessor to `free`
+			t.node[othern].next = i32(free - othern) // rechain predecessor to `free`
 			t.node[free] = t.node[mp] // move occupant (its `next` moves too)
 			if t.node[mp].next != 0 {
-				t.node[free].next += mp - free // fix the moved node's chain
+				t.node[free].next += i32(mp - free) // fix the moved node's chain
 				t.node[mp].next = 0
 			}
-			set_empty(&t.node[mp].val)
+			set_empty(node_val(&t.node[mp]))
 		} else {
 			// The occupant is in its own main position: the new key takes `free`
 			// and links onto the chain.
 			if t.node[mp].next != 0 {
-				t.node[free].next = (mp + t.node[mp].next) - free
+				t.node[free].next = i32(node_next_index(mp, &t.node[mp]) - free)
 			}
-			t.node[mp].next = free - mp
+			t.node[mp].next = i32(free - mp)
 			mp = free
 		}
 	}
 	set_node_key(&t.node[mp], key)
-	set_obj(&t.node[mp].val, value)
+	set_obj(node_val(&t.node[mp]), value)
 	return true
 }
 
@@ -817,7 +854,7 @@ numusehash :: proc "contextless" (t: ^Table, ct: ^Counters) {
 	for i > 0 {
 		i -= 1
 		n := &t.node[i]
-		if is_empty(&n.val) {
+		if is_empty(node_val(n)) {
 			ct.deleted = true
 		} else {
 			total += 1
@@ -930,7 +967,7 @@ setnodevector :: proc(L: ^Lua_State, t: ^Table, size: u32) -> Thread_Status {
 		n := &t.node[i]
 		n.next = 0
 		set_nil_key(n)
-		set_empty(&n.val)
+		set_empty(node_val(n))
 	}
 	return .Ok
 }
@@ -968,10 +1005,10 @@ reinserthash :: proc(L: ^Lua_State, old: ^Table, t: ^Table) {
 	size := sizenode(old)
 	for j in 0 ..< size {
 		o := &old.node[j]
-		if !is_empty(&o.val) {
+		if !is_empty(node_val(o)) {
 			k: TValue
 			get_node_key(&k, o)
-			newcheckedkey(t, &k, &o.val)
+			newcheckedkey(t, &k, node_val(o))
 		}
 	}
 }
@@ -1092,7 +1129,7 @@ findindex :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, asize: u32) -> u32 {
 		luaG_runerror(L, "invalid key to 'next'") // reference: same message
 		return 0
 	}
-	idx := u32(node_index(t, (^Node)(n)))
+	idx := u32(node_index(t, node_from_val(n)))
 	return (idx + 1) + asize // hash slots are numbered after array ones
 }
 
@@ -1112,9 +1149,9 @@ luaH_next :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, out_key: ^TValue, out_
 	}
 	for j := i - asize; j < u32(sizenode(t)); j += 1 {
 		n := &t.node[j]
-		if !is_empty(&n.val) {
+		if !is_empty(node_val(n)) {
 			get_node_key(out_key, n)
-			set_obj(out_val, &n.val)
+			set_obj(out_val, node_val(n))
 			return true
 		}
 	}

@@ -109,9 +109,9 @@ clearbykeys :: proc(g: ^Global_State, l: ^GCObject) {
 		for i in 0 ..< sz {
 			n := &h.node[i]
 			if iscleared(g, gckey_n(n)) { // unmarked key?
-				set_empty(&n.val) // remove the entry
+				set_empty(node_val(n)) // remove the entry
 			}
-			if is_empty(&n.val) {
+			if is_empty(node_val(n)) {
 				clearkey(n) // and retire its (now unused) key
 			}
 		}
@@ -134,10 +134,10 @@ clearbyvalues :: proc(g: ^Global_State, l: ^GCObject, f: ^GCObject) {
 		sz := sizenode(h)
 		for i in 0 ..< sz {
 			n := &h.node[i]
-			if iscleared(g, gcvalue_n(&n.val)) { // unmarked value?
-				set_empty(&n.val) // remove the entry
+			if iscleared(g, gcvalue_n(node_val(n))) { // unmarked value?
+				set_empty(node_val(n)) // remove the entry
 			}
-			if is_empty(&n.val) {
+			if is_empty(node_val(n)) {
 				clearkey(n)
 			}
 		}
