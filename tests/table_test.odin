@@ -8,7 +8,12 @@ package tests
 // integer and string keys, overwrite semantics, absence of a key reading as nil,
 // the length operator's border behavior, full traversal via `next`, and that a
 // large batch of inserts (forcing several rehashes) loses nothing.
+//
+// The last two tests target the hash part specifically. Integer keys mostly land
+// in the array part, so they never exercise the free-slot search (`getfreepos`)
+// that placing a colliding key depends on -- string keys do.
 
+import "core:fmt"
 import "core:testing"
 import lua "luao:lua"
 
@@ -162,4 +167,156 @@ table_bulk_insert_rehashes_losslessly :: proc(t: ^testing.T) {
 		testing.expect_value(t, v, i * 3)
 	}
 	testing.expect_value(t, lua.luaH_getn(L, tbl), lua.Unsigned(200))
+}
+
+// --- hash-part specific -----------------------------------------------------
+
+// Store integer value `v` under the string key `name`.
+set_str_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, name: string, v: lua.Integer) {
+	key := lua.luaS_new(L, name)
+	kv: lua.TValue
+	lua.set_gc(&kv, &key.header)
+	val: lua.TValue
+	lua.set_int(&val, v)
+	st := lua.luaH_set(L, tbl, &kv, &val)
+	assert(st == .Ok)
+}
+
+// Clear the string key `name` (Lua's `t[name] = nil`).
+clear_str_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, name: string) {
+	key := lua.luaS_new(L, name)
+	kv: lua.TValue
+	lua.set_gc(&kv, &key.header)
+	val: lua.TValue
+	lua.set_nil(&val)
+	st := lua.luaH_set(L, tbl, &kv, &val)
+	assert(st == .Ok)
+}
+
+// Read the string key `name`, returning (value, found).
+get_str_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, name: string) -> (lua.Integer, bool) {
+	key := lua.luaS_new(L, name)
+	res: lua.TValue
+	lua.luaH_getstr(tbl, key, &res)
+	if lua.is_nil(&res) {
+		return 0, false
+	}
+	return lua.int_value(&res), true
+}
+
+// Filling the hash part drives it through every growth stage -- sizes below the
+// cursor threshold (1, 2, 4 slots) and above it (8 and up) -- so both branches of
+// the free-slot search run, across many rehashes. Whatever strategy that search
+// uses, no key may be lost, duplicated, or left pointing at the wrong value: we
+// check every key reads back exactly, and that a full `next` traversal sees each
+// entry once and only once.
+@(test)
+table_hash_bulk_insert_lossless :: proc(t: ^testing.T) {
+	L := lua.new_state(lua.default_allocator())
+	testing.expect(t, L != nil)
+	defer lua.close_state(L)
+
+	tbl := lua.luaH_new(L)
+	testing.expect(t, tbl != nil)
+
+	N :: 500
+	for i in 0 ..< N {
+		set_str_key(L, tbl, fmt.tprintf("key%d", i), lua.Integer(i * 7))
+	}
+
+	// Every key must read back with its exact value.
+	for i in 0 ..< N {
+		v, found := get_str_key(L, tbl, fmt.tprintf("key%d", i))
+		testing.expect(t, found, "every hash key must survive rehashing")
+		testing.expect_value(t, v, lua.Integer(i * 7))
+	}
+
+	// A key never inserted must still be absent (nothing stray got left behind).
+	_, missing := get_str_key(L, tbl, "key-never-set")
+	testing.expect(t, !missing, "unset key must read as absent")
+
+	// Traversal must see exactly N entries. Summing the values is the tell-tale:
+	// a lost, duplicated, or mis-mapped entry changes the total.
+	key: lua.TValue
+	lua.set_nil(&key)
+	out_key, out_val: lua.TValue
+	seen := 0
+	sum := lua.Integer(0)
+	for lua.luaH_next(L, tbl, &key, &out_key, &out_val) {
+		seen += 1
+		sum += lua.int_value(&out_val)
+		lua.set_obj(&key, &out_key)
+	}
+	testing.expect_value(t, seen, N)
+
+	want := lua.Integer(0)
+	for i in 0 ..< N {
+		want += lua.Integer(i * 7)
+	}
+	testing.expect_value(t, sum, want)
+}
+
+// Deleting keys and inserting fresh ones is the case where free-slot bookkeeping
+// can go wrong: a cleared entry keeps a "dead" key rather than becoming free
+// again, so later insertions must still find room (rehashing when they cannot).
+// This churns the table through delete/insert cycles and then proves the exact
+// surviving set: cleared keys absent, untouched keys unchanged, new keys correct.
+@(test)
+table_hash_delete_reinsert_stays_consistent :: proc(t: ^testing.T) {
+	L := lua.new_state(lua.default_allocator())
+	testing.expect(t, L != nil)
+	defer lua.close_state(L)
+
+	tbl := lua.luaH_new(L)
+	N :: 300
+	for i in 0 ..< N {
+		set_str_key(L, tbl, fmt.tprintf("k%d", i), lua.Integer(i))
+	}
+
+	// Clear every other key.
+	for i := 0; i < N; i += 2 {
+		clear_str_key(L, tbl, fmt.tprintf("k%d", i))
+	}
+	for i in 0 ..< N {
+		v, found := get_str_key(L, tbl, fmt.tprintf("k%d", i))
+		if i % 2 == 0 {
+			testing.expect(t, !found, "cleared key must read as absent")
+		} else {
+			testing.expect(t, found, "untouched key must survive its neighbours' deletion")
+			testing.expect_value(t, v, lua.Integer(i))
+		}
+	}
+
+	// Now insert a fresh batch, which must find room among (or beyond) the dead
+	// entries left behind above.
+	for i in 0 ..< N {
+		set_str_key(L, tbl, fmt.tprintf("n%d", i), lua.Integer(i * 2))
+	}
+
+	// Final state: survivors intact, cleared keys still gone, new keys correct.
+	live := 0
+	for i in 0 ..< N {
+		v, found := get_str_key(L, tbl, fmt.tprintf("k%d", i))
+		if i % 2 == 0 {
+			testing.expect(t, !found, "cleared key must stay absent after refilling")
+		} else {
+			testing.expect(t, found, "survivor must outlast the second batch")
+			testing.expect_value(t, v, lua.Integer(i))
+			live += 1
+		}
+		nv, nfound := get_str_key(L, tbl, fmt.tprintf("n%d", i))
+		testing.expect(t, nfound, "newly inserted key must be retrievable")
+		testing.expect_value(t, nv, lua.Integer(i * 2))
+	}
+
+	// Traversal must agree with that accounting: survivors plus the new batch.
+	key: lua.TValue
+	lua.set_nil(&key)
+	out_key, out_val: lua.TValue
+	seen := 0
+	for lua.luaH_next(L, tbl, &key, &out_key, &out_val) {
+		seen += 1
+		lua.set_obj(&key, &out_key)
+	}
+	testing.expect_value(t, seen, live + N)
 }
