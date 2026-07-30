@@ -210,6 +210,15 @@ ensure_standard_streams :: proc() {
 	if standard_output != nil {
 		standard_output.mode = os.is_tty(os.stdout) ? .Line : .Full
 	}
+	if standard_input != nil && os.is_tty(os.stdin) {
+		// A terminal has one input owner. The native editor reads console events
+		// (Windows) or raw bytes (Linux) directly, while io.read uses this Stream.
+		// Keeping terminal stdin unbuffered from its first use prevents an earlier
+		// LUA_INIT, -e chunk, or script from reading 8192 bytes ahead and stranding
+		// bytes that the later editor could no longer see. We never discard bytes
+		// from a non-seekable terminal to switch owners.
+		standard_input.mode = .Unbuffered
+	}
 	if standard_error != nil {
 		standard_error.mode = .Unbuffered
 	}
@@ -353,7 +362,6 @@ flush :: proc(s: ^Stream) -> bool {
 }
 
 flush_all :: proc() -> bool {
-	ensure_standard_streams()
 	ok := true
 	for s := stream_head; s != nil; s = s.next {
 		if !flush(s) {
@@ -656,6 +664,29 @@ clearerr :: proc(s: ^Stream) {
 		s.eof_flag = false
 		s.error_flag = false
 	}
+}
+
+// Direct terminal input is permitted only at a clean boundary in an unbuffered
+// stream. These operations intentionally expose the ownership transition rather
+// than letting the editor reach into Stream fields. In particular, a pending
+// ungetc byte is real input and must make the editor fall back; silently dropping
+// it on a non-seekable console would be data loss.
+prepare_direct_read :: proc(s: ^Stream) -> bool {
+	if s == nil || !prepare_read(s) || s.mode != .Unbuffered {
+		return false
+	}
+	return s.read_index == s.read_count &&
+		!s.raw_saved &&
+		!s.pushback &&
+		!s.text_eof
+}
+
+finish_direct_read :: proc(s: ^Stream) {
+	if s == nil {
+		return
+	}
+	s.direction = .Read
+	s.eof_flag = false
 }
 
 close :: proc(s: ^Stream) -> bool {

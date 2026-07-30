@@ -22,6 +22,7 @@ import "core:fmt"
 import "core:os"
 import "core:time"
 import win32 "core:sys/windows"
+import host "luao:host"
 import lua "luao:lua"
 
 when ODIN_OS == .Windows {
@@ -693,7 +694,7 @@ os_exit :: proc "c" (Lp: rawptr) -> i32 {
 	if lua.lua_toboolean(L, 2) {
 		lua.close_state(L)
 	}
-	os.exit(status)
+	host.process_exit(status)
 }
 
 @(private = "file")

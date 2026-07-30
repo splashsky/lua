@@ -48,6 +48,40 @@ See [BUILDING.md](BUILDING.md). Quick version:
 .\build\test.ps1
 ```
 
+## Interactive line editing
+
+When both standard input and standard output are terminals, the hosted `lua`
+REPL uses a native, libc-free editor. Windows uses `ReadConsoleInputW` key
+records; Linux uses the kernel termios/ioctl/read interfaces. Darwin and BSD
+currently fall back explicitly to the plain line reader because their terminal
+ABIs differ from Linux. Redirected input/output and `TERM=dumb` also use the
+plain reader.
+
+The editor supports Left/Right/Up/Down, Home, End, Delete, Backspace, Ctrl-A,
+Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W, and Ctrl-L. History is session-only and stores
+each complete logical statement, including continuation lines. Editing is
+horizontally scrolled within one physical row; the final terminal column is
+reserved to avoid ambiguous automatic wrapping.
+
+Lines are limited to 511 input bytes, matching `LUA_MAXINPUT`; additional input
+rings the terminal bell. The editor uses fixed storage while raw mode is active,
+so allocation failure cannot strand the terminal there. Tab is displayed as
+four spaces but remains one tab byte. Ctrl-D means EOF on an empty line and
+forward-delete otherwise. On Windows Ctrl-Z means EOF on an empty line and is
+ignored on a non-empty line.
+
+Movement and deletion preserve arbitrary bytes and operate on valid UTF-8 code
+points (an invalid byte is one editable unit). Control and invalid bytes are
+rendered visibly rather than executed. ASCII display and cursor placement are
+correct. General Unicode cell width is intentionally not claimed: without a
+`wcwidth`-style table, combining marks and wide characters can misplace the
+cursor during redraw.
+
+Terminal restoration is best-effort for every normal return, protected Lua
+error, `os.exit`, and hosted fatal exit. No program can restore terminal state
+after `SIGKILL`, Windows `TerminateProcess`, power loss, or an equivalent
+unrecoverable process termination.
+
 ### Freestanding / bare metal
 
 Odin's native `ODIN_OS == .Freestanding` switch selects a bare-metal build

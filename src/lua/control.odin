@@ -17,6 +17,7 @@ package lua
 // they'd grow throwaway error handling we'd later rip out.
 //
 import "base:runtime"
+import host "luao:host"
 
 // ---------------------------------------------------------------------------
 // Thread status / error codes
@@ -187,7 +188,7 @@ throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
 		// returns, park forever rather than reaching an unavailable OS exit.
 		for {}
 	} else {
-		runtime.exit(134)
+		host.fatal_exit(134)
 	}
 }
 

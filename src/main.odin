@@ -29,14 +29,17 @@ package main
 //     for a single, non-reentrant interpreter launch; we still push `argc` and the
 //     pointer so the protected-call shape mirrors the original.
 //
-// The interactive readline niceties (history, line editing via libreadline) are
-// intentionally not ported: like the reference's own dlopen-less fallback, we
-// emulate readline with a plain prompt + `fgets`.
+// Interactive terminals use our libc-free native editor. Redirected input or
+// output, TERM=dumb, and platforms without a verified terminal ABI retain the
+// byte-for-byte plain-reader path.
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "base:runtime"
 
+import host "luao:host"
+import lineedit "luao:lineedit"
 import lua "luao:lua"
 import aux "luao:stdlib"
 import stream "luao:stream"
@@ -88,6 +91,11 @@ progname: string = LUA_PROGNAME
 // The command line, captured in `main` and read back in `pmain`. Storage outlives
 // the protecting `lua_pcall`, so handing `pmain` a pointer to it is safe.
 g_argv: []string
+
+// Reference readline history is in-memory and records one complete logical
+// statement after continuation lines have been joined. Keep the same ownership
+// here; individual editor invocations never add their physical line.
+repl_history: [dynamic]string
 
 // --------------------------------------------------------------------------------
 // Tiny string helpers. Odin strings coming from `os.args` are NOT guaranteed to be
@@ -442,16 +450,29 @@ incomplete :: proc(L: ^lua.Lua_State, status: lua.Thread_Status) -> bool {
 	return false
 }
 
-// Show the prompt, read one line via `fgets`, and push it (newline stripped) on
-// the stack. Returns false at end-of-input. Reference pushline + the dlopen-less
-// lua_readline fallback.
+// Show the prompt and read one physical line. All Lua interaction and storage
+// preparation happens before native raw mode begins, and the editor restores the
+// terminal before this procedure touches the Lua stack again.
 pushline :: proc(L: ^lua.Lua_State, firstline: bool) -> bool {
 	buffer: [LUA_MAXINPUT]u8
 	prmt := get_prompt(L, firstline)
-	// emulate lua_readline: print the prompt, flush, then read a line
 	aux.lua_writestring(prmt)
 	stream.flush(stream.stdout())
-	n := 0
+
+	n, editor_eof, edited := lineedit.read_line(prmt, buffer[:], repl_history[:])
+	if edited {
+		lua.lua_pop(L, 1)
+		if editor_eof {
+			return false
+		}
+		lua.lua_pushlstring(L, buffer[:n])
+		return true
+	}
+
+	// Non-terminal stdin/stdout, TERM=dumb, and unsupported terminal platforms
+	// deliberately use the old stream reader. This is the path exercised by
+	// pipes and redirected CLI tests, so editing can never consume their bytes.
+	n = 0
 	for n < len(buffer) - 1 {
 		c := stream.getc(stream.stdin())
 		if c == stream.EOF {
@@ -540,6 +561,19 @@ loadline :: proc(L: ^lua.Lua_State) -> (status: lua.Thread_Status, eof: bool) {
 	status = addreturn(L)
 	if status != .Ok { // "return ..." didn't compile?
 		status = multiline(L) // try as a statement, maybe multi-line
+	}
+	line, _ := lua.lua_tolstring(L, 1)
+	if len(line) > 0 {
+		// Bounded session history prevents an indefinitely long REPL from growing
+		// without limit. Allocation happens after raw mode has ended; if the Odin
+		// allocator cannot clone the statement, its normal fatal allocation path
+		// is allowed to run with the terminal already restored.
+		if len(repl_history) == 100 {
+			delete(repl_history[0])
+			copy(repl_history[:99], repl_history[1:])
+			resize(&repl_history, 99)
+		}
+		append(&repl_history, strings.clone(line))
 	}
 	lua.lua_remove(L, 1) // remove the line, leaving the chunk (if any)
 	return status, false
@@ -651,19 +685,22 @@ main :: proc() {
 	L := lua.new_state(lua.default_allocator()) // create the interpreter state
 	if L == nil {
 		l_message(len(g_argv) > 0 ? g_argv[0] : LUA_PROGNAME, "cannot create state: not enough memory")
-		os.exit(1)
+		host.process_exit(1)
 	}
 	lua.lua_gc(L, lua.LUA_GCSTOP) // stop the GC while we build the state
 	lua.lua_pushcfunction(L, pmain) // the function to protect-call
 	lua.lua_pushinteger(L, lua.Integer(len(g_argv))) // 1st arg: argc
 	lua.lua_pushlightuserdata(L, &g_argv) // 2nd arg: pointer to argv
 	status := lua.lua_pcall(L, 2, 1, 0) // run pmain in protected mode
+	// A Lua error can longjmp over the editor's ordinary stack frames and every
+	// defer in them. Repair raw mode immediately at the outermost protected
+	// boundary, before even inspecting or reporting the error.
+	host.restore_terminal()
 	result := lua.lua_toboolean(L, -1) // pmain's boolean result
 	report(L, status)
 	lua.close_state(L)
 	// Reference Lua exits by returning from `main`, so the C runtime flushes every
 	// buffered stream on the way out. os.exit skips language-runtime cleanup on
 	// some platforms, so explicitly flush every Odin stream first.
-	stream.flush_all()
-	os.exit((result && status == .Ok) ? 0 : 1)
+	host.process_exit((result && status == .Ok) ? 0 : 1)
 }
