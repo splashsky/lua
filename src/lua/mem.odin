@@ -18,7 +18,9 @@ package lua
 // ERRMEM error -- are deliberately left as TODOs for later phases; see the notes
 // on `handle_alloc_failure` below.
 
-import "core:c/libc"
+import "base:runtime"
+import "core:mem"
+import "core:os"
 
 // ---------------------------------------------------------------------------
 // The allocator interface
@@ -49,16 +51,41 @@ Allocator :: struct {
 }
 
 // The default allocator, used when an embedder doesn't supply one. It is the
-// faithful twin of reference Lua's `l_alloc` (lauxlib.c): a thin shim over the C
-// heap. `realloc(nil, n)` behaves as `malloc(n)`, and `nsize == 0` frees. The
-// `ud` and `osize` arguments are unused here -- the C heap tracks block sizes
-// itself -- but we keep them so the signature matches every other allocator.
+// faithful twin of reference Lua's `l_alloc` (lauxlib.c), backed by Odin's
+// platform heap rather than the C heap. On Windows `core:os.heap_allocator()` is
+// implemented with HeapAlloc/HeapReAlloc/HeapFree, so it does not pull in the
+// CRT. We use the non-zeroing resize operation because C realloc does not promise
+// to clear newly grown bytes.
+//
+// Unlike the old C-heap shim, Odin's allocator needs the exact old size. Lua
+// already supplies that as part of `lua_Alloc`'s contract, and the kernel's byte
+// accounting uses the same value, so passing it through changes neither
+// accounting nor allocation layout. Odin's default heap alignment is at least
+// `mem.DEFAULT_ALIGNMENT`, and any allocator error is translated to nil while
+// leaving the original block valid, preserving Lua's fallible-allocation contract.
 default_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize: uint, nsize: uint) -> rawptr {
+	context = runtime.default_context()
 	if nsize == 0 {
-		libc.free(ptr)
+		if ptr != nil {
+			_ = mem.free(ptr, os.heap_allocator())
+		}
 		return nil
 	}
-	return libc.realloc(ptr, nsize)
+	if nsize > uint(max(int)) || (ptr != nil && osize > uint(max(int))) {
+		return nil
+	}
+	old_size := ptr == nil ? 0 : int(osize)
+	resized, err := mem.resize_non_zeroed(
+		ptr,
+		old_size,
+		int(nsize),
+		mem.DEFAULT_ALIGNMENT,
+		os.heap_allocator(),
+	)
+	if err != nil {
+		return nil
+	}
+	return resized
 }
 
 // A ready-made `Allocator` wrapping `default_alloc`.

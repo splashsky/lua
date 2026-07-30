@@ -29,13 +29,15 @@ package stdlib
 //      faithful to the platform we actually run on.
 //
 // Locale note: the pattern classes (`%a`, `%d`, ...) and the ctype used by quoting
-// go through `core:c/libc`'s ctype in the "C" locale, matching reference Lua's
-// default behaviour. Locale-sensitive collation is a documented, project-wide
+// go through Lua's explicit C-locale byte predicates. This deliberately keeps
+// bytes 0x80..0xff out of the alphabetic/printable classes even if the process
+// locale changes. Locale-sensitive collation is a documented, project-wide
 // deviation (we compare bytes).
 
 import "base:runtime"
 import "core:c"
 import "core:c/libc"
+import "core:math"
 import lua "luao:lua"
 
 @(private = "file")
@@ -150,7 +152,7 @@ str_lower :: proc "c" (Lp: rawptr) -> i32 {
 	b: Buffer
 	p := luaL_buffinitsize(L, &b, uint(l))
 	for i in 0 ..< l {
-		p[i] = u8(libc.tolower(i32(s[i])))
+		p[i] = u8(lua.to_lower(int(s[i])))
 	}
 	luaL_pushresultsize(&b, uint(l))
 	return 1
@@ -165,7 +167,7 @@ str_upper :: proc "c" (Lp: rawptr) -> i32 {
 	b: Buffer
 	p := luaL_buffinitsize(L, &b, uint(l))
 	for i in 0 ..< l {
-		p[i] = u8(libc.toupper(i32(s[i])))
+		p[i] = u8(lua.to_upper(int(s[i])))
 	}
 	luaL_pushresultsize(&b, uint(l))
 	return 1
@@ -510,38 +512,38 @@ classend :: proc(ms: ^Match_State, p_in: int) -> int {
 
 // Does character `c` belong to class `cl` (a single class letter like 'a', 'd',
 // ...)? Uppercase letters mean the complemented class. Unknown letters match
-// literally. Goes through libc's C-locale ctype.
+// literally. Goes through Lua's explicit C-locale predicates.
 @(private = "file")
 match_class :: proc(c: u8, cl: u8) -> bool {
 	res: bool
-	switch u8(libc.tolower(i32(cl))) {
+	switch u8(lua.to_lower(int(cl))) {
 	case 'a':
-		res = libc.isalpha(i32(c)) != 0
+		res = lua.is_alpha(int(c))
 	case 'c':
-		res = libc.iscntrl(i32(c)) != 0
+		res = lua.is_cntrl(int(c))
 	case 'd':
-		res = libc.isdigit(i32(c)) != 0
+		res = lua.is_digit(int(c))
 	case 'g':
-		res = libc.isgraph(i32(c)) != 0
+		res = lua.is_graph(int(c))
 	case 'l':
-		res = libc.islower(i32(c)) != 0
+		res = lua.is_lower(int(c))
 	case 'p':
-		res = libc.ispunct(i32(c)) != 0
+		res = lua.is_punct(int(c))
 	case 's':
-		res = libc.isspace(i32(c)) != 0
+		res = lua.is_space(int(c))
 	case 'u':
-		res = libc.isupper(i32(c)) != 0
+		res = lua.is_upper(int(c))
 	case 'w':
-		res = libc.isalnum(i32(c)) != 0
+		res = lua.is_alnum(int(c))
 	case 'x':
-		res = libc.isxdigit(i32(c)) != 0
+		res = lua.is_xdigit(int(c))
 	case 'z':
 		res = c == 0 // deprecated option
 	case:
 		return cl == c
 	}
 	// A lowercase class letter keeps `res`; an uppercase one complements it.
-	return libc.islower(i32(cl)) != 0 ? res : !res
+	return lua.is_lower(int(cl)) ? res : !res
 }
 
 // Match a character against a bracket set `[...]`. `p` points at the '[', `ec`
@@ -1092,7 +1094,7 @@ add_s :: proc(ms: ^Match_State, b: ^Buffer, s: int, e: int) {
 			luaL_addchar(b, c)
 		} else if c == '0' {
 			luaL_addlstring(b, ms.src[s:e])
-		} else if libc.isdigit(i32(c)) != 0 {
+		} else if lua.is_digit(int(c)) {
 			resl, cap_i := get_onecapture(ms, int(c) - '1', s, e)
 			if resl == CAP_POSITION {
 				luaL_addvalue(b) // position was pushed; fold it in
@@ -1271,9 +1273,9 @@ getformat :: proc(L: ^lua.Lua_State, sf: []u8, start: int, form: []u8) -> int {
 @(private = "file")
 get2digits :: proc(form: []u8, s_in: int) -> int {
 	s := s_in
-	if libc.isdigit(i32(form[s])) != 0 {
+	if lua.is_digit(int(form[s])) {
 		s += 1
-		if libc.isdigit(i32(form[s])) != 0 {
+		if lua.is_digit(int(form[s])) {
 			s += 1 // at most two digits
 		}
 	}
@@ -1293,7 +1295,7 @@ checkformat :: proc(L: ^lua.Lua_State, form: []u8, flags: string, precision: boo
 			spec = get2digits(form, spec)
 		}
 	}
-	if libc.isalpha(i32(form[spec])) == 0 {
+	if !lua.is_alpha(int(form[spec])) {
 		luaL_error(L, "invalid conversion specification: '%s'", string(form[:c_strlen(form)]))
 	}
 }
@@ -1325,12 +1327,12 @@ addquoted :: proc(b: ^Buffer, s: []u8) {
 		if c == '"' || c == '\\' || c == '\n' {
 			luaL_addchar(b, '\\')
 			luaL_addchar(b, c)
-		} else if libc.iscntrl(i32(c)) != 0 {
+		} else if lua.is_cntrl(int(c)) {
 			buf: [10]u8
 			// A following digit forces three-digit escaping so it can't merge with
 			// the control-code escape (reference reads the *next* byte, or the NUL).
 			nxt := (i + 1 < len(s)) ? s[i + 1] : 0
-			if libc.isdigit(i32(nxt)) == 0 {
+			if !lua.is_digit(int(nxt)) {
 				libc.snprintf(cast([^]libc.char)&buf[0], 10, "\\%d", i32(c))
 			} else {
 				libc.snprintf(cast([^]libc.char)&buf[0], 10, "\\%03d", i32(c))
@@ -1351,9 +1353,9 @@ addquoted :: proc(b: ^Buffer, s: []u8) {
 @(private = "file")
 quotefloat :: proc(L: ^lua.Lua_State, buff: [^]u8, n: lua.Number) -> int {
 	cbuf := cast([^]libc.char)buff
-	if n == lua.Number(libc.HUGE_VAL) {
+	if n == lua.Number(math.inf_f64(1)) {
 		return int(libc.snprintf(cbuf, MAX_ITEM, "%s", cstring("1e9999")))
-	} else if n == -lua.Number(libc.HUGE_VAL) {
+	} else if n == lua.Number(math.inf_f64(-1)) {
 		return int(libc.snprintf(cbuf, MAX_ITEM, "%s", cstring("-1e9999")))
 	} else if n != n {
 		return int(libc.snprintf(cbuf, MAX_ITEM, "%s", cstring("(0/0)")))

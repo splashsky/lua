@@ -2,10 +2,13 @@ package lua
 
 // ctype.odin -- our analogue of reference Lua's `lctype.h` / `lctype.c`.
 //
-// A tiny, locale-independent character-classification table used by the lexer
-// (is-digit, is-alpha, is-space, is-hex, ...). Reference Lua ships its own table
-// precisely so tokenizing doesn't depend on the C locale; we do the same so our
-// lexer behaves identically everywhere.
+// A tiny, locale-independent character-classification layer used by the lexer,
+// string library, and I/O number reader. These predicates deliberately implement
+// the C locale, not the user's current locale. Lua defines its pattern classes in
+// terms of C's ctype functions, so making (say) a byte above 0x7f alphabetic in a
+// locale-sensitive implementation would silently change `%a`, `%w`, `%p`, and
+// friends. Spelling out the C-locale byte ranges also keeps the result identical
+// on every host and removes the libc dependency.
 //
 // A deliberate, documented deviation (non-observable): reference Lua precomputes a
 // 257-entry byte table (`luai_ctype_`) indexed by `char + 1` so that -1 (EOZ) has
@@ -49,6 +52,16 @@ is_alpha :: #force_inline proc "contextless" (c: int) -> bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
+// Upper- and lower-case letters are exactly their ASCII ranges in the C locale.
+// In particular, bytes 0x80..0xff do not belong to either class.
+is_upper :: #force_inline proc "contextless" (c: int) -> bool {
+	return c >= 'A' && c <= 'Z'
+}
+
+is_lower :: #force_inline proc "contextless" (c: int) -> bool {
+	return c >= 'a' && c <= 'z'
+}
+
 // A letter or digit.
 is_alnum :: #force_inline proc "contextless" (c: int) -> bool {
 	return is_alpha(c) || is_digit(c)
@@ -72,12 +85,40 @@ is_print :: #force_inline proc "contextless" (c: int) -> bool {
 	return c >= 0x20 && c <= 0x7e
 }
 
+// Control characters are the C0 controls plus DEL. C's `iscntrl` does not
+// classify any high byte as a control character in the C locale.
+is_cntrl :: #force_inline proc "contextless" (c: int) -> bool {
+	return (c >= 0x00 && c <= 0x1f) || c == 0x7f
+}
+
+// Graphical characters are printable characters other than space.
+is_graph :: #force_inline proc "contextless" (c: int) -> bool {
+	return c >= 0x21 && c <= 0x7e
+}
+
+// Punctuation is every graphical C-locale byte that is not alphanumeric. This
+// range formulation intentionally includes symbols and underscore while
+// excluding space, controls, and every byte at or above 0x80.
+is_punct :: #force_inline proc "contextless" (c: int) -> bool {
+	return is_graph(c) && !is_alnum(c)
+}
+
 // Lower-case an ASCII letter; leave everything else untouched. Reference
 // `ltolower`, which is defined only for upper-case letters and '.', but the safe
-// general form (only fold 'A'..'Z') is what every caller actually needs.
+// general form is also exactly C-locale `tolower` for all valid unsigned-byte
+// values and EOF. Keeping EOF (-1) unchanged matters to callers that read stdio.
 to_lower :: #force_inline proc "contextless" (c: int) -> int {
-	if c >= 'A' && c <= 'Z' {
+	if is_upper(c) {
 		return c | ('a' - 'A') // set the 0x20 bit
+	}
+	return c
+}
+
+// Upper-case an ASCII letter and leave all other values, including EOF and
+// bytes 0x80..0xff, untouched -- exactly C-locale `toupper`.
+to_upper :: #force_inline proc "contextless" (c: int) -> int {
+	if is_lower(c) {
+		return c &~ ('a' - 'A') // clear the 0x20 bit
 	}
 	return c
 }

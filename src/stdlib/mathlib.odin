@@ -7,11 +7,10 @@ package stdlib
 // type), min/max, the mathematical constants, and the pseudo-random generator
 // (math.random / math.randomseed).
 //
-// A note on faithfulness: every transcendental goes through `core:c/libc`'s
-// C-runtime math, NOT Odin's `core:math`. Reference Lua *is* the platform C
-// library here (`l_mathop(sin)` == `sin`), and Odin's own implementations can
-// round or handle NaN/Inf differently. Using libc keeps our results bit-for-bit
-// identical to a reference build on the same platform.
+// A note on faithfulness: operations with pure-Odin or hardware-backed
+// `core:math` implementations use those directly. sin/cos/exp remain on libc
+// because Odin currently lowers those particular intrinsics to libm calls; they
+// are handled by the dedicated libc-removal math task.
 //
 // The PRNG is a straight port of reference 5.5's `xoshiro256**`, using the
 // 64-bit-integer branch (our `lua.Integer` is 64-bit). The generator state lives
@@ -20,6 +19,7 @@ package stdlib
 
 import "base:runtime"
 import "core:c/libc"
+import "core:math"
 import lua "luao:lua"
 
 // Narrow alias so the ported bodies read like their C originals.
@@ -49,7 +49,7 @@ math_abs :: proc "c" (Lp: rawptr) -> i32 {
 		}
 		lua.lua_pushinteger(L, n)
 	} else {
-		lua.lua_pushnumber(L, lua.Number(libc.fabs(f64(luaL_checknumber(L, 1)))))
+		lua.lua_pushnumber(L, lua.Number(math.abs(f64(luaL_checknumber(L, 1)))))
 	}
 	return 1
 }
@@ -71,21 +71,21 @@ math_cos :: proc "c" (Lp: rawptr) -> i32 {
 math_tan :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(libc.tan(f64(luaL_checknumber(L, 1)))))
+	lua.lua_pushnumber(L, lua.Number(math.tan(f64(luaL_checknumber(L, 1)))))
 	return 1
 }
 
 math_asin :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(libc.asin(f64(luaL_checknumber(L, 1)))))
+	lua.lua_pushnumber(L, lua.Number(math.asin(f64(luaL_checknumber(L, 1)))))
 	return 1
 }
 
 math_acos :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(libc.acos(f64(luaL_checknumber(L, 1)))))
+	lua.lua_pushnumber(L, lua.Number(math.acos(f64(luaL_checknumber(L, 1)))))
 	return 1
 }
 
@@ -96,7 +96,7 @@ math_atan :: proc "c" (Lp: rawptr) -> i32 {
 	L := state(Lp)
 	y := luaL_checknumber(L, 1)
 	x := luaL_optnumber(L, 2, 1)
-	lua.lua_pushnumber(L, lua.Number(libc.atan2(f64(y), f64(x))))
+	lua.lua_pushnumber(L, lua.Number(math.atan2(f64(y), f64(x))))
 	return 1
 }
 
@@ -110,7 +110,7 @@ math_exp :: proc "c" (Lp: rawptr) -> i32 {
 math_sqrt :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(libc.sqrt(f64(luaL_checknumber(L, 1)))))
+	lua.lua_pushnumber(L, lua.Number(math.sqrt(f64(luaL_checknumber(L, 1)))))
 	return 1
 }
 
@@ -122,15 +122,15 @@ math_log :: proc "c" (Lp: rawptr) -> i32 {
 	x := f64(luaL_checknumber(L, 1))
 	res: f64
 	if lua.lua_isnoneornil(L, 2) {
-		res = libc.log(x)
+		res = math.ln(x)
 	} else {
 		base := f64(luaL_checknumber(L, 2))
 		if base == 2.0 {
-			res = libc.log2(x)
+			res = math.log2(x)
 		} else if base == 10.0 {
-			res = libc.log10(x)
+			res = math.log10(x)
 		} else {
-			res = libc.log(x) / libc.log(base)
+			res = math.ln(x) / math.ln(base)
 		}
 	}
 	lua.lua_pushnumber(L, lua.Number(res))
@@ -158,8 +158,7 @@ math_frexp :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	x := f64(luaL_checknumber(L, 1))
-	ep: libc.int
-	m := libc.frexp(x, &ep)
+	m, ep := math.frexp(x)
 	lua.lua_pushnumber(L, lua.Number(m))
 	lua.lua_pushinteger(L, lua.Integer(ep))
 	return 2
@@ -171,8 +170,8 @@ math_ldexp :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	x := f64(luaL_checknumber(L, 1))
-	ep := libc.int(i32(luaL_checkinteger(L, 2)))
-	lua.lua_pushnumber(L, lua.Number(libc.ldexp(x, ep)))
+	ep := int(i32(luaL_checkinteger(L, 2)))
+	lua.lua_pushnumber(L, lua.Number(math.ldexp(x, ep)))
 	return 1
 }
 
@@ -212,7 +211,7 @@ math_floor :: proc "c" (Lp: rawptr) -> i32 {
 	if lua.lua_isinteger(L, 1) {
 		lua.lua_settop(L, 1)
 	} else {
-		d := libc.floor(f64(luaL_checknumber(L, 1)))
+		d := math.floor(f64(luaL_checknumber(L, 1)))
 		pushnumint(L, lua.Number(d))
 	}
 	return 1
@@ -225,7 +224,7 @@ math_ceil :: proc "c" (Lp: rawptr) -> i32 {
 	if lua.lua_isinteger(L, 1) {
 		lua.lua_settop(L, 1)
 	} else {
-		d := libc.ceil(f64(luaL_checknumber(L, 1)))
+		d := math.ceil(f64(luaL_checknumber(L, 1)))
 		pushnumint(L, lua.Number(d))
 	}
 	return 1
@@ -262,7 +261,7 @@ math_modf :: proc "c" (Lp: rawptr) -> i32 {
 		lua.lua_pushnumber(L, 0) // no fractional part
 	} else {
 		n := f64(luaL_checknumber(L, 1))
-		ip := n < 0 ? libc.ceil(n) : libc.floor(n)
+		ip := n < 0 ? math.ceil(n) : math.floor(n)
 		pushnumint(L, lua.Number(ip))
 		lua.lua_pushnumber(L, lua.Number(n == ip ? 0.0 : n - ip))
 	}
@@ -509,7 +508,7 @@ luaopen_math :: proc "c" (Lp: rawptr) -> i32 {
 	luaL_newlib(L, mathlib)
 	lua.lua_pushnumber(L, PI)
 	lua.lua_setfield(L, -2, "pi")
-	lua.lua_pushnumber(L, libc.HUGE_VAL)
+	lua.lua_pushnumber(L, math.inf_f64(1))
 	lua.lua_setfield(L, -2, "huge")
 	lua.lua_pushinteger(L, lua.MAX_INTEGER)
 	lua.lua_setfield(L, -2, "maxinteger")
@@ -518,4 +517,3 @@ luaopen_math :: proc "c" (Lp: rawptr) -> i32 {
 	setrandfunc(L)
 	return 1
 }
-

@@ -23,7 +23,9 @@ package lua
 // behavior, validated against a differential corpus. Integer formatting and all
 // numeric *parsing* below are already pure Odin.
 
+import "base:intrinsics"
 import "core:c/libc"
+import "core:math"
 
 // ---------------------------------------------------------------------------
 // Type tags
@@ -672,7 +674,7 @@ number_to_integer_range :: proc "contextless" (f: Number) -> (Integer, bool) {
 // `luaV_flttointeger`: floor first, and if the value wasn't already integral,
 // either fail (Eq), or bump the floor up to the ceiling (Ceil).
 float_to_integer :: proc "contextless" (n: Number, mode: F2I_Mode) -> (Integer, bool) {
-	f := libc.floor(n)
+	f := math.floor(n)
 	if n != f { 	// not an integral value?
 		if mode == .Eq {
 			return 0, false // Eq demands an exact integer
@@ -935,7 +937,7 @@ strx_to_number :: proc "contextless" (s: []byte) -> (Number, int, bool) {
 	}
 
 	if neg {r = -r}
-	return libc.ldexp(r, i32(e)), end, true
+	return math.ldexp(r, int(i32(e))), end, true
 }
 
 // Return the current locale's decimal-point character (`localeconv()->decimal_point[0]`,
@@ -1395,7 +1397,7 @@ flt_arith :: proc "contextless" (op: Arith_Op, v1, v2: Number) -> Number {
 		// luai_numpow special-cases the common square to avoid calling pow().
 		return v2 == 2 ? v1 * v1 : libc.pow(v1, v2)
 	case .IDiv:
-		return libc.floor(v1 / v2)
+		return math.floor(v1 / v2)
 	case .Unm:
 		return -v1
 	case .Mod:
@@ -1577,7 +1579,7 @@ buff_add :: proc(buff: ^Buff_FS, src: [^]u8, length: uint) {
 				return
 			}
 			if buff.blen > 0 {
-				libc.memcpy(newblock, rawptr(buff.b), buff.blen)
+				intrinsics.mem_copy_non_overlapping(newblock, rawptr(buff.b), int(buff.blen))
 			}
 		} else {
 			// Already on the heap: a plain resize preserving the contents.
@@ -1590,7 +1592,7 @@ buff_add :: proc(buff: ^Buff_FS, src: [^]u8, length: uint) {
 		buff.b = ([^]u8)(newblock)
 		buff.buffsize = newsize
 	}
-	libc.memcpy(rawptr(&buff.b[buff.blen]), rawptr(src), length)
+	intrinsics.mem_copy_non_overlapping(rawptr(&buff.b[buff.blen]), rawptr(src), int(length))
 	buff.blen += length
 }
 

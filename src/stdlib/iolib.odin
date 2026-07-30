@@ -455,7 +455,7 @@ test2 :: proc(rn: ^RN, a: u8, b: u8) -> bool {
 readdigits :: proc(rn: ^RN, hex: bool) -> int {
 	count := 0
 	for {
-		is_digit := hex ? libc.isxdigit(rn.c) != 0 : libc.isdigit(rn.c) != 0
+		is_digit := hex ? lua.is_xdigit(int(rn.c)) : lua.is_digit(int(rn.c))
 		if !is_digit || !nextc(rn) {
 			break
 		}
@@ -477,7 +477,7 @@ read_number :: proc(L: ^lua.Lua_State, f: ^libc.FILE) -> bool {
 	// C locale: the decimal separator is '.', which we always accept anyway.
 	for {
 		rn.c = i32(libc.getc(f))
-		if libc.isspace(rn.c) == 0 {
+		if !lua.is_space(int(rn.c)) {
 			break
 		}
 	}
