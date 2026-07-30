@@ -181,7 +181,14 @@ throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
 	if g != nil && g.panic != nil {
 		g.panic(L)
 	}
-	runtime.exit(134)
+	when ODIN_OS == .Freestanding {
+		// There is no process to terminate on bare metal. The panic callback is
+		// the embedder's last chance to reset, halt, or report the fault; if it
+		// returns, park forever rather than reaching an unavailable OS exit.
+		for {}
+	} else {
+		runtime.exit(134)
+	}
 }
 
 // Throw straight to the *base* protected boundary of this thread -- reference

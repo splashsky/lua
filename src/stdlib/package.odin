@@ -1,3 +1,5 @@
+#+build !freestanding
+
 package stdlib
 
 // package.odin -- our analogue of reference Lua's `loadlib.c`.

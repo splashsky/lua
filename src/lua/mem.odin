@@ -18,9 +18,7 @@ package lua
 // ERRMEM error -- are deliberately left as TODOs for later phases; see the notes
 // on `handle_alloc_failure` below.
 
-import "base:runtime"
 import "core:mem"
-import "core:os"
 
 // ---------------------------------------------------------------------------
 // The allocator interface
@@ -48,49 +46,6 @@ Alloc_Proc :: #type proc "c" (ud: rawptr, ptr: rawptr, osize: uint, nsize: uint)
 Allocator :: struct {
 	alloc: Alloc_Proc,
 	ud:    rawptr,
-}
-
-// The default allocator, used when an embedder doesn't supply one. It is the
-// faithful twin of reference Lua's `l_alloc` (lauxlib.c), backed by Odin's
-// platform heap rather than the C heap. On Windows `core:os.heap_allocator()` is
-// implemented with HeapAlloc/HeapReAlloc/HeapFree, so it does not pull in the
-// CRT. We use the non-zeroing resize operation because C realloc does not promise
-// to clear newly grown bytes.
-//
-// Unlike the old C-heap shim, Odin's allocator needs the exact old size. Lua
-// already supplies that as part of `lua_Alloc`'s contract, and the kernel's byte
-// accounting uses the same value, so passing it through changes neither
-// accounting nor allocation layout. Odin's default heap alignment is at least
-// `mem.DEFAULT_ALIGNMENT`, and any allocator error is translated to nil while
-// leaving the original block valid, preserving Lua's fallible-allocation contract.
-default_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize: uint, nsize: uint) -> rawptr {
-	context = runtime.default_context()
-	if nsize == 0 {
-		if ptr != nil {
-			_ = mem.free(ptr, os.heap_allocator())
-		}
-		return nil
-	}
-	if nsize > uint(max(int)) || (ptr != nil && osize > uint(max(int))) {
-		return nil
-	}
-	old_size := ptr == nil ? 0 : int(osize)
-	resized, err := mem.resize_non_zeroed(
-		ptr,
-		old_size,
-		int(nsize),
-		mem.DEFAULT_ALIGNMENT,
-		os.heap_allocator(),
-	)
-	if err != nil {
-		return nil
-	}
-	return resized
-}
-
-// A ready-made `Allocator` wrapping `default_alloc`.
-default_allocator :: proc "contextless" () -> Allocator {
-	return Allocator{alloc = default_alloc, ud = nil}
 }
 
 // ---------------------------------------------------------------------------

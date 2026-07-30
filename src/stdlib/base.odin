@@ -1,3 +1,5 @@
+#+build !freestanding
+
 package stdlib
 
 // base.odin -- the basic library (reference `lbaselib.c`): the global functions

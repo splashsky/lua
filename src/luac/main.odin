@@ -1,3 +1,5 @@
+#+build !freestanding
+
 package main
 
 // luac/main.odin -- the standalone `luac` bytecode compiler, our faithful

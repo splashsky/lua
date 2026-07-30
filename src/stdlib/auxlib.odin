@@ -1,3 +1,5 @@
+#+build !freestanding
+
 package stdlib
 
 // auxlib.odin -- our analogue of reference Lua's `lauxlib.h` / `lauxlib.c`.

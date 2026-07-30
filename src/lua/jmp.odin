@@ -17,14 +17,23 @@ package lua
 // stack pointer describes the state at procedure entry, so running a compiler
 // epilogue after restoring it would adjust the caller's stack a second time.
 
+// Odin exposes Freestanding as the OS but does not expose the selected amd64
+// sub-ABI as a compile-time constant. SysV is our bare-metal default. The build
+// wrappers set this one narrowly-scoped override for the two Win64-ABI target
+// triples; ordinary hosted builds and freestanding_amd64_sysv need no define.
+LUA_FREESTANDING_WIN64_ABI :: #config(LUA_FREESTANDING_WIN64_ABI, false)
+
 when ODIN_ARCH == .amd64 {
-	when ODIN_OS == .Windows {
+	when ODIN_OS == .Windows || (ODIN_OS == .Freestanding && LUA_FREESTANDING_WIN64_ABI) {
 		// Win64 preserves RBX, RBP, RDI, RSI, R12-R15 and XMM6-XMM15 across a
-		// call. A caller may therefore keep live Odin values in any of them
-		// across jmp_set. We save all of them, plus the caller's post-return
-		// RSP and return address. Skipping the XMM registers would appear to
-		// work for integer-heavy Lua code, but would silently violate the ABI
-		// whenever the optimizer parked a live float there.
+		// call. This condition deliberately tests the ABI, not ODIN_OS: Odin's
+		// freestanding_amd64_win64 and freestanding_amd64_mingw targets are bare
+		// metal but retain this register contract. A caller may therefore keep
+		// live Odin values in any of them across jmp_set. We save all of them,
+		// plus the caller's post-return RSP and return address. Skipping the XMM
+		// registers would appear to work for integer-heavy Lua code, but would
+		// silently violate the ABI whenever the optimizer parked a live float
+		// there.
 		//
 		// Layout: 8 integer registers, RSP, return address, then ten 16-byte
 		// XMM values. movdqu intentionally permits the buffer's 8-byte
@@ -97,8 +106,9 @@ when ODIN_ARCH == .amd64 {
 			}(buf, value)
 			for {}
 		}
-	} else when ODIN_OS == .Linux || ODIN_OS == .Darwin {
-		// The x86-64 SysV ABI preserves RBX, RBP, and R12-R15. RDI/RSI and
+	} else when ODIN_OS == .Linux || ODIN_OS == .Darwin || ODIN_OS == .Freestanding {
+		// The x86-64 SysV ABI, including freestanding_amd64_sysv, preserves
+		// RBX, RBP, and R12-R15. RDI/RSI and
 		// every vector register are caller-saved here, so unlike Win64 they
 		// must not be restored by a callee and do not belong in this buffer.
 		// The final two slots are the caller's post-return RSP and the return

@@ -48,6 +48,52 @@ See [BUILDING.md](BUILDING.md). Quick version:
 .\build\test.ps1
 ```
 
+### Freestanding / bare metal
+
+Odin's native `ODIN_OS == .Freestanding` switch selects a bare-metal build
+automatically; there is no project-specific `-define:` to keep in sync. Build a
+relocatable object (not an executable) with:
+
+```sh
+./build/build.sh freestanding
+# or, on Windows:
+.\build\build.ps1 freestanding
+```
+
+This emits one `build/out/lua-freestanding.o` on Unix or
+`build/out/lua-freestanding.obj` on Windows for `freestanding_amd64_sysv`.
+Set `FREESTANDING_TARGET` on Unix or pass
+`-FreestandingTarget` in PowerShell to choose another Odin freestanding target.
+The exact flags are `-target:<target> -no-crt -default-to-nil-allocator
+-no-entry-point -build-mode:obj -use-single-module`.
+For Odin's `freestanding_amd64_win64` and `freestanding_amd64_mingw`
+subtargets the wrappers additionally set
+`-define:LUA_FREESTANDING_WIN64_ABI=true`; Odin exposes the freestanding OS
+automatically but currently exposes no compile-time sub-ABI value for the
+assembly jump shim.
+
+The current libc-free jump implementation supports amd64 (SysV and Win64 ABIs)
+and arm64. Odin's freestanding arm32, riscv64, wasm32, and wasm64p32 targets
+remain honest compile-time failures until `jmp_set`/`jmp_long` exist for those
+architectures. Odin also cannot currently produce a cross-compiled static
+library for freestanding amd64, so the supported deliverable is the object file.
+
+The object contains the Lua kernel and base, coroutine, math, string, table, and
+utf8 libraries. `io`, `os`, `package`, the interactive debug library, the stream
+platform layer, and the `lua`/`luac` programs are omitted because bare metal has
+no filesystem, environment, process, or terminal. Base therefore also omits
+`print`, `loadfile`, and `dofile`; `load` from memory remains available.
+
+There is deliberately no default Lua allocator in this configuration. The
+embedder must provide a `lua.Allocator` callback and userdata to `lua.new_state`,
+plus any board-specific panic/reset behavior it needs. Odin's default allocator
+is set to nil so an accidental implicit Odin allocation cannot masquerade as a
+working heap.
+
+For object-file consumers, the artifact exports
+`luao_freestanding_newstate(alloc, ud)` and `luao_freestanding_close(L)`. The
+constructor rejects a nil callback and opens the freestanding library set.
+
 ## Intentional deviations from reference Lua
 
 Kept deliberately small and always documented:

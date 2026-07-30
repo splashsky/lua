@@ -1,3 +1,5 @@
+#+build !freestanding
+
 package stdlib
 
 // oslib.odin -- the operating-system library without a C-runtime dependency.

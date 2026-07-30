@@ -1,3 +1,5 @@
+#+build !freestanding
+
 package main
 
 // main.odin -- the standalone `lua` interpreter, our faithful analogue of the

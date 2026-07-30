@@ -65,6 +65,48 @@ Windows (PowerShell):
 
 Binaries land in `build/out/`.
 
+## Freestanding object
+
+The freestanding build is selected by Odin's built-in
+`ODIN_OS == .Freestanding` condition, not a custom define:
+
+```sh
+./build/build.sh freestanding
+FREESTANDING_TARGET=freestanding_amd64_sysv ./build/build.sh freestanding
+```
+
+```powershell
+.\build\build.ps1 freestanding
+.\build\build.ps1 freestanding -FreestandingTarget freestanding_amd64_sysv
+```
+
+It emits one `build/out/lua-freestanding.o` on Unix or
+`build/out/lua-freestanding.obj` on Windows using:
+
+```
+-target:freestanding_amd64_sysv -no-crt -default-to-nil-allocator
+-no-entry-point -build-mode:obj -use-single-module
+```
+
+This is a relocatable object for an embedder or firmware link, not a runnable
+program. The embedder must call `lua.new_state` with its own `lua.Allocator`;
+the hosted `lua.default_allocator` is intentionally not declared.
+The emitted object also provides the C-ABI convenience exports
+`luao_freestanding_newstate` and `luao_freestanding_close`.
+
+The wrappers add `-define:LUA_FREESTANDING_WIN64_ABI=true` only for the
+`freestanding_amd64_win64` and `freestanding_amd64_mingw` triples. Odin selects
+the freestanding source set without help, but does not currently expose that
+amd64 sub-ABI to source code; the jump shim must know which nonvolatile
+registers to preserve.
+
+Verified object targets are `freestanding_amd64_sysv`,
+`freestanding_amd64_win64`, `freestanding_amd64_mingw`, and
+`freestanding_arm64`. arm32, riscv64, wasm32, and wasm64p32 stop at the explicit
+`jmp.odin` unsupported-architecture panic. `-build-mode:lib` is not used because
+this Odin toolchain reports that linking a freestanding amd64 static library is
+not yet supported.
+
 ## Test
 
 Odin's built-in test runner compiles and runs the `@(test)` procs under `tests/`.

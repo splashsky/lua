@@ -1,3 +1,5 @@
+#+build !freestanding
+
 package stdlib
 
 // iolib.odin -- our analogue of reference Lua's `liolib.c`.

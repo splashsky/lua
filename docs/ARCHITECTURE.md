@@ -47,6 +47,27 @@ on the kernel but the kernel never depends on them — so they *are* separate pa
 The kernel must never import `stdlib`; if it ever seems to need to, that's a signal the
 public API is missing something.
 
+### Freestanding platform boundary
+
+`ODIN_OS == .Freestanding` is the platform switch; there is no parallel project
+define. In that build the dependency graph stops before every hosted service:
+`stream.odin`, `io`, `os`, `package`, the interactive debug library, and both
+standalone mains carry `#+build !freestanding`. The freestanding stdlib surface
+is base, coroutine, math, string, table, and utf8. Base omits its three hosted
+entries (`print`, `loadfile`, and `dofile`) while retaining in-memory `load`.
+
+The kernel itself never owns a heap. Hosted builds add `default_allocator` in a
+host-only source file backed by `core:os`; freestanding builds expose only the
+allocator-taking `new_state`. Firmware must provide that callback, its arena or
+heap policy, and any panic/reset behavior. The build also passes
+`-default-to-nil-allocator`, so an unintended Odin allocation cannot silently
+reach for a platform heap that does not exist.
+
+One small build define remains for amd64 ABI selection, not platform selection:
+the wrappers set `LUA_FREESTANDING_WIN64_ABI=true` for Odin's Win64 and MinGW
+freestanding triples. `ODIN_OS` is correctly `Freestanding` for all of them,
+but Odin does not expose the sub-ABI needed by the assembly setjmp/longjmp shim.
+
 File-to-origin map (each Odin file corresponds to reference `l*.c`/`l*.h`):
 
 | Odin file            | Reference origin                          |

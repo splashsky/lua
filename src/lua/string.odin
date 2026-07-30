@@ -18,26 +18,6 @@ package lua
 // allocation that could trigger an emergency collection.
 
 import "core:mem"
-import "core:time"
-
-// Derive a per-state hash seed -- reference Lua's `luai_makeseed`. We fold a few
-// values that differ between runs (the global block's address, a stack address,
-// a code address, and the wall clock) into `luaS_hash`. The seed only needs to
-// vary run-to-run so string hashing can't be trivially collision-attacked; it is
-// deliberately *not* required to be cryptographically strong. Kept here beside the
-// hash function it feeds, though the seed lives on `Global_State`.
-make_seed :: proc(g: ^Global_State) -> u32 {
-	buff: [3 * size_of(uintptr)]u8
-	h := u32(time.now()._nsec)
-	local: int
-	p0 := uintptr(g) // a heap address
-	p1 := uintptr(&local) // a stack address
-	p2 := uintptr(rawptr(make_seed)) // a code address
-	mem.copy(&buff[0], &p0, size_of(uintptr))
-	mem.copy(&buff[size_of(uintptr)], &p1, size_of(uintptr))
-	mem.copy(&buff[2 * size_of(uintptr)], &p2, size_of(uintptr))
-	return luaS_hash(&buff[0], len(buff), h)
-}
 
 // ---------------------------------------------------------------------------
 // Tunables (reference luaconf.h / lstring.c)

@@ -1,4 +1,6 @@
 #+build windows
+#+build !freestanding
+
 package main
 
 // tty_windows.odin -- Windows implementation of `lua_stdin_is_tty`.

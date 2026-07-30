@@ -1,3 +1,5 @@
+#+build !freestanding
+
 package stdlib
 
 // dblib.odin -- our analogue of reference Lua's `ldblib.c`.

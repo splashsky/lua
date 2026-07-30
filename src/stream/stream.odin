@@ -1,3 +1,5 @@
+#+build !freestanding
+
 package stream
 
 // stream.odin is the small stdio replacement shared by the Lua library and the

@@ -9,15 +9,17 @@
         .\build\build.ps1              # build the standalone `lua` CLI (default)
         .\build\build.ps1 luac         # build the `luac` compiler
         .\build\build.ps1 all          # build both
+        .\build\build.ps1 freestanding # build the bare-metal Lua object
         .\build\build.ps1 lua -DebugBuild   # debug build
 
     Output lands in build\out\.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('lua', 'luac', 'all')]
+    [ValidateSet('lua', 'luac', 'all', 'freestanding')]
     [string]$Target = 'lua',
-    [switch]$DebugBuild
+    [switch]$DebugBuild,
+	[string]$FreestandingTarget = 'freestanding_amd64_sysv'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,6 +55,29 @@ function Build-One {
     if ($LASTEXITCODE -ne 0) { throw "Build failed for $Name" }
 }
 
+function Build-Freestanding {
+	# A bare-metal target has no process entry point and no CRT to initialize one.
+	# Build the stdlib package as a relocatable object instead: it pulls in the Lua
+	# kernel and the six pure libraries, while Odin's `freestanding` build tag
+	# removes io/os/package/stream and both hosted mains automatically.
+	#
+	# `-default-to-nil-allocator` is important even though the Lua kernel uses the
+	# embedder's lua.Allocator exclusively. It prevents an accidental Odin make/new
+	# in reachable support code from quietly assuming an OS heap exists.
+	$OutPath = Join-Path $OutDir 'lua-freestanding.obj'
+	$AbiFlags = @()
+	if ($FreestandingTarget -in @('freestanding_amd64_win64', 'freestanding_amd64_mingw')) {
+		# ODIN_OS is Freestanding for both triples, so jmp.odin cannot otherwise
+		# distinguish their Win64 nonvolatile-register set from amd64 SysV.
+		$AbiFlags += '-define:LUA_FREESTANDING_WIN64_ABI=true'
+	}
+	Write-Host "==> Building freestanding Lua ($FreestandingTarget) -> $OutPath"
+	& odin build (Join-Path $SrcDir 'freestanding') $Collection $Optimize `
+		"-target:$FreestandingTarget" -no-crt -default-to-nil-allocator `
+		-no-entry-point -build-mode:obj -use-single-module @AbiFlags "-out:$OutPath"
+	if ($LASTEXITCODE -ne 0) { throw "Freestanding build failed for $FreestandingTarget" }
+}
+
 switch ($Target) {
     'lua'  { Build-One 'lua'  $SrcDir }
     'luac' { Build-One 'luac' (Join-Path $SrcDir 'luac') }
@@ -60,6 +85,7 @@ switch ($Target) {
         Build-One 'lua'  $SrcDir
         Build-One 'luac' (Join-Path $SrcDir 'luac')
     }
+	'freestanding' { Build-Freestanding }
 }
 
 Write-Host "Done."
