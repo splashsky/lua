@@ -634,9 +634,12 @@ lua_pushthread :: proc(L: ^Lua_State) -> bool {
 // ---------------------------------------------------------------------------
 
 // The globals table value (registry[LUA_RIDX_GLOBALS]) -- reference `getGtable`.
+// This copies through the tag-returning table API instead of retaining an array
+// slot pointer; the registry array will shortly have split tags and payloads.
 @(private = "file")
-getGtable :: #force_inline proc(L: ^Lua_State) -> ^TValue {
-	return luaH_getint_slot(table_value(&L.g.registry), LUA_RIDX_GLOBALS)
+getGtable :: #force_inline proc(L: ^Lua_State, res: ^TValue) {
+	tag := luaH_getint(table_value(&L.g.registry), LUA_RIDX_GLOBALS, res)
+	assert(!tag_is_empty(tag))
 }
 
 // Core indexed read with metamethod fallback, writing the result to stack slot
@@ -647,9 +650,13 @@ getGtable :: #force_inline proc(L: ^Lua_State) -> ^TValue {
 api_get :: proc(L: ^Lua_State, t: ^TValue, key: ^TValue, ra: int) {
 	if is_table(t) {
 		h := table_value(t)
-		slot := is_integer(key) ? luaH_getint_slot(h, int_value(key)) : luaH_getslot(h, key)
-		if !is_empty(slot) {
-			set_obj(stack_value(L, ra), slot)
+		tag: Byte
+		if is_integer(key) {
+			tag = luaH_fastgeti(h, int_value(key), stack_value(L, ra))
+		} else {
+			tag = luaH_fastget(h, key, stack_value(L, ra))
+		}
+		if !tag_is_empty(tag) {
 			return
 		}
 	}
@@ -682,27 +689,35 @@ lua_getfield :: proc(L: ^Lua_State, idx: int, k: string) -> int {
 }
 
 lua_getglobal :: proc(L: ^Lua_State, name: string) -> int {
-	return auxgetstr(L, getGtable(L), name)
+	gt: TValue
+	getGtable(L, &gt)
+	return auxgetstr(L, &gt, name)
 }
 
-// `push(t[i])` for an integer key -- reference `lua_geti`.
+@(private = "file")
+lua_geti_slow :: proc(L: ^Lua_State, t: ^TValue, n: Integer) -> int {
+	key: TValue
+	set_int(&key, n)
+	luaV_finishget(L, t, &key, L.top)
+	api_incr_top(L)
+	return int(base_type(stack_value(L, L.top - 1)))
+}
+
+// `push(t[i])` for an integer key -- reference `lua_geti`. This entry point is
+// also the inner read primitive for table.sort. Keep its hit path tiny so Odin
+// can optimize it independently of the uncommon metamethod path, which remains
+// outlined in `lua_geti_slow`.
 lua_geti :: proc(L: ^Lua_State, idx: int, n: Integer) -> int {
 	t := index2value(L, idx)
 	if is_table(t) {
-		slot := luaH_getint_slot(table_value(t), n)
-		if !is_empty(slot) {
-			set_obj(stack_value(L, L.top), slot)
+		tag := luaH_fastgeti(table_value(t), n, stack_value(L, L.top))
+		if !tag_is_empty(tag) {
 			api_incr_top(L)
 			return int(base_type(stack_value(L, L.top - 1)))
 		}
 	}
-	// Miss or non-table: push the integer key and go the metamethod route.
-	key: TValue
-	set_int(&key, n)
-	set_obj(stack_value(L, L.top), &key)
-	api_incr_top(L)
-	api_get(L, t, stack_value(L, L.top - 1), L.top - 1)
-	return int(base_type(stack_value(L, L.top - 1)))
+	// Do not route this miss through `api_get`: that would look up n twice.
+	return lua_geti_slow(L, t, n)
 }
 
 // Raw (metamethod-free) reads -----------------------------------------------
@@ -711,11 +726,9 @@ lua_rawget :: proc(L: ^Lua_State, idx: int) -> int {
 	t := index2value(L, idx)
 	api_check(is_table(t), "table expected")
 	api_checkpop(L, 1)
-	slot := luaH_getslot(table_value(t), stack_value(L, L.top - 1))
-	if is_empty(slot) {
+	tag := luaH_get(table_value(t), stack_value(L, L.top - 1), stack_value(L, L.top - 1))
+	if tag_is_empty(tag) {
 		set_nil(stack_value(L, L.top - 1))
-	} else {
-		set_obj(stack_value(L, L.top - 1), slot)
 	}
 	return int(base_type(stack_value(L, L.top - 1)))
 }
@@ -723,11 +736,9 @@ lua_rawget :: proc(L: ^Lua_State, idx: int) -> int {
 lua_rawgeti :: proc(L: ^Lua_State, idx: int, n: Integer) -> int {
 	t := index2value(L, idx)
 	api_check(is_table(t), "table expected")
-	slot := luaH_getint_slot(table_value(t), n)
-	if is_empty(slot) {
+	tag := luaH_fastgeti(table_value(t), n, stack_value(L, L.top))
+	if tag_is_empty(tag) {
 		set_nil(stack_value(L, L.top))
-	} else {
-		set_obj(stack_value(L, L.top), slot)
 	}
 	api_incr_top(L)
 	return int(base_type(stack_value(L, L.top - 1)))
@@ -739,11 +750,9 @@ lua_rawgetp :: proc(L: ^Lua_State, idx: int, p: rawptr) -> int {
 	api_check(is_table(t), "table expected")
 	key: TValue
 	set_light_userdata(&key, p)
-	slot := luaH_getslot(table_value(t), &key)
-	if is_empty(slot) {
+	tag := luaH_get(table_value(t), &key, stack_value(L, L.top))
+	if tag_is_empty(tag) {
 		set_nil(stack_value(L, L.top))
-	} else {
-		set_obj(stack_value(L, L.top), slot)
 	}
 	api_incr_top(L)
 	return int(base_type(stack_value(L, L.top - 1)))
@@ -823,16 +832,22 @@ lua_getmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
 api_set :: proc(L: ^Lua_State, t: ^TValue, key: ^TValue, val: ^TValue) {
 	if is_table(t) {
 		h := table_value(t)
-		slot := is_integer(key) ? luaH_getint_slot(h, int_value(key)) : luaH_getslot(h, key)
-		if !is_empty(slot) {
-			set_obj(slot, val)
+		hres: int
+		if is_integer(key) {
+			hres = luaH_fastseti(h, int_value(key), val)
+		} else {
+			hres = luaH_fastpset(h, key, val)
+		}
+		if hres == HOK {
 			if is_collectable(val) {
 				luaC_barrierback(L, obj2gco(h))
 			}
 			return
 		}
+		luaV_finishset(L, t, key, val, hres)
+		return
 	}
-	luaV_finishset(L, t, key, val)
+	luaV_finishset(L, t, key, val, HNOTATABLE)
 }
 
 // `t[k] = v` for a string key, popping the value -- reference `auxsetstr`.
@@ -860,17 +875,45 @@ lua_setfield :: proc(L: ^Lua_State, idx: int, k: string) {
 }
 
 lua_setglobal :: proc(L: ^Lua_State, name: string) {
-	auxsetstr(L, getGtable(L), name)
+	gt: TValue
+	getGtable(L, &gt)
+	auxsetstr(L, &gt, name)
+}
+
+@(private = "file")
+lua_seti_slow :: proc(
+	L: ^Lua_State,
+	t: ^TValue,
+	n: Integer,
+	val: ^TValue,
+	hres: int,
+) {
+	key: TValue
+	set_int(&key, n)
+	luaV_finishset(L, t, &key, val, hres)
+	L.top -= 1
 }
 
 // `t[n] = v` for an integer key, popping the value -- reference `lua_seti`.
+// table.sort performs swaps through this API, so mirror the get side: inline the
+// successful array update and leave key construction/metamethod handling cold.
 lua_seti :: proc(L: ^Lua_State, idx: int, n: Integer) {
 	api_checknelems(L, 1)
 	t := index2value(L, idx)
-	key: TValue
-	set_int(&key, n)
-	api_set(L, t, &key, stack_value(L, L.top - 1))
-	L.top -= 1
+	val := stack_value(L, L.top - 1)
+	hres := HNOTATABLE
+	if is_table(t) {
+		h := table_value(t)
+		hres = luaH_fastseti(h, n, val)
+		if hres == HOK {
+			if is_collectable(val) {
+				luaC_barrierback(L, obj2gco(h))
+			}
+			L.top -= 1
+			return
+		}
+	}
+	lua_seti_slow(L, t, n, val, hres)
 }
 
 // Raw (metamethod-free) writes ----------------------------------------------
@@ -1154,9 +1197,10 @@ lua_load :: proc(
 	if status == .Ok {
 		f := lua_closure_value(stack_value(L, L.top - 1)) // the freshly loaded closure
 		if f.nupvalues >= 1 {
-			gt := getGtable(L) // the globals table value
-			set_obj(upval_value(f.upvals[0]), gt)
-			luaC_barrier(L, obj2gco(f.upvals[0]), gc_value(gt))
+			gt: TValue
+			getGtable(L, &gt)
+			set_obj(upval_value(f.upvals[0]), &gt)
+			luaC_barrier(L, obj2gco(f.upvals[0]), gc_value(&gt))
 		}
 	}
 	return status

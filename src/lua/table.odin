@@ -449,16 +449,35 @@ keyinarray :: #force_inline proc "contextless" (t: ^Table, key: ^TValue) -> u32 
 
 @(private = "file")
 arraykeyisempty :: #force_inline proc "contextless" (t: ^Table, key: u32) -> bool {
-	return is_empty(&t.array[key - 1])
+	return tag_is_empty(t.array[key - 1].tt_)
 }
 
 // ---------------------------------------------------------------------------
 // Lookups
 // ---------------------------------------------------------------------------
 
+// Table access deliberately speaks in tags instead of exposing array slots.
+// Today the array is still a contiguous `[^]TValue`, but the next representation
+// stores each slot's tag and payload in separate segments. Reading the tag first,
+// and copying the payload only for a live tag, makes every caller correct for
+// both layouts. Keep the nil-family rule here: deleted/nil variants are empty,
+// not only the exact VEMPTY tag.
+tag_is_empty :: #force_inline proc "contextless" (tag: Byte) -> bool {
+	return no_variant(tag) == TNIL
+}
+
+// Results from the pre-set family. Array slots use the bitwise complement of
+// their zero-based index; hash slots use HFIRSTNODE plus the node index.
+HOK         :: 0
+HNOTFOUND   :: 1
+HNOTATABLE  :: 2
+HFIRSTNODE  :: 3
+
 // "Generic" chained search: walk the collision chain from the key's main position
 // until we find it or run off the end. Reference Lua's `getgeneric`. Not used for
-// integer or integral-float keys, which the array/int paths handle.
+// integer or integral-float keys, which the array/int paths handle. Its pointer
+// is safe to retain because it can only name a hash-node value, whose TValue view
+// remains contiguous after the split-array change; it never names an array slot.
 @(private = "file")
 getgeneric :: proc "contextless" (t: ^Table, key: ^TValue, deadok: bool) -> ^TValue {
 	i := mainposition_i(t, key)
@@ -476,7 +495,8 @@ getgeneric :: proc "contextless" (t: ^Table, key: ^TValue, deadok: bool) -> ^TVa
 }
 
 // Chained search restricted to integer keys living in the hash part -- reference
-// Lua's `getintfromhash`.
+// Lua's `getintfromhash`. Like `getgeneric`, the returned pointer can only refer
+// to a hash node (or the immutable absent sentinel), never split array storage.
 @(private = "file")
 getintfromhash :: proc "contextless" (t: ^Table, key: Integer) -> ^TValue {
 	i := hashint_i(t, key)
@@ -493,20 +513,11 @@ getintfromhash :: proc "contextless" (t: ^Table, key: Integer) -> ^TValue {
 	}
 }
 
-// The value slot for an integer key: array part if in range, else the hash part.
-// Package-visible: the VM's GETI/index fast paths and the vararg helpers read the
-// raw slot directly (testing `is_empty`) to skip the copying `luaH_get`.
-luaH_getint_slot :: proc "contextless" (t: ^Table, key: Integer) -> ^TValue {
-	k := ikeyinarray(t, key)
-	if k > 0 {
-		return &t.array[k - 1]
-	}
-	return getintfromhash(t, key)
-}
-
 // Short-string search -- reference Lua's `luaH_Hgetshortstr`. Short strings are
-// interned, so a match is a pointer comparison. This is the one lookup the
-// metamethod machinery (tm.odin) calls directly.
+// interned, so a match is a pointer comparison. This intentionally remains the
+// sole package-visible pointer-returning lookup: short-string keys only live in
+// hash nodes, and hash-node values remain contiguous TValues after the array is
+// split. Metamethod lookup needs this stable read-only pointer.
 luaH_Hgetshortstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
 	i := hashstr_i(t, key)
 	for {
@@ -522,7 +533,9 @@ luaH_Hgetshortstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
 	}
 }
 
-// The value slot for any string key (short via the fast path, long via generic).
+// The hash-node value for any string key (short via the fast path, long via
+// generic). This private pointer is safe for the same reason as
+// `luaH_Hgetshortstr`: strings never address the array part.
 @(private = "file")
 Hgetstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
 	if key.tt == VSHRSTR {
@@ -533,55 +546,97 @@ Hgetstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
 	return getgeneric(t, &ko, false)
 }
 
-// The value slot for an arbitrary key -- reference Lua's `luaH_get` dispatcher.
-// Package-visible: the VM's GETTABLE/finishget paths test the returned slot with
-// `is_empty` to decide between a hit and the metamethod fallback.
-luaH_getslot :: proc "contextless" (t: ^Table, key: ^TValue) -> ^TValue {
+@(private = "file")
+finishnodeget :: #force_inline proc "contextless" (slot: ^TValue, res: ^TValue) -> Byte {
+	tag := slot.tt_
+	if !tag_is_empty(tag) {
+		set_obj(res, slot)
+	}
+	return with_variant(tag)
+}
+
+// Gets return the slot tag and fill `res` only when that tag is live. This is
+// reference Lua's API shape, chosen because the forthcoming split array has no
+// contiguous TValue address to return. Callers must test the tag before reading
+// `res`; in particular, an empty result deliberately leaves `res` untouched.
+luaH_getint :: proc "contextless" (t: ^Table, key: Integer, res: ^TValue) -> Byte {
+	k := ikeyinarray(t, key)
+	if k > 0 {
+		tag := t.array[k - 1].tt_ // tag first; do not touch the payload on a miss
+		if !tag_is_empty(tag) {
+			set_obj(res, &t.array[k - 1])
+		}
+		return with_variant(tag)
+	}
+	return finishnodeget(getintfromhash(t, key), res)
+}
+
+// This is the Odin equivalent of reference Lua's `luaH_fastgeti` macro. The
+// overwhelmingly common array hit must stay completely inside its caller: an
+// out-of-line trip through `luaH_getint` for every GETI (and every table-library
+// integer read) is several times more expensive than the tag test and TValue
+// copy themselves. The unsigned subtraction deliberately mirrors the reference
+// macro too, making zero and negative keys miss the array with one bounds check.
+luaH_fastgeti :: #force_inline proc "contextless" (
+	t: ^Table,
+	key: Integer,
+	res: ^TValue,
+) -> Byte {
+	u := Unsigned(key) - 1
+	if u < Unsigned(t.asize) {
+		tag := t.array[u].tt_ // read the tag before touching the payload
+		if !tag_is_empty(tag) {
+			set_obj(res, &t.array[u])
+		}
+		return with_variant(tag)
+	}
+	return luaH_getint(t, key, res)
+}
+
+luaH_getshortstr :: proc "contextless" (t: ^Table, key: ^TString, res: ^TValue) -> Byte {
+	return finishnodeget(luaH_Hgetshortstr(t, key), res)
+}
+
+luaH_getstr :: proc "contextless" (t: ^Table, key: ^TString, res: ^TValue) -> Byte {
+	return finishnodeget(Hgetstr(t, key), res)
+}
+
+luaH_get :: proc "contextless" (t: ^Table, key: ^TValue, res: ^TValue) -> Byte {
 	switch type_tag(key) {
 	case VNUMINT:
-		return luaH_getint_slot(t, int_value(key))
+		return luaH_getint(t, int_value(key), res)
 	case VSHRSTR:
-		return luaH_Hgetshortstr(t, str_value(key))
+		return luaH_getshortstr(t, str_value(key), res)
 	case VNIL:
-		return &absentkey
+		return VABSTKEY
 	case VNUMFLT:
 		k, ok := float_to_integer(flt_value(key), .Eq)
 		if ok {
-			return luaH_getint_slot(t, k)
+			return luaH_getint(t, k, res)
 		}
-		return getgeneric(t, key, false)
+		return finishnodeget(getgeneric(t, key, false), res)
 	case:
-		return getgeneric(t, key, false)
+		return finishnodeget(getgeneric(t, key, false), res)
 	}
 }
 
-// Read `t[key]` into `res` (nil if absent). The public read entry point.
-luaH_get :: proc "contextless" (t: ^Table, key: ^TValue, res: ^TValue) {
-	slot := luaH_getslot(t, key)
-	if is_empty(slot) {
-		set_nil(res)
-	} else {
-		set_obj(res, slot)
-	}
-}
-
-// Read `t[key]` for an integer key into `res` (nil if absent).
-luaH_getint :: proc "contextless" (t: ^Table, key: Integer, res: ^TValue) {
-	slot := luaH_getint_slot(t, key)
-	if is_empty(slot) {
-		set_nil(res)
-	} else {
-		set_obj(res, slot)
-	}
-}
-
-// Read `t[key]` for a string key into `res` (nil if absent).
-luaH_getstr :: proc "contextless" (t: ^Table, key: ^TString, res: ^TValue) {
-	slot := Hgetstr(t, key)
-	if is_empty(slot) {
-		set_nil(res)
-	} else {
-		set_obj(res, slot)
+// Odin does not reliably inline the type dispatch in `luaH_get` back into the
+// interpreter. Keep the two overwhelmingly common VM cases here, just as the
+// reference implementation uses macros around its exported table procedures:
+// integer array hits stay wholly inline, and interned-string keys skip an extra
+// general-dispatch call. Uncommon key types still use the canonical API.
+luaH_fastget :: #force_inline proc "contextless" (
+	t: ^Table,
+	key: ^TValue,
+	res: ^TValue,
+) -> Byte {
+	switch type_tag(key) {
+	case VNUMINT:
+		return luaH_fastgeti(t, int_value(key), res)
+	case VSHRSTR:
+		return finishnodeget(luaH_Hgetshortstr(t, str_value(key)), res)
+	case:
+		return luaH_get(t, key, res)
 	}
 }
 
@@ -704,60 +759,158 @@ luaH_newkey :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, value: ^TValue) -> T
 // Writes
 // ---------------------------------------------------------------------------
 
-// Store `t[key] = value` for an integer key -- reference Lua's `luaH_setint`.
-luaH_setint :: proc(L: ^Lua_State, t: ^Table, key: Integer, value: ^TValue) -> Thread_Status {
-	ik := ikeyinarray(t, key)
-	if ik > 0 {
-		set_obj(&t.array[ik - 1], value)
-		if is_collectable(value) {
-			luaC_barrierback(L, obj2gco(t))
-		}
-		return .Ok
+@(private = "file")
+retpsetcode :: #force_inline proc "contextless" (t: ^Table, slot: ^TValue) -> int {
+	if is_absent(slot) {
+		return HNOTFOUND
 	}
-	slot := getintfromhash(t, key)
-	if !is_absent(slot) {
-		set_obj(slot, value)
-		if is_collectable(value) {
-			luaC_barrierback(L, obj2gco(t))
-		}
-		return .Ok
-	}
-	k: TValue
-	set_int(&k, key)
-	return luaH_newkey(L, t, &k, value)
+	return node_index(t, node_from_val(slot)) + HFIRSTNODE
 }
 
-// Store `t[key] = value` for an arbitrary key -- reference Lua's `luaH_set`
-// (folded together with `luaH_pset`/`luaH_finishset`, whose split exists purely as
-// a VM fast-path optimization). Integral float keys are normalized to integers;
-// nil and NaN keys are rejected.
-luaH_set :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, value: ^TValue) -> Thread_Status {
+@(private = "file")
+finishnodeset :: #force_inline proc "contextless" (t: ^Table, slot: ^TValue, value: ^TValue) -> int {
+	if !is_empty(slot) {
+		set_obj(slot, value)
+		return HOK
+	}
+	return retpsetcode(t, slot)
+}
+
+// Pre-set operations update an already-present value immediately. Otherwise they
+// return a location/status code instead of exposing a writable slot. The caller
+// can therefore decide whether `__newindex` applies, then pass the same code to
+// `luaH_finishset` without ever manufacturing a TValue pointer for an array slot.
+luaH_psetint :: proc "contextless" (t: ^Table, key: Integer, value: ^TValue) -> int {
+	return finishnodeset(t, getintfromhash(t, key), value)
+}
+
+// Like `luaH_fastgeti`, this mirrors a reference macro and must remain inline.
+// Keeping the array hit in the VM/API caller avoids paying for an Odin procedure
+// call around what is normally just a bounds check, tag check, and TValue copy.
+luaH_fastseti :: #force_inline proc "contextless" (
+	t: ^Table,
+	key: Integer,
+	value: ^TValue,
+) -> int {
+	u := Unsigned(key) - 1
+	if u < Unsigned(t.asize) {
+		tag := t.array[u].tt_ // tag first; payload is written only on success
+		no_tm := t.metatable == nil ||
+		         (t.metatable.flags & Byte(u32(1) << u32(TM_NEWINDEX))) != 0
+		if no_tm || !tag_is_empty(tag) {
+			set_obj(&t.array[u], value)
+			return HOK
+		}
+		return ~int(u)
+	}
+	return luaH_psetint(t, key, value)
+}
+
+luaH_psetshortstr :: proc "contextless" (t: ^Table, key: ^TString, value: ^TValue) -> int {
+	return finishnodeset(t, luaH_Hgetshortstr(t, key), value)
+}
+
+luaH_psetstr :: proc "contextless" (t: ^Table, key: ^TString, value: ^TValue) -> int {
+	return finishnodeset(t, Hgetstr(t, key), value)
+}
+
+luaH_pset :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) -> int {
 	switch type_tag(key) {
 	case VNUMINT:
-		return luaH_setint(L, t, int_value(key), value)
+		return luaH_fastseti(t, int_value(key), value)
+	case VSHRSTR:
+		return luaH_psetshortstr(t, str_value(key), value)
 	case VNUMFLT:
 		k, ok := float_to_integer(flt_value(key), .Eq)
 		if ok {
-			return luaH_setint(L, t, k, value)
-		}
-		// A non-integral float falls through to the generic path (and the NaN
-		// check below, since only there can an insertion actually happen).
-		if flt_value(key) != flt_value(key) {
-			return throw(L, .Err_Run) // table index is NaN
+			return luaH_fastseti(t, k, value)
 		}
 	case VNIL:
-		return throw(L, .Err_Run) // table index is nil
+		return HNOTFOUND
 	}
-	// Generic: reuse an existing slot if the key is already present.
-	slot := getgeneric(t, key, false)
-	if !is_absent(slot) {
-		set_obj(slot, value)
-		if is_collectable(value) {
-			luaC_barrierback(L, obj2gco(t))
+	return finishnodeset(t, getgeneric(t, key, false), value)
+}
+
+// Matching VM-facing pre-set dispatch. In particular, short-string table keys
+// should pay for one hash-chain search, not a generic dispatcher plus the same
+// search. The returned location code is still consumed by `luaH_finishset`; no
+// writable array pointer escapes this helper.
+luaH_fastpset :: #force_inline proc "contextless" (
+	t: ^Table,
+	key: ^TValue,
+	value: ^TValue,
+) -> int {
+	switch type_tag(key) {
+	case VNUMINT:
+		return luaH_fastseti(t, int_value(key), value)
+	case VSHRSTR:
+		return finishnodeset(t, luaH_Hgetshortstr(t, str_value(key)), value)
+	case:
+		return luaH_pset(t, key, value)
+	}
+}
+
+luaH_finishset :: proc(
+	L: ^Lua_State,
+	t: ^Table,
+	key_in: ^TValue,
+	value: ^TValue,
+	hres: int,
+) -> Thread_Status {
+	assert(hres != HOK)
+	key := key_in
+	aux: TValue
+	if hres == HNOTFOUND {
+		if is_nil(key) {
+			return throw(L, .Err_Run) // preserve the existing error path
 		}
-		return .Ok
+		if is_float(key) {
+			f := flt_value(key)
+			k, ok := float_to_integer(f, .Eq)
+			if ok {
+				set_int(&aux, k)
+				key = &aux
+			} else if f != f {
+				return throw(L, .Err_Run) // preserve the existing error path
+			}
+		}
+		return luaH_newkey(L, t, key, value)
 	}
-	return luaH_newkey(L, t, key, value)
+	if hres > 0 {
+		set_obj(node_val(&t.node[hres - HFIRSTNODE]), value)
+	} else {
+		i := ~hres
+		set_obj(&t.array[i], value)
+	}
+	return .Ok
+}
+
+// Raw setters are thin pset/finishset wrappers. They retain their existing
+// barrier behavior so this API-only refactor cannot change GC timing.
+luaH_set :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, value: ^TValue) -> Thread_Status {
+	hres := luaH_pset(t, key, value)
+	st: Thread_Status = .Ok
+	if hres != HOK {
+		st = luaH_finishset(L, t, key, value, hres)
+	}
+	if st == .Ok && is_collectable(value) {
+		luaC_barrierback(L, obj2gco(t))
+	}
+	return st
+}
+
+luaH_setint :: proc(L: ^Lua_State, t: ^Table, key: Integer, value: ^TValue) -> Thread_Status {
+	hres := luaH_fastseti(t, key, value)
+	st: Thread_Status = .Ok
+	if hres != HOK {
+		k: TValue
+		set_int(&k, key)
+		st = luaH_finishset(L, t, &k, value, hres)
+	}
+	if st == .Ok && is_collectable(value) {
+		luaC_barrierback(L, obj2gco(t))
+	}
+	return st
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,7 +1171,8 @@ reinserthash :: proc(L: ^Lua_State, old: ^Table, t: ^Table) {
 @(private = "file")
 reinsert_old_slice :: proc "contextless" (t: ^Table, oldasize: u32, newasize: u32) {
 	for i in newasize ..< oldasize {
-		if !is_empty(&t.array[i]) {
+		tag := t.array[i].tt_
+		if !tag_is_empty(tag) {
 			key: TValue
 			set_int(&key, u2s(u64(i) + 1))
 			aux := t.array[i]
@@ -1140,7 +1294,8 @@ luaH_next :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, out_key: ^TValue, out_
 	asize := t.asize
 	i := findindex(L, t, key, asize)
 	for i < asize {
-		if !is_empty(&t.array[i]) {
+		tag := t.array[i].tt_
+		if !tag_is_empty(tag) {
 			set_int(out_key, u2s(u64(i) + 1))
 			set_obj(out_val, &t.array[i])
 			return true

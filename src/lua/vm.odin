@@ -305,8 +305,10 @@ fasttm :: proc(L: ^Lua_State, mt: ^Table, event: int) -> ^TValue {
 // ---------------------------------------------------------------------------
 
 // Finish `R[val] = t[key]` after the fast path missed -- reference Lua's
-// `luaV_finishget`, adapted to our slot-returning table API. Walks the `__index`
-// chain, calling a function metamethod or continuing into a table.
+// `luaV_finishget`. Gets return the tag separately and materialise a value only
+// on a hit, because the array's tags and payloads are about to be non-contiguous.
+// Walk the `__index` chain, calling a function metamethod or continuing into a
+// table.
 luaV_finishget :: proc(L: ^Lua_State, t_in: ^TValue, key: ^TValue, val: int) {
 	t := t_in
 	is_tab := base_type(t) == TTABLE
@@ -330,10 +332,9 @@ luaV_finishget :: proc(L: ^Lua_State, t_in: ^TValue, key: ^TValue, val: int) {
 		}
 		t = tm // __index is a table (or object): access t[key] next
 		if base_type(t) == TTABLE {
-			slot := luaH_getslot((^Table)(t.value_.gc), key)
 			is_tab = true
-			if !is_empty(slot) {
-				set_obj(stack_value(L, val), slot)
+			tag := luaH_get((^Table)(t.value_.gc), key, stack_value(L, val))
+			if !tag_is_empty(tag) {
 				return
 			}
 			// else empty: loop to consult this table's own __index
@@ -346,16 +347,23 @@ luaV_finishget :: proc(L: ^Lua_State, t_in: ^TValue, key: ^TValue, val: int) {
 
 // The VM's table read: `R[ra] = t[key]` -- the fast path plus `luaV_finishget`.
 @(private = "file")
-vm_gettable :: proc(L: ^Lua_State, ci_idx: int, pc: int, t: ^TValue, key: ^TValue, ra: int) {
+vm_gettable :: proc(
+	L: ^Lua_State,
+	ci_idx: int,
+	pc: int,
+	t: ^TValue,
+	key: ^TValue,
+	ra: int,
+) {
 	if base_type(t) == TTABLE {
-		slot: ^TValue
+		h := (^Table)(t.value_.gc)
+		tag: Byte
 		if is_integer(key) {
-			slot = luaH_getint_slot((^Table)(t.value_.gc), int_value(key))
+			tag = luaH_fastgeti(h, int_value(key), stack_value(L, ra))
 		} else {
-			slot = luaH_getslot((^Table)(t.value_.gc), key)
+			tag = luaH_fastget(h, key, stack_value(L, ra))
 		}
-		if !is_empty(slot) {
-			set_obj(stack_value(L, ra), slot)
+		if !tag_is_empty(tag) {
 			return
 		}
 	}
@@ -365,25 +373,83 @@ vm_gettable :: proc(L: ^Lua_State, ci_idx: int, pc: int, t: ^TValue, key: ^TValu
 	luaV_finishget(L, t, key, ra)
 }
 
-// Finish `t[key] = val` after the fast path -- reference Lua's `luaV_finishset`,
-// adapted to our slot API. When `key` is already present in a table it is a raw
-// update (no `__newindex`); when absent, consult `__newindex`, else raw-insert.
-luaV_finishset :: proc(L: ^Lua_State, t_in: ^TValue, key: ^TValue, val: ^TValue) {
+// GETTABLE is the variable-key form used by tight Lua loops (`a[i]`, `h[k]`).
+// Keep exactly this one opcode's fast path inline instead of forcing the shared
+// helper into GETTABUP/GETFIELD as well; duplicating all four copies bloats the
+// already-large interpreter enough to lose more instruction-cache time than the
+// call removal saves. Miss handling is still only a cold call.
+@(private = "file")
+vm_gettable_hot :: #force_inline proc(
+	L: ^Lua_State,
+	ci_idx: int,
+	pc: int,
+	t: ^TValue,
+	key: ^TValue,
+	ra: int,
+) {
+	if base_type(t) == TTABLE {
+		h := (^Table)(t.value_.gc)
+		tag: Byte
+		if is_integer(key) {
+			tag = luaH_fastgeti(h, int_value(key), stack_value(L, ra))
+		} else {
+			tag = luaH_fastget(h, key, stack_value(L, ra))
+		}
+		if !tag_is_empty(tag) {
+			return
+		}
+	}
+	L.frames[ci_idx].u.l.savedpc = pc
+	L.top = L.frames[ci_idx].top
+	luaV_finishget(L, t, key, ra)
+}
+
+// OP_GETI already carries an integer in the instruction, so do not manufacture
+// a TValue and route it through the generic helper on every hit. This is the
+// direct counterpart of reference's `luaV_fastgeti` macro: the array tag read is
+// inlined into the interpreter loop, while only misses build a key for
+// `luaV_finishget`.
+@(private = "file")
+vm_geti :: #force_inline proc(
+	L: ^Lua_State,
+	ci_idx: int,
+	pc: int,
+	t: ^TValue,
+	key: Integer,
+	ra: int,
+) {
+	tag := Byte(VNOTABLE)
+	if base_type(t) == TTABLE {
+		tag = luaH_fastgeti((^Table)(t.value_.gc), key, stack_value(L, ra))
+		if !tag_is_empty(tag) {
+			return
+		}
+	}
+	key_value: TValue
+	set_int(&key_value, key)
+	L.frames[ci_idx].u.l.savedpc = pc
+	L.top = L.frames[ci_idx].top
+	luaV_finishget(L, t, &key_value, ra)
+}
+
+// Finish `t[key] = val` after a pre-set could not complete. `hres` identifies an
+// absent key, a deleted hash node, or an empty array index without exposing a
+// writable array TValue. This mirrors reference Lua's pset/finishset protocol.
+luaV_finishset :: proc(
+	L: ^Lua_State,
+	t_in: ^TValue,
+	key: ^TValue,
+	val: ^TValue,
+	hres_in: int,
+) {
 	t := t_in
+	hres := hres_in
 	for _ in 0 ..< MAXTAGLOOP {
-		if base_type(t) == TTABLE {
+		if hres != HNOTATABLE {
 			h := (^Table)(t.value_.gc)
-			slot := luaH_getslot(h, key)
-			if !is_empty(slot) { // present: plain update, no metamethod
-				set_obj(slot, val)
-				if is_collectable(val) {
-					luaC_barrierback(L, obj2gco(h))
-				}
-				return
-			}
 			tm := fasttm(L, h.metatable, TM_NEWINDEX)
 			if tm == nil { // absent, no __newindex: raw insert
-				luaH_set(L, h, key, val)
+				luaH_finishset(L, h, key, val, hres)
 				invalidateTMcache(h)
 				if is_collectable(val) {
 					luaC_barrierback(L, obj2gco(h))
@@ -406,23 +472,77 @@ luaV_finishset :: proc(L: ^Lua_State, t_in: ^TValue, key: ^TValue, val: ^TValue)
 			}
 			t = tm
 		}
+		if base_type(t) == TTABLE {
+			h := (^Table)(t.value_.gc)
+			hres = luaH_pset(h, key, val)
+			if hres == HOK {
+				if is_collectable(val) {
+					luaC_barrierback(L, obj2gco(h))
+				}
+				return
+			}
+		} else {
+			hres = HNOTATABLE
+		}
 	}
 	luaG_runerror(L, "'__newindex' chain too long; possible loop")
 }
 
 // The VM's table write: `t[key] = val` -- the fast path plus `luaV_finishset`.
 @(private = "file")
-vm_settable :: proc(L: ^Lua_State, ci_idx: int, pc: int, t: ^TValue, key: ^TValue, val: ^TValue) {
+vm_settable :: proc(
+	L: ^Lua_State,
+	ci_idx: int,
+	pc: int,
+	t: ^TValue,
+	key: ^TValue,
+	val: ^TValue,
+) {
 	if base_type(t) == TTABLE {
 		h := (^Table)(t.value_.gc)
-		slot: ^TValue
+		hres: int
 		if is_integer(key) {
-			slot = luaH_getint_slot(h, int_value(key))
+			hres = luaH_fastseti(h, int_value(key), val)
 		} else {
-			slot = luaH_getslot(h, key)
+			hres = luaH_fastpset(h, key, val)
 		}
-		if !is_empty(slot) { // present: raw update, no __newindex
-			set_obj(slot, val)
+		if hres == HOK {
+			if is_collectable(val) {
+				luaC_barrierback(L, obj2gco(h))
+			}
+			return
+		}
+		L.frames[ci_idx].u.l.savedpc = pc
+		L.top = L.frames[ci_idx].top
+		luaV_finishset(L, t, key, val, hres)
+		return
+	}
+	L.frames[ci_idx].u.l.savedpc = pc
+	L.top = L.frames[ci_idx].top
+	luaV_finishset(L, t, key, val, HNOTATABLE)
+}
+
+// SETTABLE is the matching variable-key write opcode. As on the read side, one
+// carefully placed inline copy restores the macro-shaped fast path without
+// multiplying it across every field/upvalue opcode in the dispatch loop.
+@(private = "file")
+vm_settable_hot :: #force_inline proc(
+	L: ^Lua_State,
+	ci_idx: int,
+	pc: int,
+	t: ^TValue,
+	key: ^TValue,
+	val: ^TValue,
+) {
+	hres := HNOTATABLE
+	if base_type(t) == TTABLE {
+		h := (^Table)(t.value_.gc)
+		if is_integer(key) {
+			hres = luaH_fastseti(h, int_value(key), val)
+		} else {
+			hres = luaH_fastpset(h, key, val)
+		}
+		if hres == HOK {
 			if is_collectable(val) {
 				luaC_barrierback(L, obj2gco(h))
 			}
@@ -431,7 +551,37 @@ vm_settable :: proc(L: ^Lua_State, ci_idx: int, pc: int, t: ^TValue, key: ^TValu
 	}
 	L.frames[ci_idx].u.l.savedpc = pc
 	L.top = L.frames[ci_idx].top
-	luaV_finishset(L, t, key, val)
+	luaV_finishset(L, t, key, val, hres)
+}
+
+// OP_SETI gets the same treatment as OP_GETI. Reference expands fastseti at the
+// opcode, and keeping that shape here avoids a temporary key and a generic
+// dispatch on every successful array write.
+@(private = "file")
+vm_seti :: #force_inline proc(
+	L: ^Lua_State,
+	ci_idx: int,
+	pc: int,
+	t: ^TValue,
+	key: Integer,
+	val: ^TValue,
+) {
+	hres := HNOTATABLE
+	if base_type(t) == TTABLE {
+		h := (^Table)(t.value_.gc)
+		hres = luaH_fastseti(h, key, val)
+		if hres == HOK {
+			if is_collectable(val) {
+				luaC_barrierback(L, obj2gco(h))
+			}
+			return
+		}
+	}
+	key_value: TValue
+	set_int(&key_value, key)
+	L.frames[ci_idx].u.l.savedpc = pc
+	L.top = L.frames[ci_idx].top
+	luaV_finishset(L, t, &key_value, val, hres)
 }
 
 // ---------------------------------------------------------------------------
@@ -813,15 +963,12 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
 				rc := stack_value(L, base + getarg_C(i))
-				vm_gettable(L, ci_idx, pc, rb, rc, ra)
+				vm_gettable_hot(L, ci_idx, pc, rb, rc, ra)
 
 			case .GETI:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
-				c := getarg_C(i)
-				key: TValue
-				set_int(&key, Integer(c))
-				vm_gettable(L, ci_idx, pc, rb, &key, ra)
+				vm_geti(L, ci_idx, pc, rb, Integer(getarg_C(i)), ra)
 
 			case .GETFIELD:
 				ra := base + getarg_A(i)
@@ -839,14 +986,12 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := stack_value(L, base + getarg_A(i))
 				rb := stack_value(L, base + getarg_B(i))
 				rc := vm_rkc(L, base, k, i)
-				vm_settable(L, ci_idx, pc, ra, rb, rc)
+				vm_settable_hot(L, ci_idx, pc, ra, rb, rc)
 
 			case .SETI:
 				ra := stack_value(L, base + getarg_A(i))
-				key: TValue
-				set_int(&key, Integer(getarg_B(i)))
 				rc := vm_rkc(L, base, k, i)
-				vm_settable(L, ci_idx, pc, ra, &key, rc)
+				vm_seti(L, ci_idx, pc, ra, Integer(getarg_B(i)), rc)
 
 			case .SETFIELD:
 				ra := stack_value(L, base + getarg_A(i))

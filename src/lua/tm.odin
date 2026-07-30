@@ -498,11 +498,9 @@ luaT_getvarargs :: proc(L: ^Lua_State, ci_idx: int, dst_at: int, wanted_in: int,
 		}
 	} else { // table model: index the vararg table
 		for ; i < touse; i += 1 {
-			slot := luaH_getint_slot(h, Integer(i + 1))
-			if is_empty(slot) {
+			tag := luaH_getint(h, Integer(i + 1), stack_value(L, dst_at + i))
+			if tag_is_empty(tag) {
 				set_nil(stack_value(L, dst_at + i))
-			} else {
-				set_obj(stack_value(L, dst_at + i), slot)
 			}
 		}
 	}
