@@ -8,18 +8,8 @@ package lua
 // split keys between the two to keep both dense. Getting the array/hash boundary
 // and the `#` length semantics right is essential for behavioral correctness.
 //
-// Representation deviation (faithful behavior, simpler memory): reference Lua
-// 5.5 packs the array part as an "inverted" values array plus a parallel tag
-// array with a length hint squeezed in between, and stores a `lastfree` cursor in
-// a hidden slot before the node block. Those are pure space/speed optimizations.
-// Since our overriding goal is *observable* correctness, we use the obvious layout
-// instead: the array part is a plain `[^]TValue` (an absent slot carries the
-// VEMPTY tag), the length hint is an ordinary field, and the free-slot search is a
-// simple linear scan. Every algorithm below -- hashing, collision handling, the
-// rehash sizing, `next` ordering, and the `#` border search -- is ported faithfully
-// so the *behavior* matches reference Lua exactly; only the bytes differ.
-
 import "core:math"
+import "core:mem"
 
 // ---------------------------------------------------------------------------
 // Node and Table
@@ -80,16 +70,15 @@ node_from_val :: #force_inline proc "contextless" (v: ^TValue) -> ^Node {
 // reference C's CommonHeader macro is inline too, so `flags`, `lsizenode`, and
 // `asize` fill its trailing padding. Nesting a `GCObject` here would silently
 // reserve all 16 bytes for the header and re-inflate every table by 8 bytes.
-// See the file banner for how the array/hash parts are represented.
+// The array pointer uses reference Lua 5.5's split representation, documented
+// beside `arr_val` and `arr_tag` below.
 //
 //   * `flags`     -- the fast-metamethod-absence cache (low bits) plus BITDUMMY
 //     (bit 6), which records that the hash part is the shared empty `dummy_node`.
 //   * `lsizenode` -- log2 of the number of hash slots (so `sizenode == 1<<lsizenode`).
 //   * `asize`     -- number of slots in the array part.
-//   * `array`     -- the array part; key `i` (1-based) lives at `array[i-1]`.
+//   * `array`     -- the pivot between the inverted values and forward tags.
 //   * `node`      -- the hash part (or the shared dummy when empty).
-//   * `len_hint`  -- a remembered border to speed up repeated `#t` (reference keeps
-//     this in the array block; we make it a field).
 //   * `metatable` -- this table's metatable, or nil.
 //   * `gclist`    -- threads the table onto the GC's gray worklist while marking.
 Table :: struct {
@@ -99,8 +88,7 @@ Table :: struct {
 	flags:     u8,
 	lsizenode: u8,
 	asize:     u32,
-	len_hint:  u32,
-	array:     [^]TValue,
+	array:     [^]Value,
 	node:      [^]Node,
 	metatable: ^Table,
 	gclist:    ^GCObject,
@@ -109,7 +97,49 @@ Table :: struct {
 #assert(offset_of(Table, next) == 0)
 #assert(offset_of(Table, tt) == 8)
 #assert(offset_of(Table, marked) == 9)
-#assert(size_of(Table) == 56)
+#assert(size_of(Value) == 8)
+#assert(align_of(Value) == 8)
+#assert(size_of(Table) == 48)
+
+// The array allocation is two tightly packed segments with the length hint at
+// their pivot:
+//
+//              Values                              Tags
+//   --------------------------------------------------------
+//   ...  |   Value 1     |   Value 0     |unsigned|0|1|...
+//   --------------------------------------------------------
+//                                        ^ t.array
+//
+// Values grow downward so each payload stays naturally 8-aligned; one-byte tags
+// grow upward after the four-byte hint. Pointing `array` into the middle makes
+// both addresses cheap typed indexing, and putting the `#t` hint at that pivot
+// avoids making every Table larger just for tables that have an array part.
+//
+// A tag is authoritative. In particular, an empty slot is allowed to retain
+// stale, uninitialised payload bytes: readers and the GC must inspect the tag
+// first and touch the payload only when the tag says it is live.
+arr_val :: #force_inline proc "contextless" (t: ^Table, k: u32) -> ^Value {
+	assert_contextless((t.asize == 0) == (t.array == nil))
+	assert_contextless(k < t.asize)
+	return &t.array[-1 - int(k)]
+}
+
+arr_tag :: #force_inline proc "contextless" (t: ^Table, k: u32) -> ^u8 {
+	assert_contextless((t.asize == 0) == (t.array == nil))
+	assert_contextless(k < t.asize)
+	bytes := ([^]u8)(t.array)
+	return &bytes[size_of(u32) + int(k)]
+}
+
+arr_get :: #force_inline proc "contextless" (t: ^Table, k: u32, tag: Byte, out: ^TValue) {
+	out.tt_ = tag
+	out.value_ = arr_val(t, k)^
+}
+
+arr_set :: #force_inline proc "contextless" (t: ^Table, k: u32, value: ^TValue) {
+	arr_tag(t, k)^ = value.tt_
+	arr_val(t, k)^ = value.value_
+}
 
 // Bit 6 of `flags`: the hash part is the shared dummy node. Reference `BITDUMMY`.
 BITDUMMY :: 1 << 6
@@ -181,7 +211,12 @@ is_absent :: #force_inline proc "contextless" (o: ^TValue) -> bool {
 // matching hash-size ceiling. Reference `MAXABITS` / `MAXHBITS` / `MAXASIZE`.
 MAXABITS :: 31
 MAXHBITS :: 30
-MAXASIZE :: u32(1) << MAXABITS
+MAXASIZE :: u32(min(
+	uint(1) << MAXABITS,
+	(max(uint) - size_of(u32)) / (size_of(Value) + 1),
+))
+
+#assert(uint(MAXASIZE) <= (max(uint) - size_of(u32)) / (size_of(Value) + 1))
 
 // The largest hash part we can actually allocate: the smaller of 2^MAXHBITS slots
 // and however many `Node`s fit in a `uint` worth of bytes. Reference `MAXHSIZE`
@@ -449,7 +484,7 @@ keyinarray :: #force_inline proc "contextless" (t: ^Table, key: ^TValue) -> u32 
 
 @(private = "file")
 arraykeyisempty :: #force_inline proc "contextless" (t: ^Table, key: u32) -> bool {
-	return tag_is_empty(t.array[key - 1].tt_)
+	return tag_is_empty(arr_tag(t, key - 1)^)
 }
 
 // ---------------------------------------------------------------------------
@@ -457,11 +492,10 @@ arraykeyisempty :: #force_inline proc "contextless" (t: ^Table, key: u32) -> boo
 // ---------------------------------------------------------------------------
 
 // Table access deliberately speaks in tags instead of exposing array slots.
-// Today the array is still a contiguous `[^]TValue`, but the next representation
-// stores each slot's tag and payload in separate segments. Reading the tag first,
-// and copying the payload only for a live tag, makes every caller correct for
-// both layouts. Keep the nil-family rule here: deleted/nil variants are empty,
-// not only the exact VEMPTY tag.
+// The split representation has no contiguous TValue address to return. Reading
+// the tag first, and copying the payload only for a live tag, also makes stale
+// payload bytes in empty slots harmless. Keep the nil-family rule here:
+// deleted/nil variants are empty, not only the exact VEMPTY tag.
 tag_is_empty :: #force_inline proc "contextless" (tag: Byte) -> bool {
 	return no_variant(tag) == TNIL
 }
@@ -562,9 +596,9 @@ finishnodeget :: #force_inline proc "contextless" (slot: ^TValue, res: ^TValue) 
 luaH_getint :: proc "contextless" (t: ^Table, key: Integer, res: ^TValue) -> Byte {
 	k := ikeyinarray(t, key)
 	if k > 0 {
-		tag := t.array[k - 1].tt_ // tag first; do not touch the payload on a miss
+		tag := arr_tag(t, k - 1)^
 		if !tag_is_empty(tag) {
-			set_obj(res, &t.array[k - 1])
+			arr_get(t, k - 1, tag, res)
 		}
 		return with_variant(tag)
 	}
@@ -584,9 +618,10 @@ luaH_fastgeti :: #force_inline proc "contextless" (
 ) -> Byte {
 	u := Unsigned(key) - 1
 	if u < Unsigned(t.asize) {
-		tag := t.array[u].tt_ // read the tag before touching the payload
+		k := u32(u)
+		tag := arr_tag(t, k)^
 		if !tag_is_empty(tag) {
-			set_obj(res, &t.array[u])
+			arr_get(t, k, tag, res)
 		}
 		return with_variant(tag)
 	}
@@ -725,7 +760,7 @@ insertkey :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) -> boo
 newcheckedkey :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) {
 	i := keyinarray(t, key)
 	if i > 0 {
-		set_obj(&t.array[i - 1], value)
+		arr_set(t, i - 1, value)
 	} else {
 		ok := insertkey(t, key, value)
 		assert_contextless(ok, "newcheckedkey: insert into sized table cannot fail")
@@ -794,11 +829,12 @@ luaH_fastseti :: #force_inline proc "contextless" (
 ) -> int {
 	u := Unsigned(key) - 1
 	if u < Unsigned(t.asize) {
-		tag := t.array[u].tt_ // tag first; payload is written only on success
+		k := u32(u)
+		tag := arr_tag(t, k)^
 		no_tm := t.metatable == nil ||
 		         (t.metatable.flags & Byte(u32(1) << u32(TM_NEWINDEX))) != 0
 		if no_tm || !tag_is_empty(tag) {
-			set_obj(&t.array[u], value)
+			arr_set(t, k, value)
 			return HOK
 		}
 		return ~int(u)
@@ -880,7 +916,7 @@ luaH_finishset :: proc(
 		set_obj(node_val(&t.node[hres - HFIRSTNODE]), value)
 	} else {
 		i := ~hres
-		set_obj(&t.array[i], value)
+		arr_set(t, u32(i), value)
 	}
 	return .Ok
 }
@@ -1049,6 +1085,16 @@ rehash :: proc(L: ^Lua_State, t: ^Table, ek: ^TValue) -> Thread_Status {
 // Resizing
 // ---------------------------------------------------------------------------
 
+// Convert a logical slot count to the exact byte size of its split allocation.
+// MAXASIZE is capped so the multiply and the hint addition cannot overflow.
+concretesize :: #force_inline proc "contextless" (size: u32) -> uint {
+	if size == 0 {
+		return 0
+	}
+	assert_contextless(uint(size) <= (max(uint) - size_of(u32)) / (size_of(Value) + 1))
+	return uint(size) * (size_of(Value) + 1) + size_of(u32)
+}
+
 // (Re)allocate the array part to `newasize` slots, moving over the common prefix.
 // Reference Lua's `resizearray`. Returns (new array, ok); ok is false only when a
 // nonzero allocation fails.
@@ -1059,27 +1105,36 @@ array_resize :: proc(
 	oldasize: u32,
 	newasize: u32,
 ) -> (
-	[^]TValue,
+	[^]Value,
 	bool,
 ) {
+	assert_contextless((t.asize == 0) == (t.array == nil))
 	if oldasize == newasize {
 		return t.array, true
 	}
 	if newasize == 0 {
-		state_free(L, t.array, uint(oldasize) * size_of(TValue))
+		oldbase := rawptr(&t.array[-int(oldasize)])
+		state_free(L, oldbase, concretesize(oldasize))
 		return nil, true
 	}
-	block := state_realloc(L, nil, 0, uint(newasize) * size_of(TValue))
+	block := state_realloc(L, nil, 0, concretesize(newasize))
 	if block == nil {
 		return nil, false
 	}
-	np := ([^]TValue)(block)
+	assert_contextless(uintptr(block) % align_of(Value) == 0)
+	np := ([^]Value)(rawptr(uintptr(block) + uintptr(newasize) * size_of(Value)))
 	if oldasize > 0 {
 		tomove := oldasize < newasize ? oldasize : newasize
-		for i in 0 ..< int(tomove) {
-			np[i] = t.array[i]
-		}
-		state_free(L, t.array, uint(oldasize) * size_of(TValue))
+		bytes := concretesize(tomove)
+		src := rawptr(&t.array[-int(tomove)])
+		dst := rawptr(&np[-int(tomove)])
+		// Backing each pivot up by the common number of Values selects one
+		// contiguous mini-layout: the common payloads, the hint, and the common
+		// tags. One copy therefore preserves all three pieces without any
+		// overlapping-segment puzzle; the destination is a fresh allocation.
+		mem.copy(dst, src, int(bytes))
+		oldbase := rawptr(&t.array[-int(oldasize)])
+		state_free(L, oldbase, concretesize(oldasize))
 	}
 	return np, true
 }
@@ -1171,11 +1226,12 @@ reinserthash :: proc(L: ^Lua_State, old: ^Table, t: ^Table) {
 @(private = "file")
 reinsert_old_slice :: proc "contextless" (t: ^Table, oldasize: u32, newasize: u32) {
 	for i in newasize ..< oldasize {
-		tag := t.array[i].tt_
+		tag := arr_tag(t, i)^
 		if !tag_is_empty(tag) {
 			key: TValue
+			aux: TValue
 			set_int(&key, u2s(u64(i) + 1))
-			aux := t.array[i]
+			arr_get(t, i, tag, &aux)
 			ok := insertkey(t, &key, &aux)
 			assert_contextless(ok, "reinsert_old_slice: hash sized for these keys")
 		}
@@ -1185,7 +1241,7 @@ reinsert_old_slice :: proc "contextless" (t: ^Table, oldasize: u32, newasize: u3
 @(private = "file")
 clear_new_slice :: proc "contextless" (t: ^Table, oldasize: u32, newasize: u32) {
 	for i in oldasize ..< newasize {
-		set_empty(&t.array[i])
+		arr_tag(t, i)^ = VEMPTY
 	}
 }
 
@@ -1219,7 +1275,7 @@ luaH_resize :: proc(L: ^Lua_State, t: ^Table, newasize: u32, nhsize: u32) -> Thr
 	t.array = newarray
 	t.asize = newasize
 	if newarray != nil {
-		t.len_hint = newasize / 2
+		(^u32)(newarray)^ = newasize / 2
 	}
 	clear_new_slice(t, oldasize, newasize)
 	reinserthash(L, &newt, t) // fold the old hash entries back in
@@ -1249,7 +1305,6 @@ luaH_new :: proc(L: ^Lua_State) -> ^Table {
 	t.flags = maskflags // no metamethods present yet
 	t.array = nil
 	t.asize = 0
-	t.len_hint = 0
 	t.gclist = nil
 	setnodevector(L, t, 0) // size 0 never allocates or fails
 	return t
@@ -1294,10 +1349,10 @@ luaH_next :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, out_key: ^TValue, out_
 	asize := t.asize
 	i := findindex(L, t, key, asize)
 	for i < asize {
-		tag := t.array[i].tt_
+		tag := arr_tag(t, i)^
 		if !tag_is_empty(tag) {
 			set_int(out_key, u2s(u64(i) + 1))
-			set_obj(out_val, &t.array[i])
+			arr_get(t, i, tag, out_val)
 			return true
 		}
 		i += 1
@@ -1336,7 +1391,8 @@ binsearch :: proc "contextless" (t: ^Table, i0: u32, j0: u32) -> u32 {
 
 @(private = "file")
 newhint :: #force_inline proc "contextless" (t: ^Table, hint: u32) -> Unsigned {
-	t.len_hint = hint
+	assert_contextless(t.asize > 0)
+	(^u32)(t.array)^ = hint
 	return Unsigned(hint)
 }
 
@@ -1383,7 +1439,7 @@ luaH_getn :: proc(L: ^Lua_State, t: ^Table) -> Unsigned {
 	asize := t.asize
 	if asize > 0 {
 		maxvicinity :: 4
-		limit := t.len_hint
+		limit := (^u32)(t.array)^
 		if limit == 0 || limit > asize {
 			limit = 1
 		}
@@ -1414,7 +1470,7 @@ luaH_getn :: proc(L: ^Lua_State, t: ^Table) -> Unsigned {
 				return newhint(t, binsearch(t, limit, asize))
 			}
 		}
-		t.len_hint = asize
+		(^u32)(t.array)^ = asize
 	}
 	// No array part, or its last slot is full: the border may be in the hash.
 	if is_dummy(t) || hashkeyisempty(t, Unsigned(asize) + 1) {

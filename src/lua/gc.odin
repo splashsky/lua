@@ -500,8 +500,12 @@ traverse_udata :: proc(g: ^Global_State, u: ^Udata) -> L_Mem {
 traverse_array :: proc(g: ^Global_State, t: ^Table) -> bool {
 	marked := false
 	for i in 0 ..< int(t.asize) {
-		o := gcvalue_n(&t.array[i])
-		if o != nil && is_white(o) {
+		tag := arr_tag(t, u32(i))^
+		if (tag & BIT_ISCOLLECTABLE) != 0 {
+			o := arr_val(t, u32(i)).gc
+			if !is_white(o) {
+				continue
+			}
 			marked = true
 			reallymarkobject(g, o)
 		}
@@ -777,7 +781,7 @@ objsize :: proc(o: ^GCObject) -> uint {
 	case VTABLE:
 		t := (^Table)(o)
 		res := uint(size_of(Table))
-		res += uint(t.asize) * size_of(TValue)
+		res += concretesize(t.asize)
 		if !is_dummy(t) {
 			res += sizehash(t) // nodes plus the `lastfree` box, as reference counts them
 		}

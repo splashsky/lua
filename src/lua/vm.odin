@@ -1517,7 +1517,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				}
 				for n > 0 {
 					val := stack_value(L, ra + int(n))
-					set_obj(&h.array[last - 1], val)
+					arr_set(h, last - 1, val)
 					last -= 1
 					if is_collectable(val) {
 						luaC_barrierback(L, obj2gco(h))

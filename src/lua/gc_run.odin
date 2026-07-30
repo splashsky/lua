@@ -127,8 +127,10 @@ clearbyvalues :: proc(g: ^Global_State, l: ^GCObject, f: ^GCObject) {
 	for o != f {
 		h := (^Table)(o)
 		for i in 0 ..< int(h.asize) {
-			if iscleared(g, gcvalue_n(&h.array[i])) { // value collected?
-				set_empty(&h.array[i]) // remove the entry
+			tag := arr_tag(h, u32(i))^
+			value := (tag & BIT_ISCOLLECTABLE) != 0 ? arr_val(h, u32(i)).gc : nil
+			if iscleared(g, value) { // value collected?
+				arr_tag(h, u32(i))^ = VEMPTY // payload may remain stale
 			}
 		}
 		sz := sizenode(h)
