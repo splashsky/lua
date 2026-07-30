@@ -37,10 +37,11 @@ RELEASE :: VERSION + "." + VERSION_RELEASE
 COPYRIGHT :: RELEASE + "  Copyright (C) 1994-2025 Lua.org, PUC-Rio"
 AUTHORS :: "R. Ierusalimschy, L. H. de Figueiredo, W. Celes"
 
-// TODO(phase-1+): migrate the real luaconf.h tunables here as they become
-// relevant -- number/integer type selection, buffer sizes, stack limits, the
-// bytecode ABI config (little-endian, 32-bit Instruction/int, 64-bit integer,
-// IEEE-754 binary64), path separators, etc.
+// What follows are the `luaconf.h` tunables this port actually needs: the numeric
+// formats at the float/string boundary, buffer sizes, stack limits, the GC
+// parameters, and the path separators. The bytecode ABI configuration
+// (little-endian, 32-bit Instruction and int, 64-bit integer, IEEE-754 binary64)
+// lives with the dump and undump code that depends on it.
 
 // ---------------------------------------------------------------------------
 // Numeric formatting (float <-> string boundary)

@@ -18,8 +18,8 @@ package lua
 // Write barriers get added as each collectable type is introduced, never bolted
 // on afterward.
 //
-// TODO(phase-3): GC foundation. TODO(phase-7): the full incremental/generational
-// collector, weak objects, and finalizers.
+// This file carries the GC foundation and, together with gc_run.odin, the full
+// incremental and generational collector, weak objects and finalizers.
 
 // ---------------------------------------------------------------------------
 // Object colors (the `marked` byte)

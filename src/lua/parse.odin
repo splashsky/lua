@@ -12,8 +12,8 @@ package lua
 // backpatching/register allocation is intricate -- and it's where the shape of
 // our `Proto` output must line up with reference Lua for bytecode compatibility.
 //
-// TODO(phase-4): the recursive-descent grammar, scope/local/upvalue management,
-// and Proto construction driving `code`.
+// This file holds the recursive-descent grammar, scope, local and upvalue
+// management, and the `Proto` construction that drives `code`.
 
 // ---------------------------------------------------------------------------
 // Expression descriptors (reference `lparser.h`'s `expkind` / `expdesc`)

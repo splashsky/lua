@@ -124,9 +124,11 @@ ctb :: #force_inline proc "contextless" (t: int) -> Byte {
 // ---------------------------------------------------------------------------
 
 // A light C function: a plain C-callable procedure with no captured upvalues.
-// The `L` parameter is really a `^State`, but `State` isn't defined until a later
-// phase, so we type it as `rawptr` for now.
-// TODO(phase-2): retype `L` to `^State` once the state type exists.
+// The `L` parameter is really a `^Lua_State`, but typing it that way here would
+// make object.odin depend on state.odin, which in turn depends on this file. The
+// stdlib works around it exactly as reference's C does with its forward
+// declaration: every native function takes the pointer untyped and immediately
+// recovers it with `state(Lp)`.
 C_Function :: #type proc "c" (L: rawptr) -> i32
 
 // `Value` is the raw 8-byte payload of a Lua value: the union of every concrete

@@ -12,8 +12,8 @@ package lua
 // index-not-pointer rule -- this interacts carefully with stack growth and the
 // GC.
 //
-// TODO(phase-3): Proto, closures (Lua + native), upvalue open/close, and the
-// upvalue list threaded through the stack.
+// This file defines `Proto`, both closure kinds (Lua and native), upvalue opening
+// and closing, and the open-upvalue list threaded through the stack.
 
 // ---------------------------------------------------------------------------
 // Prototypes and their satellite structures

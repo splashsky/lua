@@ -8,8 +8,8 @@ package lua
 // leans on this constantly for its fallback paths, so the event ordering must
 // match reference Lua exactly.
 //
-// TODO(phase-3): the TM event enum + names, fast access to a type's metatable,
-// and the metamethod lookup helpers.
+// This file holds the TM event enum and its names, fast access to a type's
+// metatable, and the metamethod lookup and invocation helpers.
 
 // ---------------------------------------------------------------------------
 // The metamethod event enumeration

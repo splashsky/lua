@@ -16,8 +16,8 @@ package lua
 // pointers. That is what makes faithful error unwinding and coroutine
 // suspend/resume possible without setjmp/longjmp.
 //
-// TODO(phase-2): define lua_State / global_State, stack + frame arrays as
-// index-addressed structures, thread status, and creation/teardown.
+// This file defines `Lua_State` and `Global_State`, the stack and frame arrays as
+// index-addressed structures, thread status, and creation and teardown.
 
 // ---------------------------------------------------------------------------
 // Call frames
@@ -646,8 +646,11 @@ new_state :: proc(alloc: Allocator) -> ^Lua_State {
 
 	g.allgc = obj2gco(L) // the main thread is (so far) the only object
 	L.next = nil
-	// TODO(phase-5): mark the main thread non-yieldable (reference incnny sets
-	// the high half of nCcalls) once the yieldability model exists.
+	// Yieldability is tracked in the high half of `n_ccalls` (see `yieldable` /
+	// `incnny` / `decnny` above), and the main thread ends up non-yieldable the
+	// same way reference's does: the non-yieldable call paths it runs under raise
+	// that counter, so `coroutine.yield` at the top level reports "attempt to
+	// yield from outside a coroutine" rather than yielding.
 
 	g.gray = nil
 	g.fixedgc = nil

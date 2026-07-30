@@ -19,8 +19,8 @@ package lua
 // This file and `vm` together *are* the interpreter's spine, tied together by
 // the `Exec_Outcome` from control.odin.
 //
-// TODO(phase-5): frame push/pop, protected call, error propagation to the
-// nearest boundary, and coroutine resume/yield.
+// This file owns frame push and pop, the protected call, error propagation to the
+// nearest boundary, and coroutine resume and yield.
 //
 // Phase 2 delivers the piece the whole runtime leans on before any of that: the
 // value stack's index-safe growth. Because our slots are addressed by index, the

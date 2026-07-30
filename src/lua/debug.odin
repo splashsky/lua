@@ -9,8 +9,9 @@ import "base:intrinsics"
 // building tracebacks, and driving the debug hooks (call/return/line/count) that
 // the debug library and profilers rely on.
 //
-// TODO(phase-5): line-info lookup, symbolic execution for names, traceback
-// building, and hook dispatch. What exists now is the piece the lexer needs.
+// All of that is implemented here: line-info lookup, the symbolic execution that
+// recovers a name for a value ("local 'x'", "field 'insert'"), traceback building,
+// and hook dispatch.
 
 // luaG_addinfo prefixes a raw error message with its source position, producing the
 // familiar `chunkname:line: message` string Lua shows for syntax and runtime
