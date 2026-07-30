@@ -2,10 +2,8 @@ package lua
 
 // control.odin -- the unified execution/error outcome and protected boundaries.
 //
-// This file has no single reference-Lua counterpart; it exists because Odin has
-// no setjmp/longjmp. Reference Lua unwinds errors and switches coroutine stacks
-// with longjmp over the native C stack. We can't, so we make the control flow
-// *explicit* (see docs/ARCHITECTURE.md, Decision 2).
+// This file has no single reference-Lua counterpart. Reference Lua unwinds
+// errors with setjmp/longjmp; our libc-free equivalents live in jmp.odin.
 //
 // The whole VM/call machinery speaks in one tagged outcome:
 //   Continue        -- keep stepping the current frame
@@ -18,7 +16,6 @@ package lua
 // allocator all raise protected errors, so this primitive must exist first or
 // they'd grow throwaway error handling we'd later rip out.
 //
-import "core:c/libc"
 import "base:runtime"
 
 // ---------------------------------------------------------------------------
@@ -84,12 +81,9 @@ Exec_Outcome :: struct {
 // ---------------------------------------------------------------------------
 
 // Reference Lua unwinds errors with `longjmp`, jumping straight from the point
-// of failure back to the matching `luaD_rawrunprotected`. It turns out Odin's
-// standard library *does* expose these -- `core:c/libc` binds `setjmp`/`longjmp`
-// (and on Windows the binding deliberately picks UCRT's *non-unwinding* variant,
-// which is exactly the plain register-restoring jump Lua wants). So we model the
-// error path faithfully rather than threading an error status back by hand
-// through every frame.
+// of failure back to the matching `luaD_rawrunprotected`. `jmp.odin` implements
+// the same plain register-restoring jump directly for each supported ABI, so we
+// can model the error path faithfully without depending on a C runtime.
 //
 // One subtlety worth stating up front: `longjmp` only solves *error escape*. It
 // cannot resume a stack it already unwound, so coroutine `yield` still rides the
@@ -112,7 +106,7 @@ Exec_Outcome :: struct {
 // so nothing here can itself fail to allocate while we're handling an error.
 Lua_Longjmp :: struct {
 	previous: ^Lua_Longjmp,  // the enclosing protected scope, if any
-	b:        libc.jmp_buf,  // saved machine state (the `setjmp` target)
+	b:        Jmp_Buf,       // saved machine state (the `setjmp` target)
 	status:   Thread_Status, // error code in flight; set by `throw`, read on catch
 }
 
@@ -149,7 +143,7 @@ run_protected :: proc(L: ^Lua_State, f: Protected_Proc, ud: rawptr) -> Thread_St
 	// `longjmp` from `throw`. On the initial pass we run the computation; on
 	// the error return we skip straight past it, leaving in place the status
 	// that `throw` already stored on `lj`.
-	if libc.setjmp(&lj.b) == 0 {
+	if jmp_set(&lj.b) == 0 {
 		st := f(L, ud)
 		assert(!is_error_status(st), "protected proc returned an error status instead of throwing it")
 		lj.status = st
@@ -180,7 +174,7 @@ run_protected :: proc(L: ^Lua_State, f: Protected_Proc, ud: rawptr) -> Thread_St
 throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
 	if L.errorJmp != nil {
 		L.errorJmp.status = errcode
-		libc.longjmp(&L.errorJmp.b, 1)
+		jmp_long(&L.errorJmp.b, 1)
 	}
 	g := L.g
 	L.status = errcode
