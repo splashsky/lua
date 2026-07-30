@@ -8,9 +8,10 @@ package stdlib
 // parser. Unix time is split into whole days and seconds-within-the-day, then
 // converted with the proleptic Gregorian calendar. Local civil time is the one
 // place where arithmetic alone is not enough: on Windows we ask the OS to map a
-// UTC SYSTEMTIME through the machine's configured time-zone rules. That gives us
-// the historical UTC offset at the instant, including both sides of a DST
-// transition, while all normalization and table construction stays in Odin.
+// UTC SYSTEMTIME through the machine's configured time-zone rules. On hosted
+// POSIX targets tzif.odin reads TZ or /etc/localtime and applies the TZif
+// transition table. Both routes give us the historical offset at the instant,
+// including both sides of a DST transition, while normalization stays in Odin.
 //
 // There are three intentional, visible locale deviations. We have no libc locale
 // database, so date names and the composite %c/%x/%X forms are always the fixed
@@ -58,6 +59,7 @@ Civil_Time :: struct {
 	wday:   int, // Sunday == 0, like struct tm
 	isdst:  int, // -1 unknown, 0 standard, 1 daylight
 	offset: i64, // local seconds east of UTC
+	zone:   string,
 }
 
 @(private = "file")
@@ -162,8 +164,8 @@ tzi_info :: proc() -> (standard, daylight: i64, tzi: win32.TIME_ZONE_INFORMATION
 		ok = true
 		return
 	} else {
-		// Targets without an Odin/OS local-zone bridge honestly use UTC. This is
-		// preferable to pretending a host-dependent local conversion succeeded.
+		// POSIX conversions do not use this Windows-oriented pair. Keep zeroes
+		// here for UTC formatting and for unsupported hosted targets.
 		standard, daylight, ok = 0, 0, true
 		return
 	}
@@ -199,9 +201,26 @@ local_at_timestamp :: proc(t: i64) -> (Civil_Time, bool) {
 		out.isdst = ok && dst != std && out.offset == dst ? 1 : 0
 		return out, true
 	} else {
+		zone, loaded := load_local_zone()
+		if loaded {
+			// The abbreviation in Civil_Time is a slice into this temporary TZif
+			// image. This helper is only retained for callers that consume the
+			// result immediately; os.date keeps its own zone alive through formatting.
+			kind, found := local_zone_at(zone, t)
+			if found {
+				out := civil_at_timestamp(t + kind.offset)
+				out.offset = kind.offset
+				out.isdst = kind.is_dst ? 1 : 0
+				out.zone = kind.abbreviation
+				return out, true
+			}
+		}
+		// An unreadable or unsupported zone is not allowed to make os.date fail:
+		// UTC is the documented, deterministic last resort.
 		out := civil_at_timestamp(t)
 		out.offset = 0
 		out.isdst = 0
+		out.zone = "UTC"
 		return out, true
 	}
 }
@@ -215,41 +234,146 @@ same_wall :: proc(a, b: Civil_Time) -> bool {
 // Resolve a local civil time without libc mktime. Around a fall-back fold there
 // are two real UTC instants; tm_isdst selects one and an unspecified flag follows
 // the Windows CRT by preferring standard time. Around a spring-forward gap there
-// is no exact instant; the CRT applies the requested bias and then normalizes the
-// result through the real zone rules. Its unspecified choice in a gap is the
-// daylight bias, which is why a nominal 02:30 can normalize back to 01:30.
+// is no exact instant. Windows retains its existing CRT-compatible choice below.
+//
+// POSIX libc leaves both cases implementation-defined, so our non-Windows policy
+// is explicit: an unspecified fold prefers standard time, while an unspecified
+// gap normalizes forward to the first representable wall time. An explicit
+// `isdst` selects that side's offset, even when that normalizes the gap backward.
 @(private = "file")
 timestamp_from_local :: proc(wall: Civil_Time, nominal: i64, wanted_dst: int) -> (i64, Civil_Time, bool) {
-	std, dst, _, ok := tzi_info()
-	if !ok {
-		return 0, {}, false
-	}
-	offsets := [2]i64{std, dst}
-	for wanted in 0 ..< 2 {
-		for off in offsets {
-			if wanted_dst >= 0 && wanted != wanted_dst {
+	when ODIN_OS == .Windows {
+		std, dst, _, ok := tzi_info()
+		if !ok {
+			return 0, {}, false
+		}
+		offsets := [2]i64{std, dst}
+		for wanted in 0 ..< 2 {
+			for off in offsets {
+				if wanted_dst >= 0 && wanted != wanted_dst {
+					continue
+				}
+				t := nominal - off
+				got, valid := local_at_timestamp(t)
+				if valid && same_wall(got, wall) && got.isdst == wanted {
+					return t, got, true
+				}
+			}
+		}
+		if wanted_dst < 0 {
+			for off in offsets {
+				t := nominal - off
+				got, valid := local_at_timestamp(t)
+				if valid && same_wall(got, wall) {
+					return t, got, true
+				}
+			}
+		}
+		chosen := wanted_dst == 0 ? std : dst // unknown (-1) deliberately chooses DST
+		t := nominal - chosen
+		got, valid := local_at_timestamp(t)
+		return t, got, valid
+	} else {
+		zone, loaded := load_local_zone()
+		if !loaded {
+			got := civil_at_timestamp(nominal)
+			got.zone = "UTC"
+			return nominal, got, true
+		}
+		defer free_local_zone(&zone)
+
+		standard_t, daylight_t: i64
+		standard_c, daylight_c: Civil_Time
+		have_standard, have_daylight := false, false
+		best_after_t, best_other_t: i64
+		best_after_c, best_other_c: Civil_Time
+		best_requested_t: i64
+		best_requested_c: Civil_Time
+		best_after_delta := i64(max(i64))
+		best_other_delta := i64(max(i64))
+		best_requested_delta := i64(max(i64))
+
+		// TZif type indexes are bytes, so there can be at most 256 candidate
+		// offsets. POSIX-only zones contribute their standard and daylight pair.
+		count := zone.is_posix ? (zone.posix.has_dst ? 2 : 1) : zone.tzif.type_count
+		for i in 0 ..< count {
+			candidate: TZif_Local_Type
+			ok := true
+			if zone.is_posix {
+				if i == 0 {
+					candidate = TZif_Local_Type{offset = zone.posix.standard_offset}
+				} else {
+					candidate = TZif_Local_Type{
+						offset = zone.posix.daylight_offset,
+						is_dst = true,
+					}
+				}
+			} else {
+				candidate, ok = TZif_Type(zone.tzif, i)
+			}
+			if !ok {
 				continue
 			}
-			t := nominal - off
-			got, valid := local_at_timestamp(t)
-			if valid && same_wall(got, wall) && got.isdst == wanted {
-				return t, got, true
+			t := nominal - candidate.offset
+			actual, found := local_zone_at(zone, t)
+			if !found {
+				continue
+			}
+			got_nominal := t + actual.offset
+			got := civil_at_timestamp(got_nominal)
+			got.offset = actual.offset
+			got.isdst = actual.is_dst ? 1 : 0
+			got.zone = actual.abbreviation
+			if same_wall(got, wall) {
+				if actual.is_dst {
+					if !have_daylight {
+						daylight_t, daylight_c, have_daylight = t, got, true
+					}
+				} else if !have_standard {
+					standard_t, standard_c, have_standard = t, got, true
+				}
+				continue
+			}
+			delta := got_nominal - nominal
+			if delta >= 0 && delta < best_after_delta {
+				best_after_t, best_after_c = t, got
+				best_after_delta = delta
+			}
+			absolute := delta < 0 ? -delta : delta
+			if wanted_dst >= 0 && candidate.is_dst == (wanted_dst == 1) &&
+			   absolute < best_requested_delta {
+				best_requested_t, best_requested_c = t, got
+				best_requested_delta = absolute
+			}
+			if absolute < best_other_delta {
+				best_other_t, best_other_c = t, got
+				best_other_delta = absolute
 			}
 		}
-	}
-	if wanted_dst < 0 {
-		for off in offsets {
-			t := nominal - off
-			got, valid := local_at_timestamp(t)
-			if valid && same_wall(got, wall) {
-				return t, got, true
-			}
+		if wanted_dst == 0 && have_standard {
+			return standard_t, standard_c, true
 		}
+		if wanted_dst == 1 && have_daylight {
+			return daylight_t, daylight_c, true
+		}
+		if wanted_dst < 0 {
+			if have_standard {
+				return standard_t, standard_c, true
+			}
+			if have_daylight {
+				return daylight_t, daylight_c, true
+			}
+			if best_after_delta != i64(max(i64)) {
+				return best_after_t, best_after_c, true
+			}
+		} else if best_requested_delta != i64(max(i64)) {
+			return best_requested_t, best_requested_c, true
+		}
+		if best_other_delta != i64(max(i64)) {
+			return best_other_t, best_other_c, true
+		}
+		return 0, {}, false
 	}
-	chosen := wanted_dst == 0 ? std : dst // unknown (-1) deliberately chooses DST
-	t := nominal - chosen
-	got, valid := local_at_timestamp(t)
-	return t, got, valid
 }
 
 @(private = "file")
@@ -333,7 +457,7 @@ MONTH_SHORT := [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"
 MONTH_LONG := [12]string{"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}
 
 @(private = "file")
-zone_name :: proc(dst: bool, buf: []u8) -> string {
+zone_name :: proc(c: Civil_Time, dst: bool, buf: []u8) -> string {
 	when ODIN_OS == .Windows {
 		_, _, z, ok := tzi_info()
 		if ok {
@@ -350,6 +474,10 @@ zone_name :: proc(dst: bool, buf: []u8) -> string {
 				n += 1
 			}
 			return string(buf[:n])
+		}
+	} else {
+		if c.zone != "" {
+			return c.zone
 		}
 	}
 	return "UTC"
@@ -427,7 +555,7 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 		}
 		luaL_addstring(B, fmt.tprintf("%s%02d%02d", sign, off / 3600, off % 3600 / 60))
 	case 'Z':
-		luaL_addstring(B, zone_name(!utc && c.isdst == 1, zone_buf[:]))
+		luaL_addstring(B, zone_name(c, !utc && c.isdst == 1, zone_buf[:]))
 	case:
 		// C99 aliases admitted on non-Windows hosts.
 		switch ch {
@@ -488,7 +616,29 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 			}
 		}
 	} else {
-		c, ok = local_at_timestamp(t)
+		when ODIN_OS == .Windows {
+			c, ok = local_at_timestamp(t)
+		} else {
+			// Keep the TZif bytes alive until after %Z has consumed its
+			// abbreviation slice. The pure parser intentionally borrows its input.
+			zone, loaded := load_local_zone()
+			if loaded {
+				defer free_local_zone(&zone)
+				kind, found := local_zone_at(zone, t)
+				if found {
+					c = civil_at_timestamp(t + kind.offset)
+					c.offset = kind.offset
+					c.isdst = kind.is_dst ? 1 : 0
+					c.zone = kind.abbreviation
+				} else {
+					c = civil_at_timestamp(t)
+					c.zone = "UTC"
+				}
+			} else {
+				c = civil_at_timestamp(t)
+				c.zone = "UTC"
+			}
+		}
 	}
 	if !ok {
 		luaL_error(L, "date result cannot be represented in this installation")

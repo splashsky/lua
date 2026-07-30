@@ -143,8 +143,21 @@ Kept deliberately small and always documented:
 - **OS error text** comes from Odin's `core:os`, so wording and capitalization
   can differ from the C runtime's `strerror` text while the Lua result shape
   remains `nil, message, code`.
-- **Local time on targets without an Odin OS time-zone bridge** falls back to
-  UTC. Windows uses the configured OS time zone and its DST transition rules.
+- **Local time:** Windows uses the configured OS time zone and its DST
+  transition rules. Hosted POSIX targets read `TZ` (an absolute or
+  `:`-prefixed TZif path, a zone name under `TZDIR` or the usual zoneinfo
+  directories, or a POSIX rule such as `EST5EDT,M3.2.0,M11.1.0`) and otherwise
+  read `/etc/localtime`. TZif v1/v2/v3 transition tables, abbreviations, and
+  v2/v3 trailing rules are supported. POSIX rules support alphabetic or
+  `<quoted>` names, `hh[:mm[:ss]]` offsets, and `Jn`, `n`, or `Mm.w.d`
+  transitions with optional `/time`; DST strings without explicit transition
+  rules are rejected because POSIX leaves their default implementation-defined.
+  An unreadable or unsupported zone still falls back to UTC. For `os.time`, an
+  unspecified repeated hour chooses standard time, and an unspecified skipped
+  hour normalizes forward; an explicit `isdst` chooses that offset's side.
+  The parser is unit-tested from constructed byte images on Windows and the
+  POSIX path is cross-compiled, but real Linux/macOS end-to-end behavior has not
+  been run on this Windows development machine.
 - **Transcendental functions may differ from the platform's libm in the last
   bit.** `sin`, `cos`, `tan`, `exp` and `pow` are our own pure-Odin
   implementations, checked against reference over 91,606 evaluations at a
