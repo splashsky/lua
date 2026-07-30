@@ -17,6 +17,7 @@ package stdlib
 import "base:runtime"
 import "core:c/libc"
 import lua "luao:lua"
+import stream "luao:stream"
 
 // --------------------------------------------------------------------------------
 // Constants and small shared types
@@ -821,7 +822,7 @@ luaL_loadstring :: proc(L: ^lua.Lua_State, s: string) -> lua.Thread_Status {
 // Reader state for loading from a file -- reference `LoadF`.
 Load_F :: struct {
 	n:    int, // number of pre-read (pushed-back) bytes still in `buff`
-	f:    ^libc.FILE,
+	f:    ^stream.Stream,
 	buff: [8192]u8,
 }
 
@@ -834,11 +835,11 @@ getF :: proc "c" (L: ^lua.Lua_State, ud: rawptr, size: ^uint) -> [^]u8 {
 		size^ = uint(lf.n)
 		lf.n = 0
 	} else {
-		if libc.feof(lf.f) != 0 {
+		if stream.feof(lf.f) {
 			return nil
 		}
-		nr := libc.fread(&lf.buff[0], 1, len(lf.buff), lf.f)
-		size^ = nr
+		nr := stream.read(lf.f, lf.buff[:])
+		size^ = uint(nr)
 		if nr == 0 {
 			return nil
 		}
@@ -853,9 +854,9 @@ getF :: proc "c" (L: ^lua.Lua_State, ud: rawptr, size: ^uint) -> [^]u8 {
 // be pushed back -- but a real Lua source never starts that way, so this matches
 // reference behavior exactly.
 skipBOM :: proc(lf: ^Load_F) -> i32 {
-	c := libc.getc(lf.f)
-	if c == 0xEF && libc.getc(lf.f) == 0xBB && libc.getc(lf.f) == 0xBF {
-		return libc.getc(lf.f) // valid BOM: ignore it and return the next char
+	c := stream.getc(lf.f)
+	if c == 0xEF && stream.getc(lf.f) == 0xBB && stream.getc(lf.f) == 0xBF {
+		return stream.getc(lf.f) // valid BOM: ignore it and return the next char
 	}
 	return c // no (valid) BOM: return the first character read
 }
@@ -869,10 +870,10 @@ skipcomment :: proc(lf: ^Load_F, c: ^i32) -> bool {
 	c^ = ci
 	if ci == '#' {
 		// A `#!` line: skip until end of line, then report the next byte.
-		for ci != libc.EOF && ci != '\n' {
-			ci = libc.getc(lf.f)
+		for ci != stream.EOF && ci != '\n' {
+			ci = stream.getc(lf.f)
 		}
-		c^ = libc.getc(lf.f) // the character after the comment (if any)
+		c^ = stream.getc(lf.f) // the character after the comment (if any)
 		return true
 	}
 	return false
@@ -886,23 +887,17 @@ luaL_loadfilex :: proc(
 	mode: string = "",
 ) -> lua.Thread_Status {
 	lf: Load_F
-	cname: cstring
 	if filename == "" {
 		lua.lua_pushstring(L, "=stdin")
-		lf.f = libc.stdin
+		lf.f = stream.stdin()
 	} else {
 		lua.lua_pushfstring(L, "@%s", filename)
-		cname = cstring_from(filename)
-		lf.f = libc.fopen(cname, "r")
+		lf.f = stream.open(filename, "r")
 		if lf.f == nil {
-			delete_cstring(cname)
 			lua.lua_pushfstring(L, "cannot open %s", filename)
 			lua.lua_remove(L, -2)
 			return .Err_Err
 		}
-	}
-	defer if cname != nil {
-		delete_cstring(cname)
 	}
 	c: i32
 	lf.n = 0
@@ -917,7 +912,7 @@ luaL_loadfilex :: proc(
 		// (CRLF translation, 0x1A-as-EOF). Discard everything read so far and reopen
 		// the file in binary mode, then re-sniff -- reference `freopen(..,"rb",..)`.
 		lf.n = 0
-		lf.f = libc.freopen(cname, "rb", lf.f)
+		lf.f = stream.reopen(filename, "rb", lf.f)
 		if lf.f == nil {
 			lua.lua_pushfstring(L, "cannot reopen %s", filename)
 			lua.lua_remove(L, -2)
@@ -925,15 +920,15 @@ luaL_loadfilex :: proc(
 		}
 		skipcomment(&lf, &c) // re-read the initial portion in binary mode
 	}
-	if c != libc.EOF {
+	if c != stream.EOF {
 		lf.buff[lf.n] = u8(c) // `c` is the first real character of the stream
 		lf.n += 1
 	}
 	chunkname, _ := lua.lua_tostring(L, -1)
 	status := lua.lua_load(L, getF, &lf, chunkname, mode)
-	readerr := libc.ferror(lf.f) != 0
+	readerr := stream.ferror(lf.f)
 	if filename != "" {
-		libc.fclose(lf.f)
+		stream.close(lf.f)
 	}
 	if readerr {
 		lua.lua_settop(L, -2) // remove any partial result
@@ -1092,28 +1087,26 @@ warnfon :: proc "c" (ud: rawptr, msg: cstring, tocont: i32) {
 	warnfcont(ud, msg, tocont)
 }
 
-// Write raw bytes to stderr through libc (matching reference `lua_writestringerror`
-// which also goes to the C stderr stream, so io buffering stays consistent).
+// Write raw bytes to the shared stderr stream so diagnostics and io.stderr retain
+// one coherent buffering order.
 write_stderr :: proc(s: string) {
 	if len(s) > 0 {
-		libc.fwrite(raw_data(s), 1, uint(len(s)), libc.stderr)
+		stream.write(stream.stderr(), transmute([]u8)s)
 	}
-	libc.fflush(libc.stderr)
+	stream.flush(stream.stderr())
 }
 
-// Write bytes to stdout through the C stdout stream -- reference `lua_writestring`.
-// Routing through libc's stdout keeps buffering consistent with the io.* library
-// and with base's `print` (which writes to the same stream).
+// Write bytes through the same stdout object used by io.stdout and print.
 lua_writestring :: proc(s: string) {
 	if len(s) > 0 {
-		libc.fwrite(raw_data(s), 1, uint(len(s)), libc.stdout)
+		stream.write(stream.stdout(), transmute([]u8)s)
 	}
 }
 
 // End a line on stdout and flush it -- reference `lua_writeline`.
 lua_writeline :: proc() {
 	lua_writestring("\n")
-	libc.fflush(libc.stdout)
+	stream.flush(stream.stdout())
 }
 
 // Verify the running core is the version the caller was built for -- reference

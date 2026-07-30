@@ -10,8 +10,8 @@ package stdlib
 // never reaching into kernel internals.
 
 import "base:runtime"
-import "core:c/libc"
 import lua "luao:lua"
+import stream "luao:stream"
 
 // The registry key under which per-thread hook functions are stored -- reference
 // HOOKKEY. It maps each thread to the Lua hook function set for it.
@@ -508,10 +508,22 @@ db_debug :: proc "c" (Lp: rawptr) -> i32 {
 	for {
 		buffer: [250]u8
 		write_stderr("lua_debug> ")
-		if libc.fgets(([^]libc.char)(&buffer[0]), len(buffer), libc.stdin) == nil {
+		n := 0
+		for n < len(buffer) - 1 {
+			c := stream.getc(stream.stdin())
+			if c == stream.EOF {
+				break
+			}
+			buffer[n] = u8(c)
+			n += 1
+			if c == '\n' {
+				break
+			}
+		}
+		if n == 0 {
 			return 0
 		}
-		line := string(cstring(&buffer[0]))
+		line := string(buffer[:n])
 		if line == "cont\n" {
 			return 0
 		}

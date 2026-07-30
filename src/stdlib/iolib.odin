@@ -5,10 +5,9 @@ package stdlib
 // The I/O library: the file-handle userdata type and its methods (read/write/
 // lines/seek/flush/setvbuf/close), the default input/output handles, and the
 // convenience free functions (io.open/io.read/io.write/io.lines/...). Just like
-// reference Lua, we are a thin skin over C stdio: every handle wraps a real
-// `FILE*` and we call the same libc entry points (fopen/fclose/fread/fwrite/
-// getc/ungetc/fseek/ftell/setvbuf/fflush/tmpfile) through `core:c/libc`, so the
-// observable behaviour matches the host C runtime byte for byte.
+// reference Lua, we are a thin skin over the shared Odin buffered-stream layer.
+// That layer supplies the stdio semantics Lua relies on (including Windows text
+// translation) while talking only to core:os file handles.
 //
 // A couple of deliberate, documented deviations from a full POSIX reference build:
 //
@@ -17,15 +16,15 @@ package stdlib
 //     not expose; rather than reach outside the standard library we take reference
 //     Lua's own ISO-C fallback and raise "'popen' not supported".
 //
-//   * Seeking uses libc `fseek`/`ftell`, whose offset type is C `long`. On Windows
-//     that is 32 bits, exactly like reference Lua's ISO-C `l_fseek` fallback, so
-//     offsets beyond the `long` range are rejected by the same round-trip check.
-//     A POSIX build would widen these to `off_t`/`__int64`; we match the portable
-//     configuration.
+//   * Text-mode positions are represented by raw byte offsets. Like the opaque
+//     cookies returned by the Windows CRT, they are intended to be passed back to
+//     seek rather than arithmetically interpreted. This covers every operation
+//     Lua exposes while retaining full 64-bit core:os offsets.
 
 import "base:runtime"
 import "core:c/libc"
 import lua "luao:lua"
+import stream "luao:stream"
 
 // The registry keys under which the default input/output handles live, and the
 // length of the shared "_IO_" prefix (used to name the file in error messages) --
@@ -52,21 +51,13 @@ LUA_FILEHANDLE :: "FILE*"
 // created closed first and only then wired up to a real file.
 @(private = "file")
 LStream :: struct {
-	f:      ^libc.FILE,
+	f:      ^stream.Stream,
 	closef: lua.C_Function,
 }
 
 @(private = "file")
 state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
 	return (^lua.Lua_State)(Lp)
-}
-
-// View a Lua-owned string as a C string. Lua strings (and Odin literals) carry a
-// trailing NUL in their backing store, so this is a safe zero-copy conversion for
-// anything returned by luaL_check*/opt* or a literal default.
-@(private = "file")
-cstr :: #force_inline proc "contextless" (s: string) -> cstring {
-	return cstring(raw_data(s))
 }
 
 // --------------------------------------------------------------------------------
@@ -89,7 +80,7 @@ tolstream :: proc(L: ^lua.Lua_State) -> ^LStream {
 // Fetch the underlying FILE* at slot 1, raising if the handle is closed --
 // reference `tofile`.
 @(private = "file")
-tofile :: proc(L: ^lua.Lua_State) -> ^libc.FILE {
+tofile :: proc(L: ^lua.Lua_State) -> ^stream.Stream {
 	p := tolstream(L)
 	if isclosed(p) {
 		luaL_error(L, "attempt to use a closed file")
@@ -135,7 +126,7 @@ io_fclose :: proc "c" (Lp: rawptr) -> i32 {
 	L := state(Lp)
 	p := tolstream(L)
 	libc.errno()^ = 0
-	return luaL_fileresult(L, libc.fclose(p.f) == 0, "", false)
+	return luaL_fileresult(L, stream.close(p.f), "", false)
 }
 
 // Close function for the standard streams: it refuses to close them and, because
@@ -251,7 +242,7 @@ io_open :: proc "c" (Lp: rawptr) -> i32 {
 	p := newfile(L)
 	luaL_argcheck(L, l_checkmode(mode), 2, "invalid mode")
 	libc.errno()^ = 0
-	p.f = libc.fopen(cstr(filename), cstr(mode))
+	p.f = stream.open(filename, mode)
 	if p.f == nil {
 		return luaL_fileresult(L, false, filename, true)
 	}
@@ -272,7 +263,7 @@ io_tmpfile :: proc "c" (Lp: rawptr) -> i32 {
 	L := state(Lp)
 	p := newfile(L)
 	libc.errno()^ = 0
-	p.f = libc.tmpfile()
+	p.f = stream.tmpfile()
 	if p.f == nil {
 		return luaL_fileresult(L, false, "", false)
 	}
@@ -287,7 +278,7 @@ io_tmpfile :: proc "c" (Lp: rawptr) -> i32 {
 // been closed -- reference `getiofile`. The handle is left on the stack (as the
 // implicit "self" that g_read/g_write count), exactly as reference does.
 @(private = "file")
-getiofile :: proc(L: ^lua.Lua_State, findex: string) -> ^libc.FILE {
+getiofile :: proc(L: ^lua.Lua_State, findex: string) -> ^stream.Stream {
 	lua.lua_getfield(L, lua.LUA_REGISTRYINDEX, findex)
 	p := (^LStream)(lua.lua_touserdata(L, -1))
 	if isclosed(p) {
@@ -305,7 +296,7 @@ g_iofile :: proc(L: ^lua.Lua_State, f: string, mode: string) -> i32 {
 		if is_str {
 			// Open the named file, raising a descriptive error on failure.
 			p := newfile(L)
-			p.f = libc.fopen(cstr(filename), cstr(mode))
+			p.f = stream.open(filename, mode)
 			if p.f == nil {
 				luaL_error(
 					L,
@@ -387,7 +378,7 @@ io_lines :: proc "c" (Lp: rawptr) -> i32 {
 	} else { // open a named file just for this iteration
 		filename := luaL_checkstring(L, 1)
 		p := newfile(L)
-		p.f = libc.fopen(cstr(filename), cstr("r"))
+		p.f = stream.open(filename, "r")
 		if p.f == nil {
 			luaL_error(
 				L,
@@ -420,7 +411,7 @@ L_MAXLENNUM :: 200
 // Auxiliary state for read_number -- reference `RN`.
 @(private = "file")
 RN :: struct {
-	f:    ^libc.FILE, // file being read
+	f:    ^stream.Stream, // file being read
 	c:    i32, // current look-ahead character
 	n:    int, // number of bytes buffered
 	buff: [L_MAXLENNUM + 1]u8, // +1 for the terminating NUL
@@ -436,7 +427,7 @@ nextc :: proc(rn: ^RN) -> bool {
 	}
 	rn.buff[rn.n] = u8(rn.c)
 	rn.n += 1
-	rn.c = i32(libc.getc(rn.f))
+	rn.c = stream.getc(rn.f)
 	return true
 }
 
@@ -468,7 +459,7 @@ readdigits :: proc(rn: ^RN, hex: bool) -> int {
 // lua_stringtonumber -- reference `read_number`. On success the conversion itself
 // pushes the number; on failure we push a placeholder nil that g_read discards.
 @(private = "file")
-read_number :: proc(L: ^lua.Lua_State, f: ^libc.FILE) -> bool {
+read_number :: proc(L: ^lua.Lua_State, f: ^stream.Stream) -> bool {
 	rn: RN
 	count := 0
 	hex := false
@@ -476,7 +467,7 @@ read_number :: proc(L: ^lua.Lua_State, f: ^libc.FILE) -> bool {
 	rn.n = 0
 	// C locale: the decimal separator is '.', which we always accept anyway.
 	for {
-		rn.c = i32(libc.getc(f))
+		rn.c = stream.getc(f)
 		if !lua.is_space(int(rn.c)) {
 			break
 		}
@@ -497,7 +488,7 @@ read_number :: proc(L: ^lua.Lua_State, f: ^libc.FILE) -> bool {
 		test2(&rn, '-', '+') // exponent sign
 		readdigits(&rn, false) // exponent digits (always decimal)
 	}
-	libc.ungetc(rn.c, f) // unread the look-ahead char (a no-op for EOF)
+	stream.ungetc(rn.c, f) // unread the look-ahead char (a no-op for EOF)
 	rn.buff[rn.n] = 0 // terminate the string
 	if lua.lua_stringtonumber(L, string(cstring(&rn.buff[0]))) != 0 {
 		return true // a valid number was pushed
@@ -509,33 +500,33 @@ read_number :: proc(L: ^lua.Lua_State, f: ^libc.FILE) -> bool {
 // Peek one byte to detect EOF without consuming input, always pushing "" --
 // reference `test_eof`.
 @(private = "file")
-test_eof :: proc(L: ^lua.Lua_State, f: ^libc.FILE) -> bool {
-	c := i32(libc.getc(f))
-	libc.ungetc(c, f) // no-op when c == EOF
+test_eof :: proc(L: ^lua.Lua_State, f: ^stream.Stream) -> bool {
+	c := stream.getc(f)
+	stream.ungetc(c, f) // no-op when c == EOF
 	lua.lua_pushstring(L, "")
-	return c != i32(libc.EOF)
+	return c != stream.EOF
 }
 
 // Read one line, with `chop` controlling whether the trailing newline is kept --
 // reference `read_line`. Always pushes a string; returns whether anything was read.
 @(private = "file")
-read_line :: proc(L: ^lua.Lua_State, f: ^libc.FILE, chop: bool) -> bool {
+read_line :: proc(L: ^lua.Lua_State, f: ^stream.Stream, chop: bool) -> bool {
 	b: Buffer
 	luaL_buffinit(L, &b)
-	c := i32(libc.EOF)
+	c: i32 = stream.EOF
 	for {
 		buff := luaL_prepbuffsize(&b, LUAL_BUFFERSIZE)
 		i: uint = 0
 		for i < LUAL_BUFFERSIZE {
-			c = i32(libc.getc(f))
-			if c == i32(libc.EOF) || c == '\n' {
+			c = stream.getc(f)
+			if c == stream.EOF || c == '\n' {
 				break
 			}
 			buff[i] = u8(c)
 			i += 1
 		}
 		luaL_addsize(&b, i)
-		if c == i32(libc.EOF) || c == '\n' {
+		if c == stream.EOF || c == '\n' {
 			break
 		}
 	}
@@ -549,13 +540,13 @@ read_line :: proc(L: ^lua.Lua_State, f: ^libc.FILE, chop: bool) -> bool {
 
 // Read the entire remaining file in buffer-sized chunks -- reference `read_all`.
 @(private = "file")
-read_all :: proc(L: ^lua.Lua_State, f: ^libc.FILE) {
+read_all :: proc(L: ^lua.Lua_State, f: ^stream.Stream) {
 	b: Buffer
 	luaL_buffinit(L, &b)
 	for {
 		p := luaL_prepbuffsize(&b, LUAL_BUFFERSIZE)
-		nr := libc.fread(p, 1, LUAL_BUFFERSIZE, f)
-		luaL_addsize(&b, nr)
+		nr := stream.read(f, p[:LUAL_BUFFERSIZE])
+		luaL_addsize(&b, uint(nr))
 		if nr != LUAL_BUFFERSIZE {
 			break
 		}
@@ -567,12 +558,12 @@ read_all :: proc(L: ^lua.Lua_State, f: ^libc.FILE) {
 // `read_chars`. Success is "read at least one byte", so a partial read at EOF
 // still succeeds.
 @(private = "file")
-read_chars :: proc(L: ^lua.Lua_State, f: ^libc.FILE, n: uint) -> bool {
+read_chars :: proc(L: ^lua.Lua_State, f: ^stream.Stream, n: uint) -> bool {
 	b: Buffer
 	luaL_buffinit(L, &b)
 	p := luaL_prepbuffsize(&b, n)
-	nr := libc.fread(p, 1, n, f)
-	luaL_addsize(&b, nr)
+	nr := stream.read(f, p[:n])
+	luaL_addsize(&b, uint(nr))
 	luaL_pushresult(&b)
 	return nr > 0
 }
@@ -581,11 +572,11 @@ read_chars :: proc(L: ^lua.Lua_State, f: ^libc.FILE, n: uint) -> bool {
 // is the stack index of the first format (2 for file:read's self, 1 for io.read's
 // default handle).
 @(private = "file")
-g_read :: proc(L: ^lua.Lua_State, f: ^libc.FILE, first: i32) -> i32 {
+g_read :: proc(L: ^lua.Lua_State, f: ^stream.Stream, first: i32) -> i32 {
 	nargs := lua.lua_gettop(L) - 1
 	n: i32
 	success: bool
-	libc.clearerr(f)
+	stream.clearerr(f)
 	libc.errno()^ = 0
 	if nargs == 0 { // no formats: read one chopped line
 		success = read_line(L, f, true)
@@ -624,7 +615,7 @@ g_read :: proc(L: ^lua.Lua_State, f: ^libc.FILE, first: i32) -> i32 {
 			n += 1
 		}
 	}
-	if libc.ferror(f) != 0 {
+	if stream.ferror(f) {
 		return luaL_fileresult(L, false, "", false)
 	}
 	if !success {
@@ -690,7 +681,7 @@ io_readline :: proc "c" (Lp: rawptr) -> i32 {
 // (exactly what reference's lua_numbertocstring produces) and rejects non-string,
 // non-number arguments with the standard "string expected" error.
 @(private = "file")
-g_write :: proc(L: ^lua.Lua_State, f: ^libc.FILE, arg_start: i32) -> i32 {
+g_write :: proc(L: ^lua.Lua_State, f: ^stream.Stream, arg_start: i32) -> i32 {
 	arg := int(arg_start)
 	nargs := lua.lua_gettop(L) - arg
 	totalbytes: uint = 0
@@ -701,7 +692,7 @@ g_write :: proc(L: ^lua.Lua_State, f: ^libc.FILE, arg_start: i32) -> i32 {
 		l := uint(len(s))
 		numbytes: uint = 0
 		if l > 0 {
-			numbytes = libc.fwrite(raw_data(s), 1, l, f)
+			numbytes = uint(stream.write(f, s))
 		}
 		totalbytes += numbytes
 		if numbytes < l { // short write: report the error and bytes-so-far
@@ -735,7 +726,7 @@ f_write :: proc "c" (Lp: rawptr) -> i32 {
 // --------------------------------------------------------------------------------
 
 @(private = "file")
-seek_whence := [3]libc.Whence{.SET, .CUR, .END}
+seek_whence := [3]stream.Seek_From{.Start, .Current, .End}
 
 @(private = "file")
 seek_names := []string{"set", "cur", "end"}
@@ -747,20 +738,18 @@ f_seek :: proc "c" (Lp: rawptr) -> i32 {
 	f := tofile(L)
 	op := luaL_checkoption(L, 2, "cur", seek_names)
 	p3 := luaL_optinteger(L, 3, 0)
-	offset := libc.long(p3)
-	// C `long` may be narrower than lua_Integer (32 bits on Windows); reject any
-	// offset that does not survive the round trip, matching reference's ISO-C build.
-	luaL_argcheck(L, lua.Integer(offset) == p3, 3, "not an integer in proper range")
+	offset := i64(p3)
 	libc.errno()^ = 0
-	if libc.fseek(f, offset, seek_whence[op]) != 0 {
+	pos, ok := stream.seek(f, offset, seek_whence[op])
+	if !ok {
 		return luaL_fileresult(L, false, "", false)
 	}
-	lua.lua_pushinteger(L, lua.Integer(libc.ftell(f)))
+	lua.lua_pushinteger(L, lua.Integer(pos))
 	return 1
 }
 
 @(private = "file")
-setvbuf_mode := [3]i32{libc._IONBF, libc._IOFBF, libc._IOLBF}
+setvbuf_mode := [3]stream.Buffer_Mode{.Unbuffered, .Full, .Line}
 
 @(private = "file")
 setvbuf_names := []string{"no", "full", "line"}
@@ -773,14 +762,14 @@ f_setvbuf :: proc "c" (Lp: rawptr) -> i32 {
 	op := luaL_checkoption(L, 2, "", setvbuf_names) // mode is required (no default)
 	sz := luaL_optinteger(L, 3, LUAL_BUFFERSIZE)
 	libc.errno()^ = 0
-	res := libc.setvbuf(f, nil, setvbuf_mode[op], libc.size_t(sz))
-	return luaL_fileresult(L, res == 0, "", false)
+	res := stream.setvbuf(f, setvbuf_mode[op], int(sz))
+	return luaL_fileresult(L, res, "", false)
 }
 
 @(private = "file")
-aux_flush :: proc(L: ^lua.Lua_State, f: ^libc.FILE) -> i32 {
+aux_flush :: proc(L: ^lua.Lua_State, f: ^stream.Stream) -> i32 {
 	libc.errno()^ = 0
-	return luaL_fileresult(L, libc.fflush(f) == 0, "", false)
+	return luaL_fileresult(L, stream.flush(f), "", false)
 }
 
 @(private = "file")
@@ -854,7 +843,7 @@ createmeta :: proc(L: ^lua.Lua_State) {
 // Create a standard stream, register it in the module (and, for stdin/stdout,
 // under its registry default key) -- reference `createstdfile`.
 @(private = "file")
-createstdfile :: proc(L: ^lua.Lua_State, f: ^libc.FILE, k: string, has_key: bool, fname: string) {
+createstdfile :: proc(L: ^lua.Lua_State, f: ^stream.Stream, k: string, has_key: bool, fname: string) {
 	p := newprefile(L)
 	p.f = f
 	p.closef = io_noclose // standard streams are never closed
@@ -872,8 +861,8 @@ luaopen_io :: proc "c" (Lp: rawptr) -> i32 {
 	luaL_newlib(L, iolib) // the io module
 	createmeta(L)
 	// Create and register the three standard streams.
-	createstdfile(L, libc.stdin, IO_INPUT, true, "stdin")
-	createstdfile(L, libc.stdout, IO_OUTPUT, true, "stdout")
-	createstdfile(L, libc.stderr, "", false, "stderr")
+	createstdfile(L, stream.stdin(), IO_INPUT, true, "stdin")
+	createstdfile(L, stream.stdout(), IO_OUTPUT, true, "stdout")
+	createstdfile(L, stream.stderr(), "", false, "stderr")
 	return 1
 }

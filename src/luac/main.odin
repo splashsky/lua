@@ -24,11 +24,11 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import libc "core:c/libc"
 import "base:runtime"
 
 import lua "luao:lua"
 import aux "luao:stdlib"
+import stream "luao:stream"
 
 // Default program name and default output file. Reference PROGNAME / OUTPUT.
 LUAC_PROGNAME :: "luac"
@@ -163,11 +163,13 @@ doargs :: proc(argv: []string) -> int {
 // --------------------------------------------------------------------------------
 
 luac_writer :: proc "c" (L: rawptr, p: rawptr, sz: uint, ud: rawptr) -> i32 {
+	context = runtime.default_context()
 	if sz == 0 {
 		return 0
 	}
-	D := (^libc.FILE)(ud)
-	return libc.fwrite(p, sz, 1, D) != 1 ? 1 : 0
+	D := (^stream.Stream)(ud)
+	data := ([^]u8)(p)[:sz]
+	return stream.write(D, data) != int(sz) ? 1 : 0
 }
 
 // --------------------------------------------------------------------------------
@@ -204,18 +206,17 @@ pmain :: proc "c" (Lp: rawptr) -> i32 {
 		if output_to_stdout {
 			// `lua_dump` walks the top-of-stack function and streams bytes to our
 			// writer; a stdout target needs no open/close.
-			lua.lua_dump(L, luac_writer, libc.stdout, stripping)
+			lua.lua_dump(L, luac_writer, stream.stdout(), stripping)
 		} else {
-			cpath := strings.clone_to_cstring(output, context.temp_allocator)
-			D := libc.fopen(cpath, "wb")
+			D := stream.open(output, "wb")
 			if D == nil {
 				cannot("open")
 			}
 			lua.lua_dump(L, luac_writer, D, stripping)
-			if libc.ferror(D) != 0 {
+			if stream.ferror(D) {
 				cannot("write")
 			}
-			if libc.fclose(D) != 0 {
+			if !stream.close(D) {
 				cannot("close")
 			}
 		}

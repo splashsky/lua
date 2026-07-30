@@ -33,12 +33,11 @@ package main
 
 import "core:fmt"
 import "core:os"
-import c "core:c"
-import libc "core:c/libc"
 import "base:runtime"
 
 import lua "luao:lua"
 import aux "luao:stdlib"
+import stream "luao:stream"
 
 // --------------------------------------------------------------------------------
 // Small configuration constants that reference Lua keeps in luaconf.h.
@@ -445,21 +444,28 @@ incomplete :: proc(L: ^lua.Lua_State, status: lua.Thread_Status) -> bool {
 // the stack. Returns false at end-of-input. Reference pushline + the dlopen-less
 // lua_readline fallback.
 pushline :: proc(L: ^lua.Lua_State, firstline: bool) -> bool {
-	buffer: [LUA_MAXINPUT]c.char
+	buffer: [LUA_MAXINPUT]u8
 	prmt := get_prompt(L, firstline)
 	// emulate lua_readline: print the prompt, flush, then read a line
 	aux.lua_writestring(prmt)
-	libc.fflush(libc.stdout)
-	b := libc.fgets(raw_data(buffer[:]), LUA_MAXINPUT, libc.stdin)
+	stream.flush(stream.stdout())
+	n := 0
+	for n < len(buffer) - 1 {
+		c := stream.getc(stream.stdin())
+		if c == stream.EOF {
+			break
+		}
+		buffer[n] = u8(c)
+		n += 1
+		if c == '\n' {
+			break
+		}
+	}
 	lua.lua_pop(L, 1) // remove prompt (get_prompt left it on the stack)
-	if b == nil {
+	if n == 0 {
 		return false // no input
 	}
-	// Measure up to the NUL fgets wrote, then trim a trailing newline.
-	l := 0
-	for l < len(buffer) && buffer[l] != 0 {
-		l += 1
-	}
+	l := n
 	if l > 0 && buffer[l - 1] == '\n' {
 		l -= 1
 	}
@@ -654,10 +660,8 @@ main :: proc() {
 	report(L, status)
 	lua.close_state(L)
 	// Reference Lua exits by returning from `main`, so the C runtime flushes every
-	// buffered stream on the way out. We leave via `os.exit` (which on some
-	// platforms calls ExitProcess and skips that CRT cleanup), so flush all open
-	// output streams ourselves first -- otherwise a buffered `io.write` to a piped
-	// stdout would be silently dropped. `fflush(NULL)` flushes every stream.
-	libc.fflush(nil)
+	// buffered stream on the way out. os.exit skips language-runtime cleanup on
+	// some platforms, so explicitly flush every Odin stream first.
+	stream.flush_all()
 	os.exit((result && status == .Ok) ? 0 : 1)
 }

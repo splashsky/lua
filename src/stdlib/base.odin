@@ -7,8 +7,8 @@ package stdlib
 // ABI (`proc "c" (L: rawptr) -> i32`) and lean on the auxiliary library above.
 
 import "base:runtime"
-import "core:c/libc"
 import lua "luao:lua"
+import stream "luao:stream"
 
 // The name under which the global table is itself exposed (`_G`) -- reference
 // `LUA_GNAME`.
@@ -22,12 +22,11 @@ state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
 	return (^lua.Lua_State)(Lp)
 }
 
-// Write bytes to stdout through libc, matching reference `lua_writestring` (which
-// also targets the C stdout stream so buffering stays consistent with io.*).
+// Write bytes to the stdout object shared with io.*.
 @(private = "file")
 write_stdout :: proc(s: string) {
 	if len(s) > 0 {
-		libc.fwrite(raw_data(s), 1, uint(len(s)), libc.stdout)
+		stream.write(stream.stdout(), transmute([]u8)s)
 	}
 }
 
@@ -50,7 +49,7 @@ luaB_print :: proc "c" (Lp: rawptr) -> i32 {
 		lua.lua_pop(L, 1) // pop the converted string
 	}
 	write_stdout("\n")
-	libc.fflush(libc.stdout)
+	stream.flush(stream.stdout())
 	return 0
 }
 
