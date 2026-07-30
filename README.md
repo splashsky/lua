@@ -152,8 +152,10 @@ Kept deliberately small and always documented:
   about as much, and the PUC-Rio `math.lua` suite passes either way; the numbers
   that Lua programs actually round-trip -- `tostring`, `%q`, `string.format` --
   are byte-identical to reference.
-- **`io.popen` is not available** (no pipe-to-process facility without a C
-  runtime). Reference Lua permits this to fail, and it reports as much.
+- **`io.popen` is available on Windows and Linux without a C runtime.** Windows
+  uses anonymous KERNEL32 pipes and `cmd.exe /c`; Linux uses syscall-backed
+  pipes and `/bin/sh -c`. Other hosted targets retain Lua's explicit
+  `"'popen' not supported"` fallback until their process ABIs are implemented. Reference Lua permits this to fail, and it reports as much.
 
 Two more, inherited from the platform rather than from our own choices:
 `files.lua` in the PUC-Rio suite stops on Windows at its `/dev/null` test, since

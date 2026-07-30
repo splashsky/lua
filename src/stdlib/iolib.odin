@@ -11,21 +11,21 @@ package stdlib
 // That layer supplies the stdio semantics Lua relies on (including Windows text
 // translation) while talking only to core:os file handles.
 //
-// A couple of deliberate, documented deviations from a full POSIX reference build:
-//
-//   * `io.popen` is not supported. Spawning a child process through a pipe needs
-//     the platform `popen`/`_popen`, which Odin's std `core:c/libc` binding does
-//     not expose; rather than reach outside the standard library we take reference
-//     Lua's own ISO-C fallback and raise "'popen' not supported".
+// One deliberate, documented deviation from a full POSIX reference build:
 //
 //   * Text-mode positions are represented by raw byte offsets. Like the opaque
 //     cookies returned by the Windows CRT, they are intended to be passed back to
 //     seek rather than arithmetically interpreted. This covers every operation
 //     Lua exposes while retaining full 64-bit core:os offsets.
+//
+// `io.popen` is implemented without libc on Windows and Linux. Other hosted
+// targets retain reference Lua's ISO-C "'popen' not supported" fallback until
+// their process and wait-status ABIs are implemented deliberately.
 
 import "base:runtime"
 import "core:os"
 import lua "luao:lua"
+import shellproc "luao:shellproc"
 import stream "luao:stream"
 
 // The registry keys under which the default input/output handles live, and the
@@ -55,6 +55,7 @@ LUA_FILEHANDLE :: "FILE*"
 LStream :: struct {
 	f:      ^stream.Stream,
 	closef: lua.C_Function,
+	popen:  ^shellproc.Handle,
 }
 
 @(private = "file")
@@ -96,7 +97,9 @@ tofile :: proc(L: ^lua.Lua_State) -> ^stream.Stream {
 @(private = "file")
 newprefile :: proc(L: ^lua.Lua_State) -> ^LStream {
 	p := (^LStream)(lua.lua_newuserdatauv(L, size_of(LStream), 0))
+	p.f = nil
 	p.closef = nil // mark as closed until a real file is installed
+	p.popen = nil
 	luaL_setmetatable(L, LUA_FILEHANDLE)
 	return p
 }
@@ -130,6 +133,25 @@ io_fclose :: proc "c" (Lp: rawptr) -> i32 {
 	stream.clear_error()
 	ok := stream.close(p.f)
 	return luaL_fileresult(L, ok, "", false, stream.last_error())
+}
+
+// A popen stream must close its pipe endpoint before waiting. In write mode that
+// close is what delivers EOF to the child's stdin; waiting first would deadlock
+// with a child that is correctly waiting for more input.
+@(private = "file")
+io_pclose :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := state(Lp)
+	p := tolstream(L)
+	stream.clear_error()
+	ok := stream.close(p.f)
+	close_err := stream.last_error()
+	result := shellproc.wait(p.popen)
+	p.popen = nil
+	if !ok {
+		return luaL_execresult(L, -1, close_err)
+	}
+	return luaL_execresult(L, result.code, result.err, result.signaled)
 }
 
 // Close function for the standard streams: it refuses to close them and, because
@@ -256,8 +278,36 @@ io_open :: proc "c" (Lp: rawptr) -> i32 {
 io_popen :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	// ISO-C fallback: no pipe-to-process facility in the standard bindings.
-	luaL_error(L, "'popen' not supported")
+	when ODIN_OS != .Windows && ODIN_OS != .Linux {
+		// Do not guess at Darwin/BSD process and wait-status ABIs. This is the
+		// same explicit fallback used by reference Lua on unsupported hosts.
+		luaL_error(L, "'popen' not supported")
+	}
+
+	command := luaL_checkstring(L, 1)
+	mode := luaL_optstring(L, 2, "r")
+	p := newprefile(L)
+	valid_mode := false
+	when ODIN_OS == .Windows {
+		// Match _popen exactly: r/w, optionally followed by b or t.
+		valid_mode = (len(mode) == 1 && (mode[0] == 'r' || mode[0] == 'w')) ||
+			(len(mode) == 2 &&
+				(mode[0] == 'r' || mode[0] == 'w') &&
+				(mode[1] == 'b' || mode[1] == 't'))
+	} else {
+		// POSIX popen accepts only the two one-character directions in Lua.
+		valid_mode = len(mode) == 1 && (mode[0] == 'r' || mode[0] == 'w')
+	}
+	luaL_argcheck(L, valid_mode, 2, "invalid mode")
+
+	result := shellproc.open(command, mode)
+	p.f = result.stream
+	p.popen = result.handle
+	p.closef = io_pclose
+	if result.err != nil {
+		return luaL_fileresult(L, false, command, true, result.err)
+	}
+	return 1
 }
 
 @(private = "file")

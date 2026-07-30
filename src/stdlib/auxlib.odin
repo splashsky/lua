@@ -1026,19 +1026,23 @@ luaL_fileresult :: proc(
 }
 
 // `luaL_execresult` -- reference Lua's process-result reporter for os.execute /
-// io's pclose. Without POSIX's `l_inspectstat` there is nothing to decode, so the
-// termination type is always "exit" and the code is the raw status: success is
-// status 0, and we push (true|fail, "exit", code).
-luaL_execresult :: proc(L: ^lua.Lua_State, stat: i32, err: os.Error = nil) -> i32 {
+// io's pclose. Platform process code decodes the native wait result first, then
+// this routine produces the common (true|fail, "exit"|"signal", code) tuple.
+luaL_execresult :: proc(
+	L: ^lua.Lua_State,
+	stat: i32,
+	err: os.Error = nil,
+	signaled: bool = false,
+) -> i32 {
 	if err != nil {
 		return luaL_fileresult(L, false, "", false, err)
 	}
-	if stat == 0 {
+	if !signaled && stat == 0 {
 		lua.lua_pushboolean(L, true)
 	} else {
 		luaL_pushfail(L)
 	}
-	lua.lua_pushstring(L, "exit")
+	lua.lua_pushstring(L, "signal" if signaled else "exit")
 	lua.lua_pushinteger(L, lua.Integer(stat))
 	return 3
 }

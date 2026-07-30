@@ -199,6 +199,17 @@ make_stream :: proc(f: ^os.File, owns: bool, readable, writable, append_mode, te
 	return s
 }
 
+// Wrap an already-open OS file in the buffered stream machinery. Process pipes
+// are created by the platform layer rather than by `open`, but from this point
+// onward they should behave exactly like every other Lua stream.
+from_file :: proc(f: ^os.File, owns, readable, writable, text_mode: bool) -> ^Stream {
+	if f == nil {
+		set_error(os.Error(os.General_Error.Invalid_File))
+		return nil
+	}
+	return make_stream(f, owns, readable, writable, false, text_mode)
+}
+
 @(private = "file")
 ensure_standard_streams :: proc() {
 	if standard_input != nil {

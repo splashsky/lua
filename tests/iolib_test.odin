@@ -47,6 +47,12 @@ io_eval :: proc(t: ^testing.T, L: ^lua.Lua_State, src: string) -> string {
 IO_PREAMBLE :: "local TMP = os.getenv('TEMP') or os.getenv('TMP') or '.'\n" +
 	"local function tmppath(nm) return TMP .. '/luaio_' .. nm end\n"
 
+POPEN_FAIL_COMMAND :: "'exit /b 7'" when ODIN_OS == .Windows else "'exit 7'"
+POPEN_MULTI_COMMAND :: "'(echo one& echo two& echo three)'" when ODIN_OS == .Windows else
+	"\"printf 'one\\\\ntwo\\\\nthree\\\\n'\""
+POPEN_WRITE_COMMAND :: "'sort > ' .. path" when ODIN_OS == .Windows else
+	"'cat > \"' .. path .. '\"'"
+
 @(test)
 io_write_read_all :: proc(t: ^testing.T) {
 	L := io_state()
@@ -224,4 +230,57 @@ io_tmpfile_roundtrip :: proc(t: ^testing.T) {
 		"end\n" +
 		"return 'ok'"
 	testing.expect(t, io_eval(t, L, src) == "ok", "io.tmpfile round-trip or failure contract")
+}
+
+@(test)
+io_popen_read_and_status :: proc(t: ^testing.T) {
+	when ODIN_OS == .Windows || ODIN_OS == .Linux {
+		L := io_state()
+		defer lua.close_state(L)
+		src :=
+			"local f = assert(io.popen('echo hello'))\n" +
+			"assert(f:read('a') == 'hello\\n')\n" +
+			"local ok, why, code = f:close()\n" +
+			"assert(ok == true and why == 'exit' and code == 0)\n" +
+			"local command = " + POPEN_FAIL_COMMAND + "\n" +
+			"local g = assert(io.popen(command))\n" +
+			"assert(g:read('a') == '')\n" +
+			"ok, why, code = g:close()\n" +
+			"assert(ok == nil and why == 'exit' and code == 7)\n" +
+			"local h = assert(io.popen(" + POPEN_MULTI_COMMAND + "))\n" +
+			"assert(h:read('a') == 'one\\ntwo\\nthree\\n')\n" +
+			"assert(h:read(1) == nil)\n" +
+			"assert(h:close())\n" +
+			"return 'ok'"
+		testing.expect(t, io_eval(t, L, src) == "ok", "io.popen reads through EOF and reports child status")
+	}
+}
+
+@(test)
+io_popen_write_and_mode_validation :: proc(t: ^testing.T) {
+	when ODIN_OS == .Windows || ODIN_OS == .Linux {
+		L := io_state()
+		defer lua.close_state(L)
+		src :=
+			IO_PREAMBLE +
+			"local path = tmppath('popen_write.tmp')\n" +
+			"local command = " + POPEN_WRITE_COMMAND + "\n" +
+			"local f = assert(io.popen(command, 'w'))\n" +
+			"assert(f:write('alpha\\nbeta\\n') == f)\n" +
+			"local ok, why, code = f:close()\n" +
+			"assert(ok == true and why == 'exit' and code == 0)\n" +
+			"local g = assert(io.open(path, 'r'))\n" +
+			"assert(g:read('a') == 'alpha\\nbeta\\n')\n" +
+			"g:close(); os.remove(path)\n" +
+			"local good, msg = pcall(io.popen, 'echo no', 'r+')\n" +
+			"assert(not good)\n" +
+			"return msg"
+		actual := io_eval(t, L, src)
+		testing.expectf(
+			t,
+			actual == "bad argument #2 to '?' (invalid mode)",
+			"io.popen writes stdin and validates modes; got %q",
+			actual,
+		)
+	}
 }

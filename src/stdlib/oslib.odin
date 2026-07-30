@@ -24,6 +24,7 @@ import "core:time"
 import win32 "core:sys/windows"
 import host "luao:host"
 import lua "luao:lua"
+import shellproc "luao:shellproc"
 
 when ODIN_OS == .Windows {
 	foreign import oslib_kernel32 "system:Kernel32.lib"
@@ -653,11 +654,11 @@ os_execute :: proc "c" (Lp: rawptr) -> i32 {
 	if err != nil {
 		return luaL_execresult(L, -1, err)
 	}
-	ps, wait_err := os.process_wait(p)
-	if wait_err != nil {
-		return luaL_execresult(L, -1, wait_err)
+	result := shellproc.wait_process(p)
+	if result.err != nil {
+		return luaL_execresult(L, -1, result.err)
 	}
-	return luaL_execresult(L, i32(ps.exit_code))
+	return luaL_execresult(L, result.code, nil, result.signaled)
 }
 
 @(private = "file")
