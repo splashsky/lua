@@ -111,6 +111,21 @@ Kept deliberately small and always documented:
   remains `nil, message, code`.
 - **Local time on targets without an Odin OS time-zone bridge** falls back to
   UTC. Windows uses the configured OS time zone and its DST transition rules.
+- **Transcendental functions may differ from the platform's libm in the last
+  bit.** `sin`, `cos`, `tan`, `exp` and `pow` are our own pure-Odin
+  implementations, checked against reference over 91,606 evaluations at a
+  worst case of 1 ulp. Platform libm implementations differ from each other by
+  about as much, and the PUC-Rio `math.lua` suite passes either way; the numbers
+  that Lua programs actually round-trip -- `tostring`, `%q`, `string.format` --
+  are byte-identical to reference.
+- **`io.popen` is not available** (no pipe-to-process facility without a C
+  runtime). Reference Lua permits this to fail, and it reports as much.
+
+Two more, inherited from the platform rather than from our own choices:
+`files.lua` in the PUC-Rio suite stops on Windows at its `/dev/null` test, since
+that Unix device does not exist there and reference Lua fails identically; and
+the `T` internal C test library the suite optionally uses is absent, which the
+suite itself handles. Both are covered in `tests/puc/README.md`.
 
 ## License
 
