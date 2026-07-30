@@ -459,7 +459,7 @@ pushline :: proc(L: ^lua.Lua_State, firstline: bool) -> bool {
 	aux.lua_writestring(prmt)
 	stream.flush(stream.stdout())
 
-	n, editor_eof, edited := lineedit.read_line(prmt, buffer[:], repl_history[:])
+	n, editor_eof, edited := lineedit.read_line(L, prmt, buffer[:], repl_history[:])
 	if edited {
 		lua.lua_pop(L, 1)
 		if editor_eof {
