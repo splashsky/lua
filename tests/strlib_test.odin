@@ -167,6 +167,25 @@ str_format_numbers :: proc(t: ^testing.T) {
 		"assert(string.format('%c%c', 72, 105) == 'Hi')\n" +
 		"assert(string.format('%.2f', 3.14159) == '3.14')\n" +
 		"assert(string.format('%g', 0.5) == '0.5')\n" +
+		// Reference Lua's bare hexadecimal floats use the shortest exact
+		// mantissa, normalize subnormals, and uppercase the whole spelling for %A.
+		"assert(string.format('%a', 1.5) == '0x1.8p+0')\n" +
+		"assert(string.format('%a', 1.0) == '0x1p+0')\n" +
+		"assert(string.format('%a', 0.0) == '0x0p+0')\n" +
+		"assert(string.format('%a', -0.0) == '-0x0p+0')\n" +
+		"assert(string.format('%a', 2^-1074) == '0x1p-1074')\n" +
+		"assert(string.format('%a', 2^1023) == '0x1p+1023')\n" +
+		"assert(string.format('%a', 0.1) == '0x1.999999999999ap-4')\n" +
+		"assert(string.format('%A', 1.5) == '0X1.8P+0')\n" +
+		"assert(string.format('%A', 1/0) == 'INF')\n" +
+		"assert(string.format('%a', -1/0) == '-inf')\n" +
+		"assert(string.format('%A', -(0/0)) == 'NAN')\n" +
+		// `%a`/`%A` modifiers are intentionally unavailable in PUC Lua.
+		"local expected = \"modifiers for format '%a'/'%A' not implemented\"\n" +
+		"for _, f in ipairs{'%5.2a', '%-10a', '%#a', '%5.2A', '%-10A', '%#A'} do\n" +
+		"  local ok, err = pcall(string.format, f, 1.5)\n" +
+		"  assert(not ok and err:sub(-#expected) == expected)\n" +
+		"end\n" +
 		"assert(string.format('%d and %s', 1, 'two') == '1 and two')\n" +
 		// %% is a literal percent
 		"assert(string.format('100%%') == '100%')\n" +

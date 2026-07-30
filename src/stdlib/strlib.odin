@@ -22,9 +22,12 @@ package stdlib
 //      (pattern-byte / subject-byte) that return 0 exactly at `len`, and never index
 //      out of range.
 //
-//   2. The hexadecimal float form used by `%q` is built directly from IEEE-754
-//      bits in lua.number_to_hex_str. The general printf engine's `%a`/`%A`
-//      conversions remain part of the separate formatting work.
+//   2. Numeric formatting is freestanding too. Reference Lua delegates
+//      string.format to C's sprintf, so seemingly cosmetic details (where zero
+//      padding goes, whether `%#g` keeps a radix point, exponent width, and
+//      halfway rounding) are observable language behaviour. The engine below
+//      parses Lua's deliberately small printf grammar and reproduces those bytes
+//      without constructing or executing a C varargs call.
 //
 // Locale note: the pattern classes (`%a`, `%d`, ...) and the ctype used by quoting
 // go through Lua's explicit C-locale byte predicates. This deliberately keeps
@@ -34,7 +37,6 @@ package stdlib
 
 import "base:runtime"
 import "core:c"
-import "core:c/libc"
 import "core:math"
 import lua "luao:lua"
 
@@ -1221,10 +1223,6 @@ FMTFLAGS_I :: "-+0 " // d i
 FMTFLAGS_U :: "-0" // u
 @(private = "file")
 FMTFLAGS_C :: "-" // c p s
-// Length modifier appended before the specifier for integer conversions. lua_Integer
-// is a 64-bit `long long`, so "ll". lua_Number is `double`, which needs no modifier.
-@(private = "file")
-INTEGER_FRMLEN :: "ll"
 // The span of flag/width/precision characters getformat is allowed to copy.
 @(private = "file")
 FMT_SPAN :: "-+#0 123456789."
@@ -1296,23 +1294,6 @@ checkformat :: proc(L: ^lua.Lua_State, form: []u8, flags: string, precision: boo
 	if !lua.is_alpha(int(form[spec])) {
 		luaL_error(L, "invalid conversion specification: '%s'", string(form[:c_strlen(form)]))
 	}
-}
-
-// Insert length modifier `lenmod` just before the specifier in `form`.
-@(private = "file")
-addlenmod :: proc(form: []u8, lenmod: string) {
-	lm := transmute([]u8)lenmod
-	l := c_strlen(form)
-	spec := form[l - 1]
-	copy(form[l - 1:], lm)
-	form[l - 1 + len(lm)] = spec
-	form[l + len(lm)] = 0
-}
-
-// Build a cstring view of a NUL-terminated form/byte buffer.
-@(private = "file")
-form_cstr :: #force_inline proc "contextless" (form: []u8) -> cstring {
-	return cstring(raw_data(form))
 }
 
 // -- %q literal serialisation ----------------------------------------------
@@ -1400,6 +1381,416 @@ literal_integer :: proc "contextless" (buf: []u8, n: lua.Integer) -> int {
 	return out
 }
 
+// Lua accepts a compact, positional-free subset of printf: flags, a decimal
+// width, an optional ".precision", then one conversion byte. checkformat above
+// remains the authority for rejecting malformed specifications; this parser runs
+// only afterwards and therefore does not need an error path of its own.
+@(private = "file")
+Format_Options :: struct {
+	left:          bool,
+	plus:          bool,
+	space:         bool,
+	alternate:     bool,
+	zero:          bool,
+	width:         int,
+	has_precision: bool,
+	precision:     int,
+	spec:          u8,
+}
+
+@(private = "file")
+parse_format_options :: proc "contextless" (form: []u8) -> Format_Options {
+	o: Format_Options
+	i := 1
+	flags: for {
+		switch form[i] {
+		case '-': o.left = true
+		case '+': o.plus = true
+		case ' ': o.space = true
+		case '#': o.alternate = true
+		case '0': o.zero = true
+		case: break flags
+		}
+		i += 1
+	}
+	for is_digit_byte(form[i]) {
+		o.width = o.width * 10 + int(form[i] - '0')
+		i += 1
+	}
+	if form[i] == '.' {
+		o.has_precision = true
+		i += 1
+		for is_digit_byte(form[i]) {
+			o.precision = o.precision * 10 + int(form[i] - '0')
+			i += 1
+		}
+	}
+	o.spec = form[i]
+	return o
+}
+
+@(private = "file")
+put_repeat :: proc "contextless" (buf: []u8, at: ^int, c: u8, count: int) {
+	for _ in 0 ..< count {
+		buf[at^] = c
+		at^ += 1
+	}
+}
+
+// Apply printf's field width around a fully-rendered item. Numeric callers pass
+// the sign/prefix separately because zero padding belongs after `-`/`+`/space and
+// after `0x`, never before them. Strings and characters simply use an empty
+// prefix and disable zero padding.
+@(private = "file")
+assemble_field :: proc "contextless" (
+	buf: []u8,
+	o: Format_Options,
+	prefix, body: []u8,
+	allow_zero: bool,
+) -> int {
+	total := len(prefix) + len(body)
+	padding := max(o.width - total, 0)
+	zero_pad := allow_zero && o.zero && !o.left
+	out := 0
+	if !o.left && !zero_pad {
+		put_repeat(buf, &out, ' ', padding)
+	}
+	out += copy(buf[out:], prefix)
+	if zero_pad {
+		put_repeat(buf, &out, '0', padding)
+	}
+	out += copy(buf[out:], body)
+	if o.left {
+		put_repeat(buf, &out, ' ', padding)
+	}
+	return out
+}
+
+@(private = "file")
+format_integer :: proc "contextless" (
+	buf: []u8,
+	form: []u8,
+	n: lua.Integer,
+) -> int {
+	o := parse_format_options(form)
+	base: u64 = 10
+	uppercase := false
+	signed := o.spec == 'd' || o.spec == 'i'
+	switch o.spec {
+	case 'o': base = 8
+	case 'x': base = 16
+	case 'X':
+		base = 16
+		uppercase = true
+	}
+
+	negative := signed && n < 0
+	value := u64(n)
+	if negative {
+		value = 0 - value // magnitude in unsigned space, including MIN_INTEGER
+	}
+	nonzero := value != 0
+	digits_table := uppercase ? "0123456789ABCDEF" : "0123456789abcdef"
+	tmp: [64]u8
+	pos := len(tmp)
+	if value != 0 {
+		for value != 0 {
+			pos -= 1
+			tmp[pos] = digits_table[int(value % base)]
+			value /= base
+		}
+	} else if !(o.has_precision && o.precision == 0) {
+		pos -= 1
+		tmp[pos] = '0'
+	}
+
+	// Integer precision supplies leading zeroes and, per C, suppresses the `0`
+	// flag. Alternate octal is special: it guarantees that the first digit is
+	// zero, including the otherwise-empty "%.0o" representation.
+	digit_count := len(tmp) - pos
+	precision_zeroes := o.has_precision ? max(o.precision - digit_count, 0) : 0
+	if o.spec == 'o' && o.alternate &&
+	   (digit_count == 0 || tmp[pos] != '0') && precision_zeroes == 0 {
+		precision_zeroes = 1
+	}
+
+	prefix: [3]u8
+	prefix_len := 0
+	if signed {
+		if negative {
+			prefix[prefix_len] = '-'
+			prefix_len += 1
+		} else if o.plus {
+			prefix[prefix_len] = '+'
+			prefix_len += 1
+		} else if o.space {
+			prefix[prefix_len] = ' '
+			prefix_len += 1
+		}
+	} else if o.alternate && nonzero &&
+	          (o.spec == 'x' || o.spec == 'X') {
+		prefix[prefix_len] = '0'
+		prefix[prefix_len + 1] = o.spec
+		prefix_len += 2
+	}
+
+	body: [128]u8
+	body_len := 0
+	put_repeat(body[:], &body_len, '0', precision_zeroes)
+	body_len += copy(body[body_len:], tmp[pos:])
+	if o.has_precision {
+		o.zero = false
+	}
+	return assemble_field(buf, o, prefix[:prefix_len], body[:body_len], true)
+}
+
+@(private = "file")
+format_char :: proc "contextless" (buf, form: []u8, n: lua.Integer) -> int {
+	o := parse_format_options(form)
+	body := [1]u8{u8(n)}
+	return assemble_field(buf, o, nil, body[:], false)
+}
+
+@(private = "file")
+format_string :: proc "contextless" (buf, form, s: []u8) -> int {
+	o := parse_format_options(form)
+	n := len(s)
+	if o.has_precision {
+		n = min(n, o.precision)
+	}
+	return assemble_field(buf, o, nil, s[:n], false)
+}
+
+// Add the decimal point and insignificant zeroes required by `#` on `%g`.
+// strconv intentionally emits the ordinary `%g` spelling with trailing zeroes
+// removed, so this is the small compatibility layer which turns (say) 1.5 into
+// "1.50000" at precision six while leaving the exponent untouched.
+@(private = "file")
+alternate_g :: proc "contextless" (buf: []u8, n: int, precision: int) -> int {
+	length := n
+	exp_at := length
+	dot_at := -1
+	digits := 0
+	for i in 0 ..< length {
+		c := buf[i]
+		if c == 'e' || c == 'E' {
+			exp_at = i
+			break
+		}
+		if c == '.' {
+			dot_at = i
+		} else if is_digit_byte(c) {
+			digits += 1
+		}
+	}
+	need := max(precision - digits, 0)
+	if dot_at < 0 {
+		copy(buf[exp_at + 1:], buf[exp_at:length])
+		buf[exp_at] = '.'
+		exp_at += 1
+		length += 1
+	}
+	if need > 0 {
+		copy(buf[exp_at + need:], buf[exp_at:length])
+		for i in 0 ..< need {
+			buf[exp_at + i] = '0'
+		}
+		length += need
+	}
+	return length
+}
+
+@(private = "file")
+uppercase_ascii :: proc "contextless" (buf: []u8) {
+	for &c in buf {
+		if 'a' <= c && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+	}
+}
+
+// Render the magnitude of a finite hexadecimal float in exactly the compact form
+// used by the reference's num2straux fallback. In particular, bare `%a` is not
+// the same thing as asking a C printf for thirteen hexadecimal fraction digits:
+// we deliberately remove trailing zero nibbles and omit the radix point when no
+// fraction remains. Keeping that rule here also makes `%a` agree with the exact
+// finite-number spelling already used by `%q`, without changing `%q` itself.
+//
+// Subnormals are normalized too, so the least one is `0x1p-1074`, while zero is
+// `0x0p+0`. The caller handles the sign and non-finite values.
+@(private = "file")
+format_hex_float_magnitude :: proc "contextless" (
+	buf: []u8,
+	x: lua.Number,
+	upper: bool,
+) -> int {
+	bits := transmute(u64)x
+	exp_field := int((bits >> 52) & 0x7ff)
+	frac := bits & 0x000f_ffff_ffff_ffff
+	exponent := 0
+	sig := u64(0)
+	if exp_field == 0 {
+		if frac == 0 {
+			sig = 0
+		} else {
+			highest := 0
+			for v := frac; v > 1; v >>= 1 {
+				highest += 1
+			}
+			exponent = highest - 1074
+			sig = frac << uint(52 - highest)
+		}
+	} else {
+		exponent = exp_field - 1023
+		sig = (u64(1) << 52) | frac
+	}
+
+	precision := 13
+	trim := sig
+	for precision > 0 && (trim & 15) == 0 {
+		trim >>= 4
+		precision -= 1
+	}
+
+	digits := upper ? "0123456789ABCDEF" : "0123456789abcdef"
+	out := 0
+	buf[out] = '0'
+	buf[out + 1] = upper ? 'X' : 'x'
+	out += 2
+	buf[out] = digits[int(sig >> 52)]
+	out += 1
+	if precision > 0 {
+		buf[out] = '.'
+		out += 1
+	}
+	for i in 0 ..< precision {
+		nibble := 0
+		if i < 13 {
+			nibble = int((sig >> uint(48 - i * 4)) & 15)
+		}
+		buf[out] = digits[nibble]
+		out += 1
+	}
+	buf[out] = upper ? 'P' : 'p'
+	out += 1
+	if exponent < 0 {
+		buf[out] = '-'
+		exponent = -exponent
+	} else {
+		buf[out] = '+'
+	}
+	out += 1
+	tmp: [4]u8
+	pos := len(tmp)
+	for {
+		pos -= 1
+		tmp[pos] = '0' + u8(exponent % 10)
+		exponent /= 10
+		if exponent == 0 {break}
+	}
+	out += copy(buf[out:], tmp[pos:])
+	return out
+}
+
+@(private = "file")
+format_float :: proc "contextless" (
+	buf: []u8,
+	form: []u8,
+	x: lua.Number,
+) -> int {
+	o := parse_format_options(form)
+	bits := transmute(u64)x
+	negative := bits >> 63 != 0
+	exp_field := (bits >> 52) & 0x7ff
+	frac := bits & 0x000f_ffff_ffff_ffff
+	special := exp_field == 0x7ff
+	special_radix_wart := special && o.alternate && o.has_precision &&
+	                     o.precision == 0 &&
+	                     (o.spec == 'f' || o.spec == 'F' ||
+	                      o.spec == 'e' || o.spec == 'E')
+
+	body: [MAX_ITEMF]u8
+	body_len := 0
+	if special {
+		if frac == 0 {
+			body_len = copy(body[:], "inf")
+		} else {
+			body_len = copy(body[:], negative ? "nan(ind)" : "nan")
+		}
+		if o.spec == 'F' || o.spec == 'E' || o.spec == 'G' || o.spec == 'A' {
+			uppercase_ascii(body[:body_len])
+		}
+		// This odd placement is an MSVC compatibility wart. Its alternate
+		// precision-zero f/e path inserts the radix into non-finite spellings too.
+		if special_radix_wart {
+			at := negative ? 0 : 1
+			copy(body[at + 1:], body[at:body_len])
+			body[at] = '.'
+			body_len += 1
+		}
+	} else if o.spec == 'a' || o.spec == 'A' {
+		body_len = format_hex_float_magnitude(
+			body[:],
+			x,
+			o.spec == 'A',
+		)
+	} else {
+		precision := o.has_precision ? o.precision : 6
+		fmt := o.spec
+		body_len = lua.format_float_decimal(body[:], x, fmt, precision)
+		// strconv returns a sign for every finite number. Width assembly owns it.
+		if body_len > 0 && (body[0] == '+' || body[0] == '-') {
+			copy(body[:], body[1:body_len])
+			body_len -= 1
+		}
+		if o.alternate {
+			if o.spec == 'g' || o.spec == 'G' {
+				p := precision == 0 ? 1 : precision
+				body_len = alternate_g(body[:], body_len, p)
+			} else if precision == 0 {
+				exp_at := body_len
+				for k in 0 ..< body_len {
+					if body[k] == 'e' || body[k] == 'E' {
+						exp_at = k
+						break
+					}
+				}
+				copy(body[exp_at + 1:], body[exp_at:body_len])
+				body[exp_at] = '.'
+				body_len += 1
+			}
+		}
+	}
+
+	prefix: [3]u8
+	prefix_len := 0
+	if negative {
+		prefix[0] = '-'
+		prefix_len = 1
+	} else if o.plus {
+		prefix[0] = '+'
+		prefix_len = 1
+	} else if o.space {
+		prefix[0] = ' '
+		prefix_len = 1
+	}
+	if !special && (o.spec == 'a' || o.spec == 'A') {
+		prefix[prefix_len] = body[0]
+		prefix[prefix_len + 1] = body[1]
+		prefix_len += 2
+		copy(body[:], body[2:body_len])
+		body_len -= 2
+	}
+	// MSVC pads inf/nan with spaces even when the `0` flag is present.
+	return assemble_field(
+		buf,
+		o,
+		prefix[:prefix_len],
+		body[:body_len],
+		!special || (special_radix_wart && negative),
+	)
+}
+
 @(private = "file")
 format_pointer :: proc "contextless" (buf, form: []u8, p: rawptr) -> int {
 	i := 1
@@ -1484,7 +1875,6 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 		form: [MAX_FORMAT]u8
 		maxitem: uint = MAX_ITEM
 		buff := luaL_prepbuffsize(&b, maxitem)
-		cbuf := cast([^]libc.char)buff
 		nb := 0
 		arg += 1
 		if arg > top {
@@ -1496,35 +1886,39 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 		switch spec {
 		case 'c':
 			checkformat(L, form[:], FMTFLAGS_C, false)
-			nb = int(libc.snprintf(cbuf, maxitem, form_cstr(form[:]), i32(luaL_checkinteger(L, arg))))
+			nb = format_char(buff[:maxitem], form[:], luaL_checkinteger(L, arg))
 		case 'd', 'i':
 			n := luaL_checkinteger(L, arg)
 			checkformat(L, form[:], FMTFLAGS_I, true)
-			addlenmod(form[:], INTEGER_FRMLEN)
-			nb = int(libc.snprintf(cbuf, maxitem, form_cstr(form[:]), i64(n)))
+			nb = format_integer(buff[:maxitem], form[:], n)
 		case 'u':
 			n := luaL_checkinteger(L, arg)
 			checkformat(L, form[:], FMTFLAGS_U, true)
-			addlenmod(form[:], INTEGER_FRMLEN)
-			nb = int(libc.snprintf(cbuf, maxitem, form_cstr(form[:]), i64(n)))
+			nb = format_integer(buff[:maxitem], form[:], n)
 		case 'o', 'x', 'X':
 			n := luaL_checkinteger(L, arg)
 			checkformat(L, form[:], FMTFLAGS_X, true)
-			addlenmod(form[:], INTEGER_FRMLEN)
-			nb = int(libc.snprintf(cbuf, maxitem, form_cstr(form[:]), i64(n)))
+			nb = format_integer(buff[:maxitem], form[:], n)
 		case 'a', 'A':
 			checkformat(L, form[:], FMTFLAGS_F, true)
-			// lua_Number is double; LUA_NUMBER_FRMLEN is empty, so no addlenmod.
-			nb = int(libc.snprintf(cbuf, maxitem, form_cstr(form[:]), f64(luaL_checknumber(L, arg))))
+			// PUC Lua's lua_number2strx accepts only the literal forms `%a` and
+			// `%A`: after validation, anything between '%' and the conversion
+			// byte raises this exact error. It may look tempting to support normal
+			// printf flags, widths, or precisions here, but reference Lua
+			// deliberately rejects every such modifier, so byte-faithful behavior
+			// requires us to reject them too.
+			if form[1] != spec {
+				luaL_error(L, "modifiers for format '%%a'/'%%A' not implemented")
+			}
+			nb = format_float(buff[:maxitem], form[:], luaL_checknumber(L, arg))
 		case 'f':
 			maxitem = MAX_ITEMF // %f may need a lot of room
 			buff = luaL_prepbuffsize(&b, maxitem)
-			cbuf = cast([^]libc.char)buff
 			fallthrough
 		case 'e', 'E', 'g', 'G':
 			n := luaL_checknumber(L, arg)
 			checkformat(L, form[:], FMTFLAGS_F, true)
-			nb = int(libc.snprintf(cbuf, maxitem, form_cstr(form[:]), f64(n)))
+			nb = format_float(buff[:maxitem], form[:], n)
 		case 'p':
 			pptr := lua.lua_topointer(L, arg)
 			checkformat(L, form[:], FMTFLAGS_C, false)
@@ -1552,7 +1946,7 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 				if !has_dot && len(ss) >= 100 {
 					luaL_addvalue(&b) // too long and no precision: keep whole string
 				} else {
-					nb = int(libc.snprintf(cbuf, maxitem, form_cstr(form[:]), cstring(raw_data(sbytes))))
+					nb = format_string(buff[:maxitem], form[:], sbytes)
 					lua.lua_pop(L, 1) // drop the luaL_tolstring result
 				}
 			}

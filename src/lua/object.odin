@@ -1260,10 +1260,23 @@ number_to_hex_str :: proc "contextless" (buf: []byte, x: Number) -> int {
 // scientific exponents contain a sign and at least two digits. Odin's strconv
 // decimal engine implements those rules and exact halfway rounding; unlike its
 // public spelling we remove the leading '+' required by that API.
+// Format one finite binary64 value with Odin's correctly-rounded big-decimal
+// engine. The returned spelling deliberately retains the leading sign which
+// strconv emits for positive values; callers implementing printf need that sign
+// in order to apply '+', space, and zero padding in the right order.
+format_float_decimal :: proc "contextless" (
+	buf: []byte,
+	x: Number,
+	fmt: byte,
+	precision: int,
+) -> int {
+	context = runtime.default_context()
+	return len(strconv.generic_ftoa(buf, f64(x), fmt, precision, 64))
+}
+
 @(private = "file")
 format_g :: proc "contextless" (buf: []byte, x: Number, precision: int) -> int {
-	context = runtime.default_context()
-	text := strconv.generic_ftoa(buf, f64(x), 'g', precision, 64)
+	text := buf[:format_float_decimal(buf, x, 'g', precision)]
 	if len(text) > 0 && text[0] == '+' {
 		copy(buf, text[1:])
 		return len(text) - 1
