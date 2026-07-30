@@ -22,11 +22,9 @@ package stdlib
 //      (pattern-byte / subject-byte) that return 0 exactly at `len`, and never index
 //      out of range.
 //
-//   2. `%a`/`%A` and the hexadecimal float form used by `%q` are routed straight
-//      through `libc.snprintf`'s `"%a"` conversion. Reference Lua only hand-rolls a
-//      `frexp`-based formatter for the ancient C89 fallback; every modern build uses
-//      the C99 `%a` in libc, so that is what we do too. It is both simpler and more
-//      faithful to the platform we actually run on.
+//   2. The hexadecimal float form used by `%q` is built directly from IEEE-754
+//      bits in lua.number_to_hex_str. The general printf engine's `%a`/`%A`
+//      conversions remain part of the separate formatting work.
 //
 // Locale note: the pattern classes (`%a`, `%d`, ...) and the ctype used by quoting
 // go through Lua's explicit C-locale byte predicates. This deliberately keeps
@@ -1332,12 +1330,27 @@ addquoted :: proc(b: ^Buffer, s: []u8) {
 			// A following digit forces three-digit escaping so it can't merge with
 			// the control-code escape (reference reads the *next* byte, or the NUL).
 			nxt := (i + 1 < len(s)) ? s[i + 1] : 0
+			n := 0
+			buf[n] = '\\'
+			n += 1
 			if !lua.is_digit(int(nxt)) {
-				libc.snprintf(cast([^]libc.char)&buf[0], 10, "\\%d", i32(c))
+				if c >= 100 {
+					buf[n] = '0' + c / 100
+					n += 1
+				}
+				if c >= 10 {
+					buf[n] = '0' + (c / 10) % 10
+					n += 1
+				}
+				buf[n] = '0' + c % 10
+				n += 1
 			} else {
-				libc.snprintf(cast([^]libc.char)&buf[0], 10, "\\%03d", i32(c))
+				buf[n] = '0' + c / 100
+				buf[n + 1] = '0' + (c / 10) % 10
+				buf[n + 2] = '0' + c % 10
+				n += 3
 			}
-			luaL_addstring(b, string(cstring(&buf[0])))
+			luaL_addlstring(b, buf[:n])
 		} else {
 			luaL_addchar(b, c)
 		}
@@ -1346,35 +1359,80 @@ addquoted :: proc(b: ^Buffer, s: []u8) {
 }
 
 // Serialise a float so Lua can read it back exactly. inf/-inf/NaN have no numeral,
-// so we spell them; finite values use the C99 hex form via libc's `%a`. Because
-// `%q` output must be valid *Lua source* (which always spells the radix as '.'),
-// we mirror reference `quotefloat`: if a comma-radix locale made snprintf emit its
-// own decimal point, rewrite that point back to a '.' so the literal re-parses.
+// so we spell them; finite values use an exact C99 hexadecimal form assembled
+// from their binary64 fields. The radix is always '.', matching our documented
+// freestanding C-locale behavior.
 @(private = "file")
-quotefloat :: proc(L: ^lua.Lua_State, buff: [^]u8, n: lua.Number) -> int {
-	cbuf := cast([^]libc.char)buff
+quotefloat :: proc(buff: [^]u8, n: lua.Number) -> int {
 	if n == lua.Number(math.inf_f64(1)) {
-		return int(libc.snprintf(cbuf, MAX_ITEM, "%s", cstring("1e9999")))
+		return copy(buff[:MAX_ITEM], "1e9999")
 	} else if n == lua.Number(math.inf_f64(-1)) {
-		return int(libc.snprintf(cbuf, MAX_ITEM, "%s", cstring("-1e9999")))
+		return copy(buff[:MAX_ITEM], "-1e9999")
 	} else if n != n {
-		return int(libc.snprintf(cbuf, MAX_ITEM, "%s", cstring("(0/0)")))
+		return copy(buff[:MAX_ITEM], "(0/0)")
 	}
-	nb := int(libc.snprintf(cbuf, MAX_ITEM, "%a", f64(n)))
-	// Ensure the rendered literal uses '.' as its radix character.
-	has_dot := false
-	for i in 0 ..< nb {
-		if buff[i] == '.' {has_dot = true; break}
+	return lua.number_to_hex_str(buff[:MAX_ITEM], n)
+}
+
+@(private = "file")
+literal_integer :: proc "contextless" (buf: []u8, n: lua.Integer) -> int {
+	if n == lua.MIN_INTEGER {
+		buf[0] = '0'
+		buf[1] = 'x'
+		return 2 + lua.unsigned_to_hex_str(buf[2:], u64(n))
 	}
-	if !has_dot {
-		point := lua.lua_getlocaledecpoint()
-		if point != '.' {
-			for i in 0 ..< nb {
-				if buff[i] == point {buff[i] = '.'; break}
-			}
+	neg := n < 0
+	mag := neg ? u64(0 - u64(n)) : u64(n)
+	tmp: [20]u8
+	pos := len(tmp)
+	for {
+		pos -= 1
+		tmp[pos] = '0' + byte(mag % 10)
+		mag /= 10
+		if mag == 0 {break}
+	}
+	out := 0
+	if neg {
+		buf[out] = '-'
+		out += 1
+	}
+	out += copy(buf[out:], tmp[pos:])
+	return out
+}
+
+@(private = "file")
+format_pointer :: proc "contextless" (buf, form: []u8, p: rawptr) -> int {
+	i := 1
+	left := form[i] == '-'
+	if left {i += 1}
+	width := 0
+	for lua.is_digit(int(form[i])) {
+		width = width * 10 + int(form[i] - '0')
+		i += 1
+	}
+	value: [32]u8
+	n := 0
+	if p == nil {
+		n = copy(value[:], "(null)")
+	} else {
+		n = lua.pointer_to_str(value[:], p)
+	}
+	padding := max(width - n, 0)
+	out := 0
+	if !left {
+		for _ in 0..<padding {
+			buf[out] = ' '
+			out += 1
 		}
 	}
-	return nb
+	out += copy(buf[out:], value[:n])
+	if left {
+		for _ in 0..<padding {
+			buf[out] = ' '
+			out += 1
+		}
+	}
+	return out
 }
 
 @(private = "file")
@@ -1385,19 +1443,11 @@ addliteral :: proc(L: ^lua.Lua_State, b: ^Buffer, arg: int) {
 		addquoted(b, transmute([]u8)s)
 	case lua.LUA_TNUMBER:
 		buff := luaL_prepbuffsize(b, MAX_ITEM)
-		cbuf := cast([^]libc.char)buff
 		nb := 0
 		if !lua.lua_isinteger(L, arg) {
-			nb = quotefloat(L, buff, lua.lua_tonumber(L, arg))
+			nb = quotefloat(buff, lua.lua_tonumber(L, arg))
 		} else {
-			nv := lua.lua_tointeger(L, arg)
-			if nv == lua.MIN_INTEGER {
-				// The most-negative integer has no safe decimal form (its negation
-				// overflows), so emit the exact two's-complement hex pattern.
-				nb = int(libc.snprintf(cbuf, MAX_ITEM, "0x%llx", u64(nv)))
-			} else {
-				nb = int(libc.snprintf(cbuf, MAX_ITEM, "%lld", i64(nv)))
-			}
+			nb = literal_integer(buff[:MAX_ITEM], lua.lua_tointeger(L, arg))
 		}
 		luaL_addsize(b, uint(nb))
 	case lua.LUA_TNIL, lua.LUA_TBOOLEAN:
@@ -1478,13 +1528,7 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 		case 'p':
 			pptr := lua.lua_topointer(L, arg)
 			checkformat(L, form[:], FMTFLAGS_C, false)
-			if pptr == nil {
-				// Avoid handing NULL to the C `%p`; format the word "(null)".
-				form[c_strlen(form[:]) - 1] = 's'
-				nb = int(libc.snprintf(cbuf, maxitem, form_cstr(form[:]), cstring("(null)")))
-			} else {
-				nb = int(libc.snprintf(cbuf, maxitem, form_cstr(form[:]), pptr))
-			}
+			nb = format_pointer(buff[:maxitem], form[:], pptr)
 		case 'q':
 			if form[2] != 0 {
 				luaL_error(L, "specifier '%%q' cannot have modifiers")

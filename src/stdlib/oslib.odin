@@ -342,6 +342,17 @@ os_setlocale :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	op := luaL_checkoption(L, 2, "all", locale_names)
+	if !lua.lua_isnoneornil(L, 1) && (op == 0 || op == 4) {
+		requested := luaL_checkstring(L, 1)
+		// Numeric conversion is freestanding and deliberately fixed to the C
+		// locale. Do not claim that a different LC_NUMERIC took effect while
+		// tonumber and numeric rendering continue to use '.', as that would
+		// expose an internally inconsistent locale to Lua code.
+		if requested != "C" && requested != "POSIX" {
+			lua.lua_pushnil(L)
+			return 1
+		}
+	}
 	// A missing/nil locale means "query", which maps to a NULL argument.
 	loc: cstring = nil
 	if !lua.lua_isnoneornil(L, 1) {

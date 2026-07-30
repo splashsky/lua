@@ -13,19 +13,16 @@ package lua
 // conversion, number->string formatting, float<->integer coercion, and the raw
 // arithmetic the compiler uses for constant folding.
 //
-// A deliberate, documented decision (correctness first): the float<->string
-// boundary defers to the platform C library via `core:c/libc` -- the very same
-// component reference Lua uses (luaconf.h formats floats with C `printf("%g")`
-// and parses them with `strtod`). This makes our results *byte-identical* to
-// reference Lua on the same platform instead of merely close. `core:c/libc` is
-// part of Odin's standard library, so this stays within "std-lib-only Odin". A
-// pure-Odin `%g` formatter can replace it later without changing any observable
-// behavior, validated against a differential corpus. Integer formatting and all
-// numeric *parsing* below are already pure Odin.
+// The float<->string boundary is pure Odin. Decimal conversion uses
+// `core:strconv`'s big-decimal fallback, which rounds halfway cases to even and
+// therefore covers the full binary64 range, including subnormals. We put a thin
+// Lua/C compatibility layer around it for the exact `%g` spelling rules.
 
 import "base:intrinsics"
-import "core:c/libc"
+import "base:runtime"
 import "core:math"
+import "core:strconv"
+import strconv_decimal "core:strconv/decimal"
 
 // ---------------------------------------------------------------------------
 // Type tags
@@ -783,14 +780,10 @@ hexavalue :: #force_inline proc "contextless" (c: byte) -> Byte {
 // String -> number
 // ---------------------------------------------------------------------------
 //
-// Locale note: reference Lua honors the current LC_NUMERIC decimal point when
-// parsing and formatting numbers. Parsing is now locale-aware here: the decimal
-// path defers to the C library's `strtod` (which reads the active locale radix)
-// and, mirroring reference `l_str2d`, retries a failed parse with any '.' rewritten
-// to `localeconv()->decimal_point` -- so `tonumber("3.4")` still works under a
-// comma-radix locale like pt_BR. Formatting likewise rides the C library's
-// snprintf in `number_to_str`, so it emits the locale radix too. In the default
-// "C" locale the point is '.', keeping the common case byte-identical.
+// Locale note: this freestanding conversion layer deliberately fixes the radix
+// character to '.'. Reference Lua can follow LC_NUMERIC through libc; without
+// libc there is no process locale to consult, so we consistently use the C
+// locale instead.
 
 // Try to parse `s` as an integer, faithful to reference Lua's `l_str2int`.
 // Accepts optional surrounding Lua-ASCII whitespace, an optional sign, and either
@@ -849,133 +842,209 @@ str_to_int :: proc "contextless" (s: []byte) -> (Integer, bool) {
 	return u2s(result), true
 }
 
-// Assemble a hexadecimal floating-point numeral (like "0x1.8p3"), a faithful port
-// of reference Lua's `lua_strx2number`. Returns the value, the index just past
-// what it consumed, and whether anything valid was found. Kept in pure Odin (no
-// platform strtod) so hex-float behavior doesn't vary by C library.
+// Parse a hexadecimal floating-point numeral without ever accumulating into a
+// float. We locate its highest set bit, then retain exactly the bits binary64 can
+// store plus a guard bit and a sticky "anything else was nonzero" bit. That is
+// enough information to perform IEEE-754 round-to-nearest, ties-to-even for
+// normals, subnormals, underflow, and carry into infinity.
 @(private = "file")
-strx_to_number :: proc "contextless" (s: []byte) -> (Number, int, bool) {
-	MAX_SIG_DIG :: 30
-
+strx_to_number :: proc(s: []byte) -> (Number, int, bool) {
 	n := len(s)
 	i := 0
 	for i < n && is_space(s[i]) {i += 1} 	// skip initial spaces
 
 	neg := false
-	if i < n && s[i] == '-' {
-		neg = true
-		i += 1
-	} else if i < n && s[i] == '+' {
+	if i < n && (s[i] == '-' || s[i] == '+') {
+		neg = s[i] == '-'
 		i += 1
 	}
 
-	// Require the '0x'/'0X' prefix.
 	if !(i + 1 < n && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
 		return 0, 0, false
 	}
 	i += 2
+	mant_start := i
 
-	dot := lua_getlocaledecpoint() // reference honors the locale radix in hex too
-
-	r: Number = 0.0 // mantissa accumulator
-	sigdig := 0 // significant digits read
-	nosigdig := 0 // leading zeros (non-significant)
-	e := 0 // power-of-two exponent correction
+	digits := 0
+	digits_before_dot := 0
+	first_nonzero := -1
+	first_value: byte
 	hasdot := false
-
 	for i < n {
 		c := s[i]
-		if c == dot {
+		if c == '.' {
 			if hasdot {break} 	// a second dot ends the numeral
 			hasdot = true
+			digits_before_dot = digits
 		} else if is_xdigit(c) {
-			if sigdig == 0 && c == '0' {
-				nosigdig += 1
-			} else {
-				sigdig += 1
-				if sigdig <= MAX_SIG_DIG {
-					r = r * 16.0 + Number(hexavalue(c))
-				} else {
-					e += 1 // too many digits: count for the exponent only
-				}
+			value := hexavalue(c)
+			if first_nonzero < 0 && value != 0 {
+				first_nonzero = digits
+				first_value = value
 			}
-			if hasdot {e -= 1} 	// a fractional digit lowers the exponent
+			digits += 1
 		} else {
 			break
 		}
 		i += 1
 	}
 
-	if nosigdig + sigdig == 0 {
+	if digits == 0 {
 		return 0, 0, false // no digits at all
 	}
+	if !hasdot {
+		digits_before_dot = digits
+	}
+	mant_end := i
 
-	end := i // valid up to here
-	e *= 4 // each hex digit is 4 binary places
-
-	// Optional binary exponent: 'p'/'P' then a signed decimal exponent.
+	explicit_exp := 0
 	if i < n && (s[i] == 'p' || s[i] == 'P') {
 		i += 1
-		eneg := false
-		if i < n && s[i] == '-' {
-			eneg = true
-			i += 1
-		} else if i < n && s[i] == '+' {
+		exp_neg := false
+		if i < n && (s[i] == '-' || s[i] == '+') {
+			exp_neg = s[i] == '-'
 			i += 1
 		}
 		if !(i < n && is_digit(s[i])) {
 			return 0, 0, false // 'p' must be followed by at least one digit
 		}
-		exp1 := 0
 		for i < n && is_digit(s[i]) {
-			exp1 = exp1 * 10 + int(s[i] - '0')
+			if explicit_exp < 100000 {
+				explicit_exp = explicit_exp * 10 + int(s[i] - '0')
+			}
 			i += 1
 		}
-		if eneg {exp1 = -exp1}
-		e += exp1
-		end = i
+		if exp_neg {explicit_exp = -explicit_exp}
 	}
 
-	if neg {r = -r}
-	return math.ldexp(r, int(i32(e))), end, true
+	sign_bit := neg ? (u64(1) << 63) : 0
+	if first_nonzero < 0 {
+		return transmute(Number)sign_bit, i, true
+	}
+
+	highest_bit := 0
+	for v := first_value; v > 1; v >>= 1 {
+		highest_bit += 1
+	}
+	top_exp := explicit_exp +
+		4 * (digits_before_dot - first_nonzero - 1) + highest_bit
+	target_exp := top_exp - 52
+	if target_exp < -1074 {
+		target_exp = -1074
+	}
+
+	mant: u64
+	guard := false
+	sticky := false
+	digit_index := 0
+	bit_exp := top_exp
+	started := false
+	for c in s[mant_start:mant_end] {
+		if !is_xdigit(c) {continue}
+		value := hexavalue(c)
+		if digit_index < first_nonzero {
+			digit_index += 1
+			continue
+		}
+		first_bit := 3
+		if !started {
+			first_bit = highest_bit
+			started = true
+		}
+		for bit := first_bit; bit >= 0; bit -= 1 {
+			set := value & (1 << uint(bit)) != 0
+			if bit_exp >= target_exp {
+				mant = (mant << 1) | u64(set ? 1 : 0)
+			} else if bit_exp == target_exp - 1 {
+				guard = set
+			} else if set {
+				sticky = true
+			}
+			bit_exp -= 1
+		}
+		digit_index += 1
+	}
+	if bit_exp >= target_exp {
+		mant <<= uint(bit_exp - target_exp + 1)
+		bit_exp = target_exp - 1
+	}
+
+	if guard && (sticky || mant & 1 != 0) {
+		mant += 1
+	}
+
+	if top_exp < -1022 {
+		if mant >= u64(1) << 52 {
+			return transmute(Number)(sign_bit | (u64(1) << 52)), i, true
+		}
+		return transmute(Number)(sign_bit | mant), i, true
+	}
+
+	if mant == u64(1) << 53 {
+		mant >>= 1
+		top_exp += 1
+	}
+	if top_exp > 1023 {
+		return transmute(Number)(sign_bit | 0x7ff0_0000_0000_0000), i, true
+	}
+	exp_field := u64(top_exp + 1023)
+	bits := sign_bit | (exp_field << 52) | (mant & 0x000f_ffff_ffff_ffff)
+	return transmute(Number)bits, i, true
 }
 
-// Return the current locale's decimal-point character (`localeconv()->decimal_point[0]`,
-// exactly reference Lua's `lua_getlocaledecpoint`). In the default "C" locale this is
-// '.'; under e.g. pt_BR it becomes ','. We fall back to '.' if the C library hands us
-// an empty or null string, so parsing never breaks on a degenerate locale.
+// The pure-Odin runtime has no libc locale. This is intentionally the C locale.
 lua_getlocaledecpoint :: proc "contextless" () -> byte {
-	lc := libc.localeconv()
-	if lc != nil && lc.decimal_point != nil {
-		dp := ([^]byte)(lc.decimal_point)
-		if dp[0] != 0 {
-			return dp[0]
-		}
-	}
 	return '.'
 }
 
-// Run the C library's `strtod` over a byte slice and report the parsed value plus
-// how many bytes it consumed (0 if it recognized nothing). Shared by the verbatim
-// and locale-retry decimal attempts so both go through identical NUL-termination.
+// Parse the decimal prefix after Lua's ASCII leading-space handling. strconv's
+// fast path handles small exact cases; difficult inputs fall back to an exact
+// decimal representation which is shifted and rounded to nearest-even binary64.
+// Its `ok` result also reports range overflow, whereas C parsing still returns inf,
+// so syntax is checked here and range status is deliberately not used.
 @(private = "file")
-strtod_slice :: proc(s: []byte) -> (Number, int) {
+parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
+	context = runtime.default_context()
 	n := len(s)
-	buf := make([]byte, n + 1, context.temp_allocator)
-	copy(buf, s)
-	buf[n] = 0
-	base := raw_data(buf)
-	endptr: [^]libc.char
-	val := libc.strtod(cstring(base), &endptr)
-	return val, int(uintptr(endptr) - uintptr(base))
+	i := 0
+	for i < n && is_space(s[i]) {i += 1}
+	start := i
+	if i < n && (s[i] == '+' || s[i] == '-') {i += 1}
+
+	digits := 0
+	for i < n && is_digit(s[i]) {i += 1; digits += 1}
+	if i < n && s[i] == '.' {
+		i += 1
+		for i < n && is_digit(s[i]) {i += 1; digits += 1}
+	}
+	if digits == 0 {
+		return 0, 0
+	}
+	if i < n && (s[i] == 'e' || s[i] == 'E') {
+		i += 1
+		if i < n && (s[i] == '+' || s[i] == '-') {i += 1}
+		if i >= n || !is_digit(s[i]) {
+			return 0, 0
+		}
+		for i < n && is_digit(s[i]) {i += 1}
+	}
+
+	// Do not use parse_f64_prefix's small-number fast path here: its chained
+	// floating multiplications are excellent for general parsing but do not
+	// promise byte-for-byte C-parser rounding on every boundary. Feeding the
+	// validated token directly through strconv's exact decimal engine keeps all
+	// source digits until its final nearest-even binary64 rounding step.
+	d: strconv_decimal.Decimal
+	strconv_decimal.set(&d, string(s[start:i]))
+	info := strconv.Float_Info{mantbits = 52, expbits = 11, bias = -1023}
+	bits, _ := strconv.decimal_to_float_bits(&d, &info)
+	return transmute(Number)bits, i
 }
 
 // Convert one float spelling -- decimal or hex -- with a whole-string check,
 // faithful to reference Lua's `l_str2dloc`. The decimal path defers to the C
-// library's `strtod` (locale-aware); the hex path uses our pure-Odin
-// `strx_to_number`. Either way the entire slice, bar trailing spaces, must be
-// consumed. Returning ok=false is precisely what triggers the locale
-// decimal-point retry in `str_to_double`.
+// pure-Odin decimal or hexadecimal parser. Either way the entire slice, bar
+// trailing spaces, must be consumed.
 @(private = "file")
 str2dloc :: proc(s: []byte, mode: byte) -> (Number, bool) {
 	val: Number
@@ -987,7 +1056,7 @@ str2dloc :: proc(s: []byte, mode: byte) -> (Number, bool) {
 			return 0, false
 		}
 	} else {
-		val, end = strtod_slice(s)
+		val, end = parse_decimal_slice(s)
 		if end == 0 {
 			return 0, false
 		}
@@ -1001,16 +1070,9 @@ str2dloc :: proc(s: []byte, mode: byte) -> (Number, bool) {
 
 // Parse `s` as a decimal or hexadecimal float, faithful to reference Lua's
 // `l_str2d`. "inf"/"nan" spellings are rejected (Lua numerals never name them).
-// We first try the string verbatim, then -- exactly like reference -- retry with
-// any '.' rewritten to the current locale's decimal point. That retry is what lets
-// `tonumber("3.4")` (or the hex `"0x.41"`) still parse while a comma-radix locale
-// like pt_BR is active: the C library / our hex parser expect the locale radix, so
-// we swap the source '.' for the ',' they want and parse again. Both attempts
-// demand the whole slice (bar trailing spaces) be consumed.
+// The radix is always '.', our documented freestanding C-locale behavior.
 @(private = "file")
 str_to_double :: proc(s: []byte) -> (Number, bool) {
-	n := len(s)
-
 	// Classify by the first "special" character, mirroring the strpbrk(".xXnN").
 	mode: byte = 0
 	for c in s {
@@ -1023,21 +1085,7 @@ str_to_double :: proc(s: []byte) -> (Number, bool) {
 		return 0, false // reject 'inf'/'nan'
 	}
 
-	val, ok := str2dloc(s, mode)
-	if !ok {
-		dp := lua_getlocaledecpoint()
-		dot := -1
-		for c, i in s {
-			if c == '.' {dot = i; break}
-		}
-		if dp != '.' && dot >= 0 {
-			buf2 := make([]byte, n, context.temp_allocator)
-			copy(buf2, s)
-			buf2[dot] = dp
-			val, ok = str2dloc(buf2, mode)
-		}
-	}
-	return val, ok
+	return str2dloc(s, mode)
 }
 
 // Convert a Lua source string to a number value, faithful to `luaO_str2num`:
@@ -1097,22 +1145,156 @@ integer_to_str :: proc "contextless" (buf: []byte, x: Integer) -> int {
 	return out
 }
 
-// Format a float into `buf`, faithful to reference Lua's `tostringbuffFloat`.
-// First try LUA_NUMBER_FMT ("%.15g"); read the text back and, if it doesn't
-// round-trip to the same double, reformat with the higher-precision
-// LUA_NUMBER_FMT_N ("%.17g"). Finally, if the result looks like a bare integer
-// (only sign and digits -- no '.', 'e', 'inf', 'nan'), append ".0" so it stays
-// recognizably a float. We use the C library for both the formatting and the
-// read-back so the bytes match reference Lua exactly.
+// Render an unsigned integer in hexadecimal. This small helper replaces the
+// handful of fixed `%x`/`%p` calls outside string.format's general printf engine.
+unsigned_to_hex_str :: proc "contextless" (
+	buf: []byte,
+	x: u64,
+	uppercase := false,
+	min_digits := 1,
+) -> int {
+	digits := uppercase ? "0123456789ABCDEF" : "0123456789abcdef"
+	value := x
+	tmp: [16]byte
+	pos := len(tmp)
+	for value != 0 || len(tmp) - pos < min_digits {
+		pos -= 1
+		tmp[pos] = digits[value & 15]
+		value >>= 4
+	}
+	return copy(buf, tmp[pos:])
+}
+
+// MSVC's `%p` spelling (and therefore the Windows reference interpreter's) is
+// an uppercase, zero-padded pointer-width hexadecimal number without `0x`.
+pointer_to_str :: proc "contextless" (buf: []byte, p: rawptr) -> int {
+	return unsigned_to_hex_str(buf, u64(uintptr(p)), true, size_of(uintptr) * 2)
+}
+
+// Produce the C99 `%a` spelling used by Lua's `%q`. The significand is derived
+// directly from the IEEE-754 bits, so it is exact rather than a decimal
+// conversion followed by another rounding. Subnormals are normalized just as
+// the Windows CRT does (for example, the least subnormal is `0x1p-1074`).
+number_to_hex_str :: proc "contextless" (buf: []byte, x: Number) -> int {
+	hex_digits := "0123456789abcdef"
+	bits := transmute(u64)x
+	neg := bits >> 63 != 0
+	exp_field := int((bits >> 52) & 0x7ff)
+	frac := bits & 0x000f_ffff_ffff_ffff
+	out := 0
+	if neg {
+		buf[out] = '-'
+		out += 1
+	}
+	buf[out] = '0'
+	buf[out + 1] = 'x'
+	out += 2
+
+	exponent := 0
+	frac_digits := 0
+	frac_bits := frac
+	if exp_field == 0 {
+		if frac == 0 {
+			buf[out] = '0'
+			out += 1
+		} else {
+			highest := 0
+			v := frac
+			for v > 1 {
+				v >>= 1
+				highest += 1
+			}
+			exponent = highest - 1074
+			buf[out] = '1'
+			out += 1
+			frac_bits = frac ~ (u64(1) << uint(highest))
+			frac_digits = (highest + 3) / 4
+			frac_bits <<= uint(frac_digits * 4 - highest)
+		}
+	} else {
+		exponent = exp_field - 1023
+		buf[out] = '1'
+		out += 1
+		frac_digits = 13
+	}
+
+	for frac_digits > 0 && (frac_bits & 15) == 0 {
+		frac_bits >>= 4
+		frac_digits -= 1
+	}
+	if frac_digits > 0 {
+		buf[out] = '.'
+		out += 1
+		shift := (frac_digits - 1) * 4
+		for shift >= 0 {
+			buf[out] = hex_digits[int((frac_bits >> uint(shift)) & 15)]
+			out += 1
+			shift -= 4
+		}
+	}
+
+	buf[out] = 'p'
+	out += 1
+	if exponent < 0 {
+		buf[out] = '-'
+		exponent = -exponent
+	} else {
+		buf[out] = '+'
+	}
+	out += 1
+	tmp: [4]byte
+	pos := len(tmp)
+	for {
+		pos -= 1
+		tmp[pos] = byte('0' + exponent % 10)
+		exponent /= 10
+		if exponent == 0 {break}
+	}
+	out += copy(buf[out:], tmp[pos:])
+	return out
+}
+
+// Render C `%g` with precision P. `%g` uses scientific notation when the decimal
+// exponent is below -4 or at least P; otherwise it uses fixed notation. In both
+// forms insignificant trailing zeroes and a trailing radix point disappear, and
+// scientific exponents contain a sign and at least two digits. Odin's strconv
+// decimal engine implements those rules and exact halfway rounding; unlike its
+// public spelling we remove the leading '+' required by that API.
+@(private = "file")
+format_g :: proc "contextless" (buf: []byte, x: Number, precision: int) -> int {
+	context = runtime.default_context()
+	text := strconv.generic_ftoa(buf, f64(x), 'g', precision, 64)
+	if len(text) > 0 && text[0] == '+' {
+		copy(buf, text[1:])
+		return len(text) - 1
+	}
+	return len(text)
+}
+
+// First try "%.15g": it gives Lua's pleasant short spelling for ordinary
+// values such as 1.1. We parse those bytes back with the same correctly-rounded
+// parser; only when they do not reproduce the original binary64 do we use
+// "%.17g", which is sufficient to identify every double uniquely. Finally a
+// bare sign-and-digits result receives ".0" so it remains visibly a float.
 @(private = "file")
 float_to_str :: proc "contextless" (buf: []byte, x: Number) -> int {
-	cbuf := cast([^]libc.char)raw_data(buf)
-	cap := libc.size_t(len(buf))
+	context = runtime.default_context()
+	bits := transmute(u64)x
+	exp := (bits >> 52) & 0x7ff
+	frac := bits & 0x000f_ffff_ffff_ffff
+	if exp == 0x7ff {
+		if frac == 0 {
+			return copy(buf, bits >> 63 != 0 ? "-inf" : "inf")
+		}
+		// MSVC's `%g`, used by the Windows reference build, marks a negative
+		// indefinite NaN this way. Positive NaNs are simply "nan".
+		return copy(buf, bits >> 63 != 0 ? "-nan(ind)" : "nan")
+	}
 
-	length := int(libc.snprintf(cbuf, cap, NUMBER_FMT, x))
-	check := libc.strtod(cstring(raw_data(buf)), nil)
+	length := format_g(buf, x, 15)
+	check, _ := parse_decimal_slice(buf[:length])
 	if check != x { 	// not enough precision to round-trip?
-		length = int(libc.snprintf(cbuf, cap, NUMBER_FMT_N, x))
+		length = format_g(buf, x, 17)
 	}
 
 	// "Looks like an integer" -> append ".0". We scan for the first character
@@ -2532,7 +2714,7 @@ luaO_pushvfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> ^TString {
 		case 'p':
 			p := fmt_arg_to_ptr(args[ai]);ai += 1
 			pbuf: [N2S_BUFF_SZ]u8
-			w := libc.snprintf(([^]libc.char)(&pbuf[0]), len(pbuf), "%p", p)
+			w := pointer_to_str(pbuf[:], p)
 			if w > 0 {
 				buff_add(&buff, ([^]u8)(&pbuf[0]), uint(w))
 			}
