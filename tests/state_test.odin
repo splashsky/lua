@@ -8,7 +8,7 @@ package tests
 // a double free shows up as a nonzero balance -- there is no way to "fit" these to
 // pass without the accounting actually being correct.
 
-import "core:c/libc"
+import "base:runtime"
 import "core:testing"
 import lua "luao:lua"
 
@@ -31,7 +31,7 @@ counting_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize: uint, nsize: uint) -
 	if nsize == 0 {
 		if ptr != nil {
 			c.outstanding -= int(osize)
-			libc.free(ptr)
+			runtime.heap_free(ptr)
 		}
 		return nil
 	}
@@ -44,7 +44,7 @@ counting_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize: uint, nsize: uint) -
 			return nil
 		}
 	}
-	p := libc.realloc(ptr, nsize)
+	p := runtime.heap_resize(ptr, int(nsize))
 	if p == nil {
 		return nil
 	}

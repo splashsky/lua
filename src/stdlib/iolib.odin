@@ -22,7 +22,7 @@ package stdlib
 //     Lua exposes while retaining full 64-bit core:os offsets.
 
 import "base:runtime"
-import "core:c/libc"
+import "core:os"
 import lua "luao:lua"
 import stream "luao:stream"
 
@@ -125,8 +125,9 @@ io_fclose :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	p := tolstream(L)
-	libc.errno()^ = 0
-	return luaL_fileresult(L, stream.close(p.f), "", false)
+	stream.clear_error()
+	ok := stream.close(p.f)
+	return luaL_fileresult(L, ok, "", false, stream.last_error())
 }
 
 // Close function for the standard streams: it refuses to close them and, because
@@ -241,10 +242,10 @@ io_open :: proc "c" (Lp: rawptr) -> i32 {
 	mode := luaL_optstring(L, 2, "r")
 	p := newfile(L)
 	luaL_argcheck(L, l_checkmode(mode), 2, "invalid mode")
-	libc.errno()^ = 0
+	stream.clear_error()
 	p.f = stream.open(filename, mode)
 	if p.f == nil {
-		return luaL_fileresult(L, false, filename, true)
+		return luaL_fileresult(L, false, filename, true, stream.last_error())
 	}
 	return 1
 }
@@ -253,7 +254,7 @@ io_open :: proc "c" (Lp: rawptr) -> i32 {
 io_popen :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	// ISO-C fallback: no pipe-to-process facility in std libc. Documented deviation.
+	// ISO-C fallback: no pipe-to-process facility in the standard bindings.
 	luaL_error(L, "'popen' not supported")
 }
 
@@ -262,10 +263,10 @@ io_tmpfile :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	p := newfile(L)
-	libc.errno()^ = 0
+	stream.clear_error()
 	p.f = stream.tmpfile()
 	if p.f == nil {
-		return luaL_fileresult(L, false, "", false)
+		return luaL_fileresult(L, false, "", false, stream.last_error())
 	}
 	return 1
 }
@@ -302,7 +303,7 @@ g_iofile :: proc(L: ^lua.Lua_State, f: string, mode: string) -> i32 {
 					L,
 					"cannot open file '%s' (%s)",
 					filename,
-					string(libc.strerror(libc.errno()^)),
+					os.error_string(stream.last_error()),
 				)
 			}
 		} else {
@@ -384,7 +385,7 @@ io_lines :: proc "c" (Lp: rawptr) -> i32 {
 				L,
 				"cannot open file '%s' (%s)",
 				filename,
-				string(libc.strerror(libc.errno()^)),
+				os.error_string(stream.last_error()),
 			)
 		}
 		lua.lua_replace(L, 1) // move the new file to slot 1
@@ -577,7 +578,7 @@ g_read :: proc(L: ^lua.Lua_State, f: ^stream.Stream, first: i32) -> i32 {
 	n: i32
 	success: bool
 	stream.clearerr(f)
-	libc.errno()^ = 0
+	stream.clear_error()
 	if nargs == 0 { // no formats: read one chopped line
 		success = read_line(L, f, true)
 		n = first + 1 // one result
@@ -616,7 +617,7 @@ g_read :: proc(L: ^lua.Lua_State, f: ^stream.Stream, first: i32) -> i32 {
 		}
 	}
 	if stream.ferror(f) {
-		return luaL_fileresult(L, false, "", false)
+		return luaL_fileresult(L, false, "", false, stream.last_error())
 	}
 	if !success {
 		lua.lua_pop(L, 1) // drop the failed provisional result
@@ -685,7 +686,7 @@ g_write :: proc(L: ^lua.Lua_State, f: ^stream.Stream, arg_start: i32) -> i32 {
 	arg := int(arg_start)
 	nargs := lua.lua_gettop(L) - arg
 	totalbytes: uint = 0
-	libc.errno()^ = 0
+	stream.clear_error()
 	for nargs > 0 {
 		nargs -= 1
 		s := transmute([]u8)luaL_checklstring(L, arg)
@@ -696,7 +697,7 @@ g_write :: proc(L: ^lua.Lua_State, f: ^stream.Stream, arg_start: i32) -> i32 {
 		}
 		totalbytes += numbytes
 		if numbytes < l { // short write: report the error and bytes-so-far
-			nr := luaL_fileresult(L, false, "", false)
+			nr := luaL_fileresult(L, false, "", false, stream.last_error())
 			lua.lua_pushinteger(L, lua.Integer(totalbytes))
 			return nr + 1
 		}
@@ -739,10 +740,10 @@ f_seek :: proc "c" (Lp: rawptr) -> i32 {
 	op := luaL_checkoption(L, 2, "cur", seek_names)
 	p3 := luaL_optinteger(L, 3, 0)
 	offset := i64(p3)
-	libc.errno()^ = 0
+	stream.clear_error()
 	pos, ok := stream.seek(f, offset, seek_whence[op])
 	if !ok {
-		return luaL_fileresult(L, false, "", false)
+		return luaL_fileresult(L, false, "", false, stream.last_error())
 	}
 	lua.lua_pushinteger(L, lua.Integer(pos))
 	return 1
@@ -761,15 +762,16 @@ f_setvbuf :: proc "c" (Lp: rawptr) -> i32 {
 	f := tofile(L)
 	op := luaL_checkoption(L, 2, "", setvbuf_names) // mode is required (no default)
 	sz := luaL_optinteger(L, 3, LUAL_BUFFERSIZE)
-	libc.errno()^ = 0
+	stream.clear_error()
 	res := stream.setvbuf(f, setvbuf_mode[op], int(sz))
-	return luaL_fileresult(L, res, "", false)
+	return luaL_fileresult(L, res, "", false, stream.last_error())
 }
 
 @(private = "file")
 aux_flush :: proc(L: ^lua.Lua_State, f: ^stream.Stream) -> i32 {
-	libc.errno()^ = 0
-	return luaL_fileresult(L, stream.flush(f), "", false)
+	stream.clear_error()
+	res := stream.flush(f)
+	return luaL_fileresult(L, res, "", false, stream.last_error())
 }
 
 @(private = "file")

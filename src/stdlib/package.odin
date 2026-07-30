@@ -24,20 +24,13 @@ package stdlib
 // (as in that reference configuration) unavailable.
 
 import "base:runtime"
-import "core:c/libc"
+import "core:os"
 import lua "luao:lua"
 import stream "luao:stream"
 
 @(private = "file")
 state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
 	return (^lua.Lua_State)(Lp)
-}
-
-// Convert a (NUL-terminated) Lua string to a C string for libc calls. Lua strings
-// always carry a trailing NUL, so this is just a reinterpretation.
-@(private = "file")
-cstr :: #force_inline proc "contextless" (s: string) -> cstring {
-	return cstring(raw_data(s))
 }
 
 // -----------------------------------------------------------------------------
@@ -501,11 +494,7 @@ noenv :: proc(L: ^lua.Lua_State) -> bool {
 // counts as set (reference distinguishes NULL from "").
 @(private = "file")
 getenv_str :: proc(name: string) -> (string, bool) {
-	v := libc.getenv(cstr(name))
-	if v == nil {
-		return "", false
-	}
-	return string(v), true
+	return os.lookup_env(name, context.temp_allocator)
 }
 
 // Set package[fieldname] from the environment (versioned name first, then the bare

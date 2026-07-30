@@ -17,7 +17,6 @@ package stream
 // is also the minimum guarantee made by C's ungetc.
 
 import "base:runtime"
-import libc "core:c/libc"
 import "core:io"
 import "core:os"
 import "core:strings"
@@ -79,6 +78,8 @@ Stream :: struct {
 @(private = "file")
 stream_head: ^Stream
 @(private = "file")
+last_os_error: os.Error
+@(private = "file")
 standard_input: ^Stream
 @(private = "file")
 standard_output: ^Stream
@@ -86,31 +87,22 @@ standard_output: ^Stream
 standard_error: ^Stream
 
 @(private = "file")
-set_errno :: proc(err: os.Error) {
-	// errno/string conversion is intentionally still owned by p12-osfns.  Until
-	// that lands, preserve luaL_fileresult's existing shape by supplying the
-	// familiar portable errno values for the errors this layer can classify.
-	n := 5 // EIO: safe fallback for an otherwise platform-specific OS error
-	if err == os.General_Error.Not_Exist {
-		n = 2
-	} else if err == os.General_Error.Exist {
-		n = 17
-	} else if err == io.Error.Permission_Denied {
-		n = 13
-	} else if err == runtime.Allocator_Error.Out_Of_Memory {
-		n = 12
-	} else if err == os.General_Error.Invalid_File || err == io.Error.Closed {
-		n = 9
-	} else if err == os.General_Error.Broken_Pipe {
-		n = 32
-	}
-	libc.errno()^ = i32(n)
+set_error :: proc(err: os.Error) {
+	last_os_error = err
+}
+
+last_error :: proc() -> os.Error {
+	return last_os_error
+}
+
+clear_error :: proc() {
+	last_os_error = nil
 }
 
 @(private = "file")
 fail :: proc(s: ^Stream, err: os.Error) -> bool {
 	s.error_flag = true
-	set_errno(err)
+	set_error(err)
 	return false
 }
 
@@ -140,13 +132,13 @@ resize_buffers :: proc(s: ^Stream, size: int) -> bool {
 	}
 	new_read, err1 := make([]u8, actual_size)
 	if err1 != nil {
-		set_errno(os.Error(err1))
+		set_error(os.Error(err1))
 		return false
 	}
 	new_write, err2 := make([]u8, actual_size)
 	if err2 != nil {
 		delete(new_read)
-		set_errno(os.Error(err2))
+		set_error(os.Error(err2))
 		return false
 	}
 	if s.read_buffer != nil {
@@ -168,7 +160,7 @@ resize_buffers :: proc(s: ^Stream, size: int) -> bool {
 make_stream :: proc(f: ^os.File, owns: bool, readable, writable, append_mode, text_mode: bool) -> ^Stream {
 	s, alloc_err := new(Stream)
 	if alloc_err != nil {
-		set_errno(os.Error(alloc_err))
+		set_error(os.Error(alloc_err))
 		if owns && f != nil {
 			os.close(f)
 		}
@@ -239,7 +231,7 @@ stderr :: proc() -> ^Stream {
 open :: proc(path, mode: string) -> ^Stream {
 	readable, writable, append_mode, text_mode := false, false, false, true
 	if len(mode) == 0 {
-		libc.errno()^ = 22
+		set_error(os.Error(os.General_Error.Invalid_Path))
 		return nil
 	}
 	switch mode[0] {
@@ -251,7 +243,7 @@ open :: proc(path, mode: string) -> ^Stream {
 		writable = true
 		append_mode = true
 	case:
-		libc.errno()^ = 22
+		set_error(os.Error(os.General_Error.Invalid_Path))
 		return nil
 	}
 	for c in mode[1:] {
@@ -276,7 +268,7 @@ open :: proc(path, mode: string) -> ^Stream {
 	}
 	f, err := os.open(path, flags, os.Permissions_Default_File)
 	if err != nil {
-		set_errno(err)
+		set_error(err)
 		return nil
 	}
 	return make_stream(f, true, readable, writable, append_mode, text_mode)
@@ -285,7 +277,7 @@ open :: proc(path, mode: string) -> ^Stream {
 tmpfile :: proc() -> ^Stream {
 	f, err := os.create_temp_file("", "lua-odin-*")
 	if err != nil {
-		set_errno(err)
+		set_error(err)
 		return nil
 	}
 	s := make_stream(f, true, true, true, false, false)
@@ -387,7 +379,7 @@ discard_read_ahead :: proc(s: ^Stream) -> bool {
 @(private = "file")
 prepare_read :: proc(s: ^Stream) -> bool {
 	if !s.readable {
-		libc.errno()^ = 9
+		set_error(os.Error(os.General_Error.Invalid_File))
 		s.error_flag = true
 		return false
 	}
@@ -404,7 +396,7 @@ prepare_read :: proc(s: ^Stream) -> bool {
 @(private = "file")
 prepare_write :: proc(s: ^Stream) -> bool {
 	if !s.writable {
-		libc.errno()^ = 9
+		set_error(os.Error(os.General_Error.Invalid_File))
 		s.error_flag = true
 		return false
 	}
@@ -623,7 +615,7 @@ seek :: proc(s: ^Stream, offset: i64, from: Seek_From) -> (i64, bool) {
 
 tell :: proc(s: ^Stream) -> (i64, bool) {
 	if s == nil {
-		libc.errno()^ = 9
+		set_error(os.Error(os.General_Error.Invalid_File))
 		return 0, false
 	}
 	return s.logical_pos, true
@@ -634,7 +626,7 @@ setvbuf :: proc(s: ^Stream, mode: Buffer_Mode, size: int) -> bool {
 	// position. We allocate both sides to the requested size so later reads and
 	// writes obey the new policy without borrowing memory from the Lua state.
 	if s == nil || size < 0 || !flush(s) {
-		libc.errno()^ = 22
+		set_error(os.Error(os.General_Error.Invalid_File))
 		return false
 	}
 	if s.direction == .Read && !discard_read_ahead(s) {
@@ -671,7 +663,7 @@ close :: proc(s: ^Stream) -> bool {
 	ok := flush(s)
 	if s.owns_file {
 		if err := os.close(s.file); err != nil {
-			set_errno(err)
+			set_error(err)
 			ok = false
 		}
 	}

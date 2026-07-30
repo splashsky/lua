@@ -2239,7 +2239,7 @@ num_pow :: proc "contextless" (x, y: Number) -> Number {
 
 // A correct IEEE-754 double `fmod`, implemented in pure Odin.
 //
-// Why not `libc.fmod`? On at least one of our target toolchains (Windows/MSVC via
+// Why not the C-runtime fmod? On at least one target toolchain (Windows/MSVC via
 // Odin's `core:c/libc` binding) the linked `fmod` is broken for large magnitudes:
 // `fmod(2^54, 3)` wrongly yields `0` instead of `1`, because that implementation
 // falls back to the naive `x - trunc(x/y)*y` which loses all precision once `x`

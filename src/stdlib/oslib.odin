@@ -1,179 +1,285 @@
 package stdlib
 
-// oslib.odin -- our analogue of reference Lua's `loslib.c`.
+// oslib.odin -- the operating-system library without a C-runtime dependency.
 //
-// The operating-system library: clock/date/time/difftime, environment access,
-// file remove/rename, execute/exit, tmpname, and setlocale. It is a thin wrapper
-// over the C standard library exactly as reference Lua is -- we call the same
-// libc entry points (time/clock/strftime/mktime/gmtime/localtime/getenv/system/
-// remove/rename/setlocale/exit) through `core:c/libc`, so the observable results
-// match the host platform's C runtime byte for byte, which is the whole point of
-// this library. We model time as a lua_Integer (reference's default LUA_NUMTIME
-// off), so the "cannot be represented" overflow guards collapse to the mktime
-// sentinel check, just as they do in a 64-bit reference build.
+// The calendar code below deliberately does not lean on a hidden libc date
+// parser. Unix time is split into whole days and seconds-within-the-day, then
+// converted with the proleptic Gregorian calendar. Local civil time is the one
+// place where arithmetic alone is not enough: on Windows we ask the OS to map a
+// UTC SYSTEMTIME through the machine's configured time-zone rules. That gives us
+// the historical UTC offset at the instant, including both sides of a DST
+// transition, while all normalization and table construction stays in Odin.
+//
+// There are three intentional, visible locale deviations. We have no libc locale
+// database, so date names and the composite %c/%x/%X forms are always the fixed
+// C-locale English forms; os.setlocale supports only "C", "POSIX", and "" (our
+// default is C); and OS error wording comes from core:os rather than strerror.
 
 import "base:runtime"
-import "core:c/libc"
+import "core:fmt"
+import "core:os"
+import "core:time"
+import win32 "core:sys/windows"
 import lua "luao:lua"
+
+when ODIN_OS == .Windows {
+	foreign import oslib_kernel32 "system:Kernel32.lib"
+	foreign oslib_kernel32 {
+		GetTimeZoneInformation :: proc(lpTimeZoneInformation: ^win32.TIME_ZONE_INFORMATION) -> win32.DWORD ---
+	}
+}
 
 @(private = "file")
 state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
 	return (^lua.Lua_State)(Lp)
 }
 
-// Turn a Lua-owned string into a C string. Lua strings always carry a trailing
-// NUL in their backing storage (see string.odin's createstrobj), and Odin string
-// literals are NUL-terminated too, so this is a safe zero-copy view for any string
-// that came from luaL_check*/opt* or a literal default.
-@(private = "file")
-cstr :: #force_inline proc "contextless" (s: string) -> cstring {
-	return cstring(raw_data(s))
-}
-
-// The set of strftime conversion specifiers we accept, grouped by length with a
-// "||" marker before the two-character group -- reference LUA_STRFTIMEOPTIONS.
-// Picking the right set per platform keeps us faithful to the host's strftime.
+// This is the exact option set selected by the vendored loslib.c on each host.
+// Windows strftime spells its alternate form with '#'; C99 hosts use E/O.
 @(private = "file")
 STRFTIME_OPTIONS :: (
-	"aAbBcdHIjmMpSUwWxXyYzZ%||#c#x#d#H#I#j#m#M#S#U#w#W#y#Y" when ODIN_OS == .Windows else "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%||EcECExEXEyEYOdOeOHOIOmOMOSOuOUOVOwOWOy" \
+	"aAbBcdHIjmMpSUwWxXyYzZ%||#c#x#d#H#I#j#m#M#S#U#w#W#y#Y" when ODIN_OS == .Windows else
+	"aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%||EcECExEXEyEYOdOeOHOIOmOMOSOuOUOVOwOWOy"
 )
 
-// Largest string a single strftime specifier may expand to -- reference SIZETIMEFMT.
 @(private = "file")
-SIZETIMEFMT :: 250
+Civil_Time :: struct {
+	year:   i64,
+	month:  int,
+	day:    int,
+	hour:   int,
+	minute: int,
+	second: int,
+	yday:   int, // zero based, like struct tm
+	wday:   int, // Sunday == 0, like struct tm
+	isdst:  int, // -1 unknown, 0 standard, 1 daylight
+	offset: i64, // local seconds east of UTC
+}
 
-// os.execute([cmd]) -> run a shell command, or report whether a shell exists.
 @(private = "file")
-os_execute :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	has_cmd := !lua.lua_isnoneornil(L, 1)
-	libc.errno()^ = 0
-	if has_cmd {
-		cmd := luaL_checkstring(L, 1)
-		return luaL_execresult(L, i32(libc.system(cstr(cmd))))
+floor_div :: proc(a, b: i64) -> i64 {
+	q := a / b
+	if a % b < 0 {
+		q -= 1
 	}
-	// No command: system(NULL) is nonzero iff a command processor is available.
-	lua.lua_pushboolean(L, libc.system(nil) != 0)
-	return 1
+	return q
 }
 
-// os.remove(filename) -> delete a file, reporting success or an errno message.
 @(private = "file")
-os_remove :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	filename := luaL_checkstring(L, 1)
-	libc.errno()^ = 0
-	return luaL_fileresult(L, libc.remove(cstr(filename)) == 0, filename, true)
+floor_mod :: proc(a, b: i64) -> i64 {
+	return a - floor_div(a, b) * b
 }
 
-// os.rename(from, to) -> rename a file, reporting success or an errno message.
 @(private = "file")
-os_rename :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	fromname := luaL_checkstring(L, 1)
-	toname := luaL_checkstring(L, 2)
-	libc.errno()^ = 0
-	return luaL_fileresult(L, libc.rename(cstr(fromname), cstr(toname)) == 0, "", false)
+is_leap :: proc(y: i64) -> bool {
+	return y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
 }
 
-// os.tmpname() -> a name safe to use for a temporary file.
+// Howard Hinnant's days-from-civil transform, shifted to Unix day zero. The
+// March-based year makes February the last month, so leap-day handling becomes a
+// single era correction instead of a nest of month special cases.
 @(private = "file")
-os_tmpname :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	buff: [128]u8 // comfortably larger than L_tmpnam on every target
-	r := libc.tmpnam(([^]libc.char)(&buff[0]))
-	if r == nil {
-		luaL_error(L, "unable to generate a unique filename")
+days_from_civil :: proc(y: i64, m, d: int) -> i64 {
+	y := y
+	if m <= 2 {
+		y -= 1
 	}
-	lua.lua_pushstring(L, string(cstring(&buff[0])))
-	return 1
+	era := floor_div(y, 400)
+	yoe := y - era * 400
+	mp := i64(m + (m > 2 ? -3 : 9))
+	doy := (153 * mp + 2) / 5 + i64(d) - 1
+	doe := yoe * 365 + yoe / 4 - yoe / 100 + doy
+	return era * 146097 + doe - 719468
 }
 
-// os.getenv(name) -> the environment variable's value, or nil if unset.
+// The inverse transform peels a Unix day back into a 400-year era, a year
+// within that era, and finally a March-based month. Both procedures use floor
+// division, which is the important detail that keeps dates before 1970 correct.
 @(private = "file")
-os_getenv :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	name := luaL_checkstring(L, 1)
-	v := libc.getenv(cstr(name))
-	if v == nil {
-		lua.lua_pushnil(L) // reference pushes nil when getenv returns NULL
+civil_from_days :: proc(z: i64) -> (y: i64, m, d: int) {
+	z0 := z + 719468
+	era := floor_div(z0, 146097)
+	doe := z0 - era * 146097
+	yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+	y = yoe + era * 400
+	doy := doe - (365 * yoe + yoe / 4 - yoe / 100)
+	mp := (5 * doy + 2) / 153
+	d = int(doy - (153 * mp + 2) / 5 + 1)
+	m = int(mp + (mp < 10 ? 3 : -9))
+	if m <= 2 {
+		y += 1
+	}
+	return
+}
+
+@(private = "file")
+civil_at_timestamp :: proc(t: i64) -> Civil_Time {
+	days := floor_div(t, 86400)
+	sod := floor_mod(t, 86400)
+	y, m, d := civil_from_days(days)
+	jan1 := days_from_civil(y, 1, 1)
+	return Civil_Time {
+		year = y,
+		month = m,
+		day = d,
+		hour = int(sod / 3600),
+		minute = int((sod % 3600) / 60),
+		second = int(sod % 60),
+		yday = int(days - jan1),
+		wday = int(floor_mod(days + 4, 7)), // 1970-01-01 was Thursday
+		isdst = 0,
+	}
+}
+
+// Normalize all fields exactly as mktime does: months may spill across years,
+// and day/hour/minute/second may spill in either direction. Converting the first
+// of the normalized month to a day number makes even values such as day=0 or
+// month=14 fall out naturally.
+@(private = "file")
+normalize_civil :: proc(year: i64, month, day, hour, minute, second: int) -> (Civil_Time, i64) {
+	mi := i64(month) - 1
+	y := year + floor_div(mi, 12)
+	m := int(floor_mod(mi, 12)) + 1
+	total := i64(hour) * 3600 + i64(minute) * 60 + i64(second)
+	days := days_from_civil(y, m, 1) + i64(day) - 1 + floor_div(total, 86400)
+	nominal := days * 86400 + floor_mod(total, 86400)
+	return civil_at_timestamp(nominal), nominal
+}
+
+@(private = "file")
+tzi_info :: proc() -> (standard, daylight: i64, tzi: win32.TIME_ZONE_INFORMATION, ok: bool) {
+	when ODIN_OS == .Windows {
+		id := GetTimeZoneInformation(&tzi)
+		if id == 0xffffffff {
+			return
+		}
+		standard = -i64(tzi.Bias + tzi.StandardBias) * 60
+		daylight = -i64(tzi.Bias + tzi.DaylightBias) * 60
+		ok = true
+		return
 	} else {
-		lua.lua_pushstring(L, string(v))
-	}
-	return 1
-}
-
-// os.clock() -> CPU time used by the program, in seconds.
-@(private = "file")
-os_clock :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(f64(libc.clock()) / f64(libc.CLOCKS_PER_SEC)))
-	return 1
-}
-
-// --------------------------------------------------------------------------------
-// Time/date helpers
-// --------------------------------------------------------------------------------
-
-// Push `value + delta` under `key` into the table on top of the stack. With an
-// integer time representation and a 64-bit lua_Integer no field can overflow, so
-// the reference's guarded add reduces to a plain add. Reference `setfield`.
-@(private = "file")
-setfield :: proc(L: ^lua.Lua_State, key: string, value: int, delta: int) {
-	lua.lua_pushinteger(L, lua.Integer(value) + lua.Integer(delta))
-	lua.lua_setfield(L, -2, key)
-}
-
-// Push a boolean field, but skip it entirely for the "undefined" (-1) case, which
-// is how a struct tm signals it doesn't know about DST. Reference `setboolfield`.
-@(private = "file")
-setboolfield :: proc(L: ^lua.Lua_State, key: string, value: int) {
-	if value < 0 {
+		// Targets without an Odin/OS local-zone bridge honestly use UTC. This is
+		// preferable to pretending a host-dependent local conversion succeeded.
+		standard, daylight, ok = 0, 0, true
 		return
 	}
-	lua.lua_pushboolean(L, value != 0)
+}
+
+@(private = "file")
+local_at_timestamp :: proc(t: i64) -> (Civil_Time, bool) {
+	when ODIN_OS == .Windows {
+		utc := civil_at_timestamp(t)
+		// SYSTEMTIME uses a 16-bit year and Windows local-time conversion rejects
+		// dates before the FILETIME epoch. UTC formatting remains pure-Odin and
+		// does not inherit this local-time limitation.
+		if utc.year < 1601 || utc.year > 30827 {
+			return {}, false
+		}
+		u := win32.SYSTEMTIME {
+			year = u16(utc.year),
+			month = u16(utc.month),
+			day = u16(utc.day),
+			hour = u16(utc.hour),
+			minute = u16(utc.minute),
+			second = u16(utc.second),
+		}
+		l: win32.SYSTEMTIME
+		if !win32.SystemTimeToTzSpecificLocalTime(nil, &u, &l) {
+			return {}, false
+		}
+		local_nominal := days_from_civil(i64(l.year), int(l.month), int(l.day)) * 86400 +
+			i64(l.hour) * 3600 + i64(l.minute) * 60 + i64(l.second)
+		out := civil_at_timestamp(local_nominal)
+		out.offset = local_nominal - t
+		std, dst, _, ok := tzi_info()
+		out.isdst = ok && dst != std && out.offset == dst ? 1 : 0
+		return out, true
+	} else {
+		out := civil_at_timestamp(t)
+		out.offset = 0
+		out.isdst = 0
+		return out, true
+	}
+}
+
+@(private = "file")
+same_wall :: proc(a, b: Civil_Time) -> bool {
+	return a.year == b.year && a.month == b.month && a.day == b.day &&
+		a.hour == b.hour && a.minute == b.minute && a.second == b.second
+}
+
+// Resolve a local civil time without libc mktime. Around a fall-back fold there
+// are two real UTC instants; tm_isdst selects one and an unspecified flag follows
+// the Windows CRT by preferring standard time. Around a spring-forward gap there
+// is no exact instant; the CRT applies the requested bias and then normalizes the
+// result through the real zone rules. Its unspecified choice in a gap is the
+// daylight bias, which is why a nominal 02:30 can normalize back to 01:30.
+@(private = "file")
+timestamp_from_local :: proc(wall: Civil_Time, nominal: i64, wanted_dst: int) -> (i64, Civil_Time, bool) {
+	std, dst, _, ok := tzi_info()
+	if !ok {
+		return 0, {}, false
+	}
+	offsets := [2]i64{std, dst}
+	for wanted in 0 ..< 2 {
+		for off in offsets {
+			if wanted_dst >= 0 && wanted != wanted_dst {
+				continue
+			}
+			t := nominal - off
+			got, valid := local_at_timestamp(t)
+			if valid && same_wall(got, wall) && got.isdst == wanted {
+				return t, got, true
+			}
+		}
+	}
+	if wanted_dst < 0 {
+		for off in offsets {
+			t := nominal - off
+			got, valid := local_at_timestamp(t)
+			if valid && same_wall(got, wall) {
+				return t, got, true
+			}
+		}
+	}
+	chosen := wanted_dst == 0 ? std : dst // unknown (-1) deliberately chooses DST
+	t := nominal - chosen
+	got, valid := local_at_timestamp(t)
+	return t, got, valid
+}
+
+@(private = "file")
+setfield :: proc(L: ^lua.Lua_State, key: string, value: i64) {
+	lua.lua_pushinteger(L, lua.Integer(value))
 	lua.lua_setfield(L, -2, key)
 }
 
-// Populate every date field of the table on top of the stack from a struct tm.
-// The +1900/+1/+1 deltas convert C's tm conventions to Lua's. Reference
-// `setallfields`.
 @(private = "file")
-setallfields :: proc(L: ^lua.Lua_State, stm: ^libc.tm) {
-	setfield(L, "year", int(stm.tm_year), 1900)
-	setfield(L, "month", int(stm.tm_mon), 1)
-	setfield(L, "day", int(stm.tm_mday), 0)
-	setfield(L, "hour", int(stm.tm_hour), 0)
-	setfield(L, "min", int(stm.tm_min), 0)
-	setfield(L, "sec", int(stm.tm_sec), 0)
-	setfield(L, "yday", int(stm.tm_yday), 1)
-	setfield(L, "wday", int(stm.tm_wday), 1)
-	setboolfield(L, "isdst", int(stm.tm_isdst))
+setallfields :: proc(L: ^lua.Lua_State, c: Civil_Time) {
+	setfield(L, "year", c.year)
+	setfield(L, "month", i64(c.month))
+	setfield(L, "day", i64(c.day))
+	setfield(L, "hour", i64(c.hour))
+	setfield(L, "min", i64(c.minute))
+	setfield(L, "sec", i64(c.second))
+	setfield(L, "yday", i64(c.yday + 1))
+	setfield(L, "wday", i64(c.wday + 1))
+	if c.isdst >= 0 {
+		lua.lua_pushboolean(L, c.isdst != 0)
+		lua.lua_setfield(L, -2, "isdst")
+	}
 }
 
-// Read a boolean field from the table at the top of the stack, returning -1 when
-// it is absent. Reference `getboolfield`.
 @(private = "file")
 getboolfield :: proc(L: ^lua.Lua_State, key: string) -> int {
-	res: int
-	if lua.lua_getfield(L, -1, key) == lua.LUA_TNIL {
-		res = -1
-	} else {
+	res := -1
+	if lua.lua_getfield(L, -1, key) != lua.LUA_TNIL {
 		res = lua.lua_toboolean(L, -1) ? 1 : 0
 	}
 	lua.lua_pop(L, 1)
 	return res
 }
 
-// Read an integer field, applying the `delta` (tm-vs-Lua convention offset) and
-// bounds-checking against the C `int` range. `d < 0` marks a mandatory field.
-// Reference `getfield`.
 @(private = "file")
 getfield :: proc(L: ^lua.Lua_State, key: string, d: int, delta: int) -> int {
 	tp := lua.lua_getfield(L, -1, key)
@@ -186,8 +292,8 @@ getfield :: proc(L: ^lua.Lua_State, key: string, d: int, delta: int) -> int {
 		}
 		res = lua.Integer(d)
 	} else {
-		// A struct tm field is a C int; reject values that won't fit after delta.
-		ok := res >= 0 ? (res - lua.Integer(delta) <= lua.Integer(max(i32))) : (lua.Integer(min(i32)) + lua.Integer(delta) <= res)
+		ok := res >= 0 ? res - lua.Integer(delta) <= lua.Integer(max(i32)) :
+			lua.Integer(min(i32)) + lua.Integer(delta) <= res
 		if !ok {
 			luaL_error(L, "field '%s' is out-of-bound", key)
 		}
@@ -197,192 +303,395 @@ getfield :: proc(L: ^lua.Lua_State, key: string, d: int, delta: int) -> int {
 	return int(res)
 }
 
-// Match the strftime specifier at the front of `conv` against the option list,
-// copy it (with its leading '%') into `buff`, and return how many source bytes it
-// consumed. Raises an argument error on an unknown specifier. Reference
-// `checkoption`. The "||" marker in the option list bumps the compared length to
-// two, so single- and two-character specifiers share one scan.
 @(private = "file")
-checkoption :: proc(L: ^lua.Lua_State, conv: []u8, buff: []u8) -> int {
+checkoption :: proc(L: ^lua.Lua_State, conv: []u8) -> int {
 	option := STRFTIME_OPTIONS
-	oplen := 1 // length of the options currently being compared
+	oplen := 1
 	oi := 0
 	for oi < len(option) && oplen <= len(conv) {
 		if option[oi] == '|' {
-			oplen += 1 // next block holds longer options
+			oplen += 1
 		} else if oi + oplen <= len(option) && string(conv[:oplen]) == option[oi:oi + oplen] {
-			copy(buff[1:], conv[:oplen]) // buff[0] is already '%'
-			buff[1 + oplen] = 0 // terminate for strftime
 			return oplen
 		}
 		oi += oplen
 	}
-	luaL_argerror(
-		L,
-		1,
-		lua.lua_pushfstring(L, "invalid conversion specifier '%%%s'", string(conv)),
-	)
+	luaL_argerror(L, 1, lua.lua_pushfstring(L, "invalid conversion specifier '%%%s'", string(conv)))
 }
 
-// Fetch and range-check a time argument. Reference `l_checktime` (integer time:
-// the (time_t)t == t identity always holds for a 64-bit lua_Integer).
 @(private = "file")
-l_checktime :: proc(L: ^lua.Lua_State, arg: int) -> libc.time_t {
-	return libc.time_t(luaL_checkinteger(L, arg))
+WDAY_SHORT := [7]string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
+@(private = "file")
+WDAY_LONG := [7]string{"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"}
+@(private = "file")
+MONTH_SHORT := [12]string{"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+@(private = "file")
+MONTH_LONG := [12]string{"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"}
+
+@(private = "file")
+zone_name :: proc(dst: bool, buf: []u8) -> string {
+	when ODIN_OS == .Windows {
+		_, _, z, ok := tzi_info()
+		if ok {
+			src := dst ? z.DaylightName[:] : z.StandardName[:]
+			n := 0
+			for r in src {
+				if r == 0 || n == len(buf) {
+					break
+				}
+				// Windows time-zone display names on supported installations are
+				// ASCII in practice. Non-ASCII UTF-16 code units are replaced
+				// rather than accidentally emitting malformed UTF-8.
+				buf[n] = r < 0x80 ? u8(r) : '?'
+				n += 1
+			}
+			return string(buf[:n])
+		}
+	}
+	return "UTC"
 }
 
-// os.date([format [, time]]) -> a formatted date string, or a "*t" table.
+@(private = "file")
+add_num :: proc(B: ^Buffer, value: i64, width: int, unpadded: bool = false) {
+	if unpadded {
+		luaL_addstring(B, fmt.tprintf("%d", value))
+	} else {
+		luaL_addstring(B, fmt.tprintf("%0*d", width, value))
+	}
+}
+
+@(private = "file")
+format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
+	alternate := len(op) == 2
+	ch := op[len(op) - 1]
+	zone_buf: [128]u8
+	std, _, _, _ := tzi_info()
+	switch ch {
+	case '%': luaL_addchar(B, '%')
+	case 'a': luaL_addstring(B, WDAY_SHORT[c.wday])
+	case 'A': luaL_addstring(B, WDAY_LONG[c.wday])
+	case 'b', 'h': luaL_addstring(B, MONTH_SHORT[c.month - 1])
+	case 'B': luaL_addstring(B, MONTH_LONG[c.month - 1])
+	case 'c':
+		if alternate && op[0] == '#' {
+			luaL_addstring(B, fmt.tprintf("%s, %s %02d, %04d %02d:%02d:%02d",
+				WDAY_LONG[c.wday], MONTH_LONG[c.month - 1], c.day, c.year, c.hour, c.minute, c.second))
+		} else {
+			luaL_addstring(B, WDAY_SHORT[c.wday])
+			luaL_addchar(B, ' ')
+			luaL_addstring(B, MONTH_SHORT[c.month - 1])
+			luaL_addchar(B, ' ')
+			if c.day < 10 do luaL_addchar(B, ' ')
+			luaL_addstring(B, fmt.tprintf("%d %02d:%02d:%02d %04d",
+				c.day, c.hour, c.minute, c.second, c.year))
+		}
+	case 'x':
+		if alternate && op[0] == '#' {
+			luaL_addstring(B, fmt.tprintf("%s, %s %02d, %04d",
+				WDAY_LONG[c.wday], MONTH_LONG[c.month - 1], c.day, c.year))
+		} else {
+			luaL_addstring(B, fmt.tprintf("%02d/%02d/%02d", c.month, c.day, floor_mod(c.year, 100)))
+		}
+	case 'X': luaL_addstring(B, fmt.tprintf("%02d:%02d:%02d", c.hour, c.minute, c.second))
+	case 'd', 'e': add_num(B, i64(c.day), ch == 'e' ? 2 : 2, alternate || ch == 'e')
+	case 'H': add_num(B, i64(c.hour), 2, alternate)
+	case 'I':
+		h := c.hour % 12
+		if h == 0 do h = 12
+		add_num(B, i64(h), 2, alternate)
+	case 'j': add_num(B, i64(c.yday + 1), 3, alternate)
+	case 'm': add_num(B, i64(c.month), 2, alternate)
+	case 'M': add_num(B, i64(c.minute), 2, alternate)
+	case 'p': luaL_addstring(B, c.hour < 12 ? "AM" : "PM")
+	case 'S': add_num(B, i64(c.second), 2, alternate)
+	case 'U': add_num(B, i64((c.yday + 7 - c.wday) / 7), 2, alternate)
+	case 'w': add_num(B, i64(c.wday), 1, true)
+	case 'W': add_num(B, i64((c.yday + 7 - ((c.wday + 6) % 7)) / 7), 2, alternate)
+	case 'y': add_num(B, floor_mod(c.year, 100), 2, alternate)
+	case 'Y': add_num(B, c.year, 4, alternate)
+	case 'z':
+		off := c.offset
+		if utc {
+			// This surprising result matches Windows strftime: gmtime fills no
+			// explicit zone field, so %z/%Z still use the process's standard zone.
+			off = std
+		}
+		sign := "+"
+		if off < 0 {
+			sign = "-"
+			off = -off
+		}
+		luaL_addstring(B, fmt.tprintf("%s%02d%02d", sign, off / 3600, off % 3600 / 60))
+	case 'Z':
+		luaL_addstring(B, zone_name(!utc && c.isdst == 1, zone_buf[:]))
+	case:
+		// C99 aliases admitted on non-Windows hosts.
+		switch ch {
+		case 'C': add_num(B, floor_div(c.year, 100), 2)
+		case 'D': luaL_addstring(B, fmt.tprintf("%02d/%02d/%02d", c.month, c.day, floor_mod(c.year, 100)))
+		case 'F': luaL_addstring(B, fmt.tprintf("%04d-%02d-%02d", c.year, c.month, c.day))
+		case 'n': luaL_addchar(B, '\n')
+		case 'r':
+			h := c.hour % 12
+			if h == 0 do h = 12
+			luaL_addstring(B, fmt.tprintf("%02d:%02d:%02d %s", h, c.minute, c.second, c.hour < 12 ? "AM" : "PM"))
+		case 'R': luaL_addstring(B, fmt.tprintf("%02d:%02d", c.hour, c.minute))
+		case 't': luaL_addchar(B, '\t')
+		case 'T': luaL_addstring(B, fmt.tprintf("%02d:%02d:%02d", c.hour, c.minute, c.second))
+		case 'u': add_num(B, i64(c.wday == 0 ? 7 : c.wday), 1, true)
+		case 'V': add_num(B, i64((c.yday + 10 - (c.wday == 0 ? 7 : c.wday)) / 7), 2)
+		}
+	}
+}
+
+@(private = "file")
+l_checktime :: proc(L: ^lua.Lua_State, arg: int) -> i64 {
+	return i64(luaL_checkinteger(L, arg))
+}
+
 @(private = "file")
 os_date :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	s := transmute([]u8)luaL_optlstring(L, 1, "%c")
-	t: libc.time_t
-	if lua.lua_isnoneornil(L, 2) {
-		t = libc.time(nil)
-	} else {
-		t = l_checktime(L, 2)
-	}
-	si := 0
+	t := lua.lua_isnoneornil(L, 2) ? time.to_unix_seconds(time.now()) : l_checktime(L, 2)
+	i := 0
 	utc := false
-	if len(s) > 0 && s[0] == '!' { // leading '!' means UTC
+	if len(s) > 0 && s[0] == '!' {
 		utc = true
-		si = 1
+		i = 1
 	}
-	stm := utc ? libc.gmtime(&t) : libc.localtime(&t)
-	if stm == nil {
-		luaL_error(L, "date result cannot be represented in this installation")
+	when ODIN_OS == .Windows {
+		// UCRT's localtime rejects negative time_t values on this installation;
+		// gmtime accepts them. Preserve that asymmetric reference boundary.
+		if !utc && t < 0 {
+			luaL_error(L, "date result cannot be represented in this installation")
+		}
+		if utc && t < -43200 {
+			luaL_error(L, "date result cannot be represented in this installation")
+		}
 	}
-	rest := s[si:]
-	if string(rest) == "*t" {
-		lua.lua_createtable(L, 0, 9) // 9 date fields
-		setallfields(L, stm)
-	} else {
-		b: Buffer
-		luaL_buffinit(L, &b)
-		i := 0
-		for i < len(rest) {
-			if rest[i] != '%' {
-				luaL_addchar(&b, rest[i])
-				i += 1
-			} else {
-				i += 1 // skip '%'
-				cc: [4]u8
-				cc[0] = '%'
-				oplen := checkoption(L, rest[i:], cc[:])
-				i += oplen
-				buff := luaL_prepbuffsize(&b, SIZETIMEFMT)
-				reslen := libc.strftime(([^]libc.char)(buff), SIZETIMEFMT, cstring(&cc[0]), stm)
-				luaL_addsize(&b, uint(reslen))
+	c: Civil_Time
+	ok := true
+	if utc {
+		c = civil_at_timestamp(t)
+		when ODIN_OS == .Windows {
+			// UCRT accepts the final twelve hours before the epoch in gmtime,
+			// but computes tm_wday as though integer division truncated toward
+			// zero. It is odd, but it is observable in the reference build.
+			if t < 0 {
+				c.wday = 4
 			}
 		}
-		luaL_pushresult(&b)
+	} else {
+		c, ok = local_at_timestamp(t)
 	}
+	if !ok {
+		luaL_error(L, "date result cannot be represented in this installation")
+	}
+	rest := s[i:]
+	if string(rest) == "*t" {
+		lua.lua_createtable(L, 0, 9)
+		setallfields(L, c)
+		return 1
+	}
+	b: Buffer
+	luaL_buffinit(L, &b)
+	for p := 0; p < len(rest); {
+		if rest[p] != '%' {
+			luaL_addchar(&b, rest[p])
+			p += 1
+			continue
+		}
+		p += 1
+		n := checkoption(L, rest[p:])
+		format_conversion(&b, string(rest[p:p + n]), c, utc)
+		p += n
+	}
+	luaL_pushresult(&b)
 	return 1
 }
 
-// os.time([table]) -> the current time, or the time described by a date table.
 @(private = "file")
 os_time :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	t: libc.time_t
+	t: i64
 	if lua.lua_isnoneornil(L, 1) {
-		t = libc.time(nil)
+		t = time.to_unix_seconds(time.now())
 	} else {
 		luaL_checktype(L, 1, lua.LUA_TTABLE)
-		lua.lua_settop(L, 1) // keep the table at the top for the getfield helpers
-		ts: libc.tm
-		ts.tm_year = type_of(ts.tm_year)(getfield(L, "year", -1, 1900))
-		ts.tm_mon = type_of(ts.tm_mon)(getfield(L, "month", -1, 1))
-		ts.tm_mday = type_of(ts.tm_mday)(getfield(L, "day", -1, 0))
-		ts.tm_hour = type_of(ts.tm_hour)(getfield(L, "hour", 12, 0))
-		ts.tm_min = type_of(ts.tm_min)(getfield(L, "min", 0, 0))
-		ts.tm_sec = type_of(ts.tm_sec)(getfield(L, "sec", 0, 0))
-		ts.tm_isdst = type_of(ts.tm_isdst)(getboolfield(L, "isdst"))
-		t = libc.mktime(&ts)
-		setallfields(L, &ts) // write back the normalized fields
+		lua.lua_settop(L, 1)
+		year := i64(getfield(L, "year", -1, 1900) + 1900)
+		month := getfield(L, "month", -1, 1) + 1
+		day := getfield(L, "day", -1, 0)
+		hour := getfield(L, "hour", 12, 0)
+		minute := getfield(L, "min", 0, 0)
+		second := getfield(L, "sec", 0, 0)
+		wanted_dst := getboolfield(L, "isdst")
+		wall, nominal := normalize_civil(year, month, day, hour, minute, second)
+		normalized: Civil_Time
+		ok: bool
+		t, normalized, ok = timestamp_from_local(wall, nominal, wanted_dst)
+		if !ok {
+			luaL_error(L, "time result cannot be represented in this installation")
+		}
+		setallfields(L, normalized)
 	}
-	// With integer time the "cannot be represented" test reduces to the mktime
-	// failure sentinel.
-	if t == libc.time_t(-1) {
+	when ODIN_OS == .Windows {
+		if t < 0 {
+			luaL_error(L, "time result cannot be represented in this installation")
+		}
+	}
+	if t == -1 {
 		luaL_error(L, "time result cannot be represented in this installation")
 	}
 	lua.lua_pushinteger(L, lua.Integer(t))
 	return 1
 }
 
-// os.difftime(t2, t1) -> the difference, in seconds, between two times.
 @(private = "file")
 os_difftime :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	t1 := l_checktime(L, 1)
-	t2 := l_checktime(L, 2)
-	lua.lua_pushnumber(L, lua.Number(libc.difftime(t1, t2)))
+	lua.lua_pushnumber(L, lua.Number(l_checktime(L, 1) - l_checktime(L, 2)))
 	return 1
 }
 
 @(private = "file")
-locale_cats := [6]libc.Locale_Category {
-	.ALL,
-	.COLLATE,
-	.CTYPE,
-	.MONETARY,
-	.NUMERIC,
-	.TIME,
+os_clock :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := state(Lp)
+	when ODIN_OS == .Windows {
+		creation, exiting, kernel, user: win32.FILETIME
+		if win32.GetProcessTimes(win32.GetCurrentProcess(), &creation, &exiting, &kernel, &user) {
+			k := transmute(u64le)kernel
+			u := transmute(u64le)user
+			lua.lua_pushnumber(L, lua.Number(f64(k + u) / 10_000_000.0))
+			return 1
+		}
+	}
+	// tick_now is elapsed rather than CPU time, but is a sane standard-library
+	// fallback on targets whose OS bindings expose no process accounting.
+	lua.lua_pushnumber(L, lua.Number(f64(time.tick_now()._nsec) / 1e9))
+	return 1
+}
+
+@(private = "file")
+os_getenv :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := state(Lp)
+	name := luaL_checkstring(L, 1)
+	value, found := os.lookup_env(name, context.temp_allocator)
+	if found do lua.lua_pushstring(L, value)
+	else do lua.lua_pushnil(L)
+	return 1
+}
+
+@(private = "file")
+os_remove :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := state(Lp)
+	filename := luaL_checkstring(L, 1)
+	err := os.remove(filename)
+	return luaL_fileresult(L, err == nil, filename, true, err)
+}
+
+@(private = "file")
+os_rename :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := state(Lp)
+	err := os.rename(luaL_checkstring(L, 1), luaL_checkstring(L, 2))
+	return luaL_fileresult(L, err == nil, "", false, err)
+}
+
+@(private = "file")
+os_tmpname :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := state(Lp)
+	f, err := os.create_temp_file("", "lua-*")
+	if err != nil {
+		luaL_error(L, "unable to generate a unique filename")
+	}
+	name := os.name(f)
+	lua.lua_pushstring(L, name)
+	os.close(f)
+	when ODIN_OS == .Windows {
+		// core:os obtains a collision-free name by creating it. Windows Lua's
+		// tmpnam only returns the name, so remove the probe file before returning.
+		_ = os.remove(name)
+	}
+	return 1
+}
+
+@(private = "file")
+os_execute :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := state(Lp)
+	if lua.lua_isnoneornil(L, 1) {
+		when ODIN_OS == .Windows {
+			lua.lua_pushboolean(L, true) // cmd.exe is part of supported Windows.
+		} else {
+			f, err := os.open("/bin/sh")
+			lua.lua_pushboolean(L, err == nil)
+			if f != nil do os.close(f)
+		}
+		return 1
+	}
+	cmd := luaL_checkstring(L, 1)
+	args := []string{"cmd.exe", "/c", cmd} if ODIN_OS == .Windows else []string{"/bin/sh", "-c", cmd}
+	desc := os.Process_Desc {
+		command = args,
+		stdin = os.stdin,
+		stdout = os.stdout,
+		stderr = os.stderr,
+	}
+	p, err := os.process_start(desc)
+	if err != nil {
+		return luaL_execresult(L, -1, err)
+	}
+	ps, wait_err := os.process_wait(p)
+	if wait_err != nil {
+		return luaL_execresult(L, -1, wait_err)
+	}
+	return luaL_execresult(L, i32(ps.exit_code))
 }
 
 @(private = "file")
 locale_names := []string{"all", "collate", "ctype", "monetary", "numeric", "time"}
 
-// os.setlocale([locale [, category]]) -> configure/query the C locale.
 @(private = "file")
 os_setlocale :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	op := luaL_checkoption(L, 2, "all", locale_names)
-	if !lua.lua_isnoneornil(L, 1) && (op == 0 || op == 4) {
-		requested := luaL_checkstring(L, 1)
-		// Numeric conversion is freestanding and deliberately fixed to the C
-		// locale. Do not claim that a different LC_NUMERIC took effect while
-		// tonumber and numeric rendering continue to use '.', as that would
-		// expose an internally inconsistent locale to Lua code.
-		if requested != "C" && requested != "POSIX" {
-			lua.lua_pushnil(L)
-			return 1
-		}
+	_ = luaL_checkoption(L, 2, "all", locale_names)
+	if lua.lua_isnoneornil(L, 1) {
+		lua.lua_pushstring(L, "C")
+		return 1
 	}
-	// A missing/nil locale means "query", which maps to a NULL argument.
-	loc: cstring = nil
-	if !lua.lua_isnoneornil(L, 1) {
-		loc = cstr(luaL_checkstring(L, 1))
-	}
-	r := libc.setlocale(locale_cats[op], loc)
-	if r == nil {
-		lua.lua_pushnil(L)
+	requested := luaL_checkstring(L, 1)
+	if requested == "" || requested == "C" || requested == "POSIX" {
+		lua.lua_pushstring(L, "C")
 	} else {
-		lua.lua_pushstring(L, string(r))
+		lua.lua_pushnil(L)
 	}
 	return 1
 }
 
-// os.exit([code [, close]]) -> terminate the process (optionally closing the state
-// first so finalizers run).
 @(private = "file")
 os_exit :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	status: int
+	status := 0
 	if lua.lua_isboolean(L, 1) {
-		status = lua.lua_toboolean(L, 1) ? libc.EXIT_SUCCESS : libc.EXIT_FAILURE
+		status = lua.lua_toboolean(L, 1) ? 0 : 1
 	} else {
-		status = int(luaL_optinteger(L, 1, lua.Integer(libc.EXIT_SUCCESS)))
+		status = int(luaL_optinteger(L, 1, 0))
 	}
 	if lua.lua_toboolean(L, 2) {
-		lua.close_state(L) // run __gc finalizers and release the state
+		lua.close_state(L)
 	}
-	libc.exit(i32(status))
+	os.exit(status)
 }
 
 @(private = "file")
@@ -400,7 +709,6 @@ syslib := []Reg {
 	{"tmpname", os_tmpname},
 }
 
-// `luaopen_os` -- build and return the os table.
 luaopen_os :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)

@@ -56,6 +56,15 @@ Kept deliberately small and always documented:
   modules instead of C `luaopen_*` modules (std-lib-only Odin has no C ABI loader).
   Lua-source module loading works normally.
 - **Locale collation** falls back to byte order (no `strcoll`/`setlocale`).
+- **OS locale support is the C locale only.** `os.setlocale` accepts `"C"`,
+  `"POSIX"`, and `""`; other locale names return nil. Consequently
+  `os.date` uses fixed English C-locale names and C-locale `%c`/`%x`/`%X`
+  forms instead of the machine's localized names.
+- **OS error text** comes from Odin's `core:os`, so wording and capitalization
+  can differ from the C runtime's `strerror` text while the Lua result shape
+  remains `nil, message, code`.
+- **Local time on targets without an Odin OS time-zone bridge** falls back to
+  UTC. Windows uses the configured OS time zone and its DST transition rules.
 
 ## License
 

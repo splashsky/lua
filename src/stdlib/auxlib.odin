@@ -15,7 +15,9 @@ package stdlib
 // warning plumbing used by `luaL_newstate`.
 
 import "base:runtime"
-import "core:c/libc"
+import "core:io"
+import "core:os"
+import "core:time"
 import lua "luao:lua"
 import stream "luao:stream"
 
@@ -941,10 +943,10 @@ luaL_loadfilex :: proc(
 }
 
 // --------------------------------------------------------------------------------
-// libc string ↔ cstring helpers (kept local so nothing else needs to know)
+// C-string helpers retained for the few C-ABI boundaries still in the VM.
 // --------------------------------------------------------------------------------
 
-// Allocate a NUL-terminated copy of `s` for handing to libc. Freed with
+// Allocate a NUL-terminated copy of `s` for handing to a C ABI. Freed with
 // `delete_cstring`.
 cstring_from :: proc(s: string) -> cstring {
 	buf := make([]u8, len(s) + 1)
@@ -987,18 +989,35 @@ luaL_pushfail :: proc(L: ^lua.Lua_State) {
 // name if one was given), and the numeric errno. Callers pass `stat = true` for a
 // successful C call. The errno is read once up front because subsequent Lua API
 // calls may clobber it.
-luaL_fileresult :: proc(L: ^lua.Lua_State, stat: bool, fname: string, has_fname: bool) -> i32 {
-	en := libc.errno()^ // capture before any Lua API call can change it
+luaL_fileresult :: proc(
+	L: ^lua.Lua_State,
+	stat: bool,
+	fname: string,
+	has_fname: bool,
+	err: os.Error = nil,
+) -> i32 {
 	if stat {
 		lua.lua_pushboolean(L, true)
 		return 1
 	}
 	luaL_pushfail(L)
-	msg := en != 0 ? string(libc.strerror(en)) : "(no extra info)"
+	msg := err != nil ? os.error_string(err) : "(no extra info)"
 	if has_fname {
 		lua.lua_pushfstring(L, "%s: %s", fname, msg)
 	} else {
 		lua.lua_pushstring(L, msg)
+	}
+	en, ok := os.is_platform_error(err)
+	if !ok {
+		switch err {
+		case os.General_Error.Not_Exist: en = 2
+		case os.General_Error.Exist: en = 17
+		case io.Error.Permission_Denied: en = 13
+		case runtime.Allocator_Error.Out_Of_Memory: en = 12
+		case os.General_Error.Invalid_File, io.Error.Closed: en = 9
+		case os.General_Error.Broken_Pipe: en = 32
+		case: en = 5
+		}
 	}
 	lua.lua_pushinteger(L, lua.Integer(en))
 	return 3
@@ -1008,10 +1027,9 @@ luaL_fileresult :: proc(L: ^lua.Lua_State, stat: bool, fname: string, has_fname:
 // io's pclose. Without POSIX's `l_inspectstat` there is nothing to decode, so the
 // termination type is always "exit" and the code is the raw status: success is
 // status 0, and we push (true|fail, "exit", code).
-luaL_execresult :: proc(L: ^lua.Lua_State, stat: i32) -> i32 {
-	if stat != 0 && libc.errno()^ != 0 {
-		// A real errno means the command could not be launched at all.
-		return luaL_fileresult(L, false, "", false)
+luaL_execresult :: proc(L: ^lua.Lua_State, stat: i32, err: os.Error = nil) -> i32 {
+	if err != nil {
+		return luaL_fileresult(L, false, "", false, err)
 	}
 	if stat == 0 {
 		lua.lua_pushboolean(L, true)
@@ -1034,7 +1052,7 @@ luaL_makeseed :: proc(L: ^lua.Lua_State) -> u32 {
 	// A local's address supplies ASLR-derived entropy; the clock supplies the rest.
 	local: int
 	addr := uintptr(&local)
-	t := u64(libc.time(nil))
+	t := u64(time.to_unix_seconds(time.now()))
 	mixed := u64(addr) ~ (t * 0x9E3779B97F4A7C15) // golden-ratio odd multiplier
 	// Fold the 64 bits into 32 by XORing the halves, matching the reference's
 	// "xor the buffer words together" reduction.

@@ -19,6 +19,7 @@ package lua
 // they'd grow throwaway error handling we'd later rip out.
 //
 import "core:c/libc"
+import "base:runtime"
 
 // ---------------------------------------------------------------------------
 // Thread status / error codes
@@ -186,7 +187,7 @@ throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
 	if g != nil && g.panic != nil {
 		g.panic(L)
 	}
-	libc.abort()
+	runtime.exit(134)
 }
 
 // Throw straight to the *base* protected boundary of this thread -- reference
