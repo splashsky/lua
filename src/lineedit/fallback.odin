@@ -13,4 +13,5 @@ platform_redraw :: proc(bytes: []u8, shown_cells, cursor_cells, capacity: int) {
 platform_read :: proc() -> (Event, bool) { return {}, false }
 platform_clear :: proc(prompt: string) {}
 platform_bell :: proc() {}
+platform_interrupt :: proc(prompt: string) {}
 platform_finish :: proc() {}

@@ -1,5 +1,7 @@
 package lua
 
+import "base:intrinsics"
+
 // debug.odin -- our analogue of reference Lua's `ldebug.h` / `ldebug.c`.
 //
 // The reflection and diagnostics layer: mapping instructions back to source
@@ -691,6 +693,61 @@ luaG_traceexec :: proc(L: ^Lua_State, pc: int) -> i32 {
 // ---------------------------------------------------------------------------
 // The public debug API (reference Lua's ldebug.c LUA_API surface)
 // ---------------------------------------------------------------------------
+
+// A tiny, cross-thread-safe mailbox for hosted interrupt handlers. In
+// particular, a Windows console-control callback runs on a new OS thread: it
+// must not call lua_sethook, walk frames, allocate, or otherwise race the VM.
+// The owner fills the immutable hook description before arming it; the handler
+// publishes only `pending`, and the interpreter thread performs the real
+// lua_sethook at the next instruction boundary.
+Async_Hook_Request :: struct {
+	pending: i32,
+	hook:    Hook_Proc,
+	mask:    i32,
+	count:   i32,
+}
+
+// The standalone interpreter has one executing main state. Keeping the mailbox
+// pointer here avoids changing Lua_State's public/internal ABI merely for hosted
+// driver policy. Embedders never arm it, so their VM fast path sees nil.
+async_hook_request: ^Async_Hook_Request
+
+lua_prepare_async_hook :: proc(
+	L: ^Lua_State,
+	request: ^Async_Hook_Request,
+	hook: Hook_Proc,
+	mask, count: i32,
+) {
+	request.hook = hook
+	request.mask = mask
+	request.count = count
+	intrinsics.atomic_store(&request.pending, i32(0))
+	async_hook_request = request
+}
+
+// This is intentionally the only operation an OS handler performs. It is not a
+// general Lua API call: one atomic store is the whole implementation.
+lua_request_async_hook :: proc "contextless" (request: ^Async_Hook_Request) {
+	intrinsics.atomic_store(&request.pending, i32(1))
+}
+
+lua_disarm_async_hook :: proc(L: ^Lua_State, request: ^Async_Hook_Request) {
+	if async_hook_request == request {
+		async_hook_request = nil
+	}
+	intrinsics.atomic_store(&request.pending, i32(0))
+}
+
+// Called solely by the interpreter thread. Acquire/exchange pairs with the
+// handler's publication, so every ordinary Lua field remains single-threaded.
+lua_apply_async_hook :: proc(L: ^Lua_State) -> bool {
+	request := async_hook_request
+	if request == nil || intrinsics.atomic_exchange(&request.pending, i32(0)) == 0 {
+		return false
+	}
+	lua_sethook(L, request.hook, request.mask, request.count)
+	return true
+}
 
 // Install (or, with a nil func / zero mask, remove) a debug hook -- reference
 // `lua_sethook`. Installing a hook arms the trap flag on every live Lua frame so

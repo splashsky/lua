@@ -895,6 +895,11 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 		// before anything that can raise (so error line info is correct) and
 		// before every frame switch (so the caller resumes correctly).
 		for {
+			// Console/signal callbacks only publish an atomic request. Applying it
+			// here keeps all hook and frame mutation on the VM's own thread.
+			if lua_apply_async_hook(L) {
+				trap = 1
+			}
 			// Hook trap: when a line/count hook is installed this frame is marked
 			// trapping, and we consult `luaG_traceexec` before each instruction.
 			// In the common (no-hook) case `trap` is 0 and this costs one branch.

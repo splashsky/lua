@@ -13,15 +13,7 @@ package main
 // same control flow, same stack choreography) so that its observable behaviour
 // matches PUC-Rio Lua exactly.
 //
-// A few honest, documented deviations from the C original, forced by the
-// standard-library-only Odin setting:
-//
-//   * SIGINT handling is omitted. Reference Lua installs a signal handler during
-//     `docall` that converts Ctrl-C into a Lua "interrupted!" error via a debug
-//     hook. Wiring a C signal handler into an Odin runtime is fragile and buys us
-//     nothing for batch execution or the PUC-Rio test suite, so we leave the OS
-//     default in place. Interactive Ctrl-C terminates the process rather than the
-//     running chunk. Nothing else changes.
+// One documented structural deviation from the C original:
 //
 //   * The command-line vector is handed to `pmain` through a package-global
 //     (`g_argv`) whose storage lives across the protecting `lua_pcall`, instead of
@@ -96,6 +88,11 @@ g_argv: []string
 // statement after continuation lines have been joined. Keep the same ownership
 // here; individual editor invocations never add their physical line.
 repl_history: [dynamic]string
+
+// Static storage is important: an OS callback may still be finishing while
+// docall disarms it. The callback never dereferences L; it only publishes to
+// this mailbox, whose lifetime is the whole process.
+interrupt_request: lua.Async_Hook_Request
 
 // --------------------------------------------------------------------------------
 // Tiny string helpers. Odin strings coming from `os.args` are NOT guaranteed to be
@@ -193,14 +190,29 @@ msghandler :: proc "c" (Lp: rawptr) -> i32 {
 	return 1
 }
 
+// The actual interrupt runs as an ordinary Lua hook on the interpreter thread.
+// Reset first, exactly like reference lstop, so error handling cannot re-enter it.
+lstop :: proc "c" (Lp, ar: rawptr) {
+	context = runtime.default_context()
+	L := (^lua.Lua_State)(Lp)
+	lua.lua_sethook(L, nil, 0, 0)
+	aux.luaL_error(L, "interrupted!")
+}
+
 // Call a function already sitting on the stack (with `narg` arguments above it),
 // wrapping it with the message handler so errors arrive pre-tracebacked.
-// Reference docall (minus the SIGINT wiring, see the file header).
+// Reference docall. platform_interrupt_arm is deliberately scoped to the pcall:
+// Ctrl-C while ordinary driver/editor code is not mistaken for a running chunk.
 docall :: proc(L: ^lua.Lua_State, narg: int, nres: int) -> lua.Thread_Status {
 	base := lua.lua_gettop(L) - narg // function index
 	lua.lua_pushcfunction(L, msghandler) // push message handler
 	lua.lua_insert(L, base) // put it under function and args
+	flag := lua.LUA_MASKCALL | lua.LUA_MASKRET | lua.LUA_MASKLINE | lua.LUA_MASKCOUNT
+	lua.lua_prepare_async_hook(L, &interrupt_request, lstop, flag, 1)
+	platform_interrupt_arm()
 	status := lua.lua_pcall(L, narg, nres, base)
+	platform_interrupt_disarm()
+	lua.lua_disarm_async_hook(L, &interrupt_request)
 	lua.lua_remove(L, base) // remove message handler from the stack
 	return status
 }
@@ -681,6 +693,7 @@ pmain :: proc "c" (Lp: rawptr) -> i32 {
 
 main :: proc() {
 	g_argv = os.args // capture the command line; storage outlives the pcall below
+	platform_interrupt_init()
 
 	L := lua.new_state(lua.default_allocator()) // create the interpreter state
 	if L == nil {

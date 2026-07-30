@@ -86,6 +86,7 @@ platform_read :: proc() -> (Event, bool) {
 	}
 	if b == '\r' || b == '\n' { return Event{key = .Enter, repeat = 1}, true }
 	if b == 0x7f || b == 8 { return Event{key = .Backspace, repeat = 1}, true }
+	if b == 3 { return Event{key = .Interrupt, repeat = 1}, true }
 	if b != 0x1b {
 		return Event{key = .Character, bytes = {b, 0, 0, 0}, count = 1, repeat = 1}, true
 	}
@@ -132,4 +133,9 @@ platform_clear :: proc(prompt: string) {
 }
 
 platform_bell :: proc() { write_out([]u8{7}) }
+platform_interrupt :: proc(prompt: string) {
+	write_out([]u8{'^', 'C', '\r', '\n'})
+	write_out(transmute([]u8)prompt)
+	_ = platform_begin(prompt)
+}
 platform_finish :: proc() { write_out([]u8{'\r', '\n'}) }

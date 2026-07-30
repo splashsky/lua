@@ -32,6 +32,7 @@ Key :: enum {
 	Delete,
 	Backspace,
 	Eof,
+	Interrupt,
 	Redraw,
 }
 
@@ -464,6 +465,13 @@ read_line :: proc(
 					got_eof = true
 					done = true
 				}
+			case .Interrupt:
+				// Readline-style Ctrl-C: discard the draft and stay in the
+				// editor with a clean prompt. No Lua error is involved because
+				// docall (and therefore the execution interrupt) is not armed.
+				length, cursor, viewport = 0, 0, 0
+				history_pos = len(history)
+				platform_interrupt(prompt)
 			case .Left:
 				cursor = utf8_prev(line[:length], cursor)
 			case .Right:

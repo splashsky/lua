@@ -81,6 +81,9 @@ platform_read :: proc() -> (Event, bool) {
 			if w == 0 {
 				continue
 			}
+			if w == 3 {
+				return Event{key = .Interrupt, repeat = 1}, true
+			}
 			e.key = .Character
 			cp := u32(w)
 			if w >= 0xd800 && w <= 0xdbff {
@@ -133,6 +136,13 @@ platform_clear :: proc(prompt: string) {
 platform_bell :: proc() {
 	_ = stream.write(stream.stdout(), []u8{7})
 	stream.flush(stream.stdout())
+}
+
+platform_interrupt :: proc(prompt: string) {
+	_ = stream.write(stream.stdout(), []u8{'^', 'C', '\r', '\n'})
+	_ = stream.write(stream.stdout(), transmute([]u8)prompt)
+	stream.flush(stream.stdout())
+	_ = platform_begin(prompt)
 }
 
 platform_finish :: proc() {
