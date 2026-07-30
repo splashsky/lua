@@ -8,9 +8,9 @@ package stdlib
 // (math.random / math.randomseed).
 //
 // A note on faithfulness: operations with pure-Odin or hardware-backed
-// `core:math` implementations use those directly. sin/cos/exp remain on libc
-// because Odin currently lowers those particular intrinsics to libm calls; they
-// are handled by the dedicated libc-removal math task.
+// `core:math` implementations use those directly. The four LLVM-intrinsic
+// operations (sin/cos/exp/pow) go through lua's fdlibm-derived pure-Odin
+// kernels, because LLVM otherwise lowers them right back to libm calls.
 //
 // The PRNG is a straight port of reference 5.5's `xoshiro256**`, using the
 // 64-bit-integer branch (our `lua.Integer` is 64-bit). The generator state lives
@@ -18,7 +18,6 @@ package stdlib
 // and `math.randomseed`, exactly as reference does.
 
 import "base:runtime"
-import "core:c/libc"
 import "core:math"
 import lua "luao:lua"
 
@@ -34,7 +33,7 @@ state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
 PI :: 3.141592653589793238462643383279502884
 
 // --------------------------------------------------------------------------------
-// Basic floating-point functions (thin wrappers over libc)
+// Basic floating-point functions
 // --------------------------------------------------------------------------------
 
 // `math.abs` -- integer stays integer (with two's-complement-safe negation so
@@ -57,21 +56,21 @@ math_abs :: proc "c" (Lp: rawptr) -> i32 {
 math_sin :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(libc.sin(f64(luaL_checknumber(L, 1)))))
+	lua.lua_pushnumber(L, lua.num_sin(luaL_checknumber(L, 1)))
 	return 1
 }
 
 math_cos :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(libc.cos(f64(luaL_checknumber(L, 1)))))
+	lua.lua_pushnumber(L, lua.num_cos(luaL_checknumber(L, 1)))
 	return 1
 }
 
 math_tan :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(math.tan(f64(luaL_checknumber(L, 1)))))
+	lua.lua_pushnumber(L, lua.num_tan(luaL_checknumber(L, 1)))
 	return 1
 }
 
@@ -103,7 +102,7 @@ math_atan :: proc "c" (Lp: rawptr) -> i32 {
 math_exp :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(libc.exp(f64(luaL_checknumber(L, 1)))))
+	lua.lua_pushnumber(L, lua.num_exp(luaL_checknumber(L, 1)))
 	return 1
 }
 

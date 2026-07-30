@@ -1269,6 +1269,779 @@ int_arith :: proc "contextless" (op: Arith_Op, v1, v2: Integer) -> (Integer, boo
 	return 0, true
 }
 
+// Pure-Odin elementary functions used by Lua's arithmetic and math library.
+//
+// Why not the obvious `core:math` sine, cosine, power, and exponential?  In the Odin
+// version we build with, those four names are declarations of LLVM intrinsics.
+// LLVM lowers the intrinsics to calls to the platform math library, so merely
+// changing the spelling of the call would leave exactly the dependency we are
+// trying to remove.  The code below is real arithmetic, not a differently
+// spelled foreign call.  Its lineage is fdlibm/musl and the corresponding ports
+// in Go's math package.
+//
+// Sine and cosine share fdlibm's rem-pi/2 reduction.  Medium arguments subtract
+// three carefully split pieces of pi/2; huge arguments multiply base-2^24
+// chunks by the relevant window of a long 2/pi expansion.  The result is kept
+// as a two-double head and tail, then minimax kernels approximate sin and cos
+// on [-pi/4,pi/4].
+@(private = "file")
+num_sincos_cephes :: proc "contextless" (xin: Number) -> (sine, cosine: Number) #no_bounds_check {
+	PI4A :: 7.85398125648498535156e-1
+	PI4B :: 3.77489470793079817668e-8
+	PI4C :: 2.69515142907905952645e-15
+	REDUCE_THRESHOLD :: 1 << 29
+
+	bits := transmute(u64)xin
+	abs_bits := bits & 0x7fff_ffff_ffff_ffff
+	if abs_bits == 0 {
+		return xin, 1 // preserve the sign of zero
+	}
+	if abs_bits >= 0x7ff0_0000_0000_0000 {
+		if abs_bits > 0x7ff0_0000_0000_0000 {
+			return xin, xin // preserve a NaN payload
+		}
+		nan := transmute(Number)u64(0x7ff8_0000_0000_0000)
+		return nan, nan
+	}
+
+	x := transmute(Number)abs_bits
+	sin_negative := bits >> 63 != 0
+	cos_negative := false
+	j: u64
+	z: Number
+
+	if x >= REDUCE_THRESHOLD {
+		j, z = num_trig_reduce(x)
+	} else {
+		j = u64(x * (4 / 3.141592653589793238462643383279502884))
+		y := Number(j)
+		// Odd octants are represented relative to their far endpoint.  Moving
+		// to that endpoint keeps the polynomial argument centered on zero.
+		if j & 1 != 0 {
+			j += 1
+			y += 1
+		}
+		j &= 7
+		z = ((x - y*PI4A) - y*PI4B) - y*PI4C
+	}
+
+	if j > 3 {
+		j -= 4
+		sin_negative = !sin_negative
+		cos_negative = !cos_negative
+	}
+	if j > 1 {
+		cos_negative = !cos_negative
+	}
+
+	zz := z * z
+	// Cephes/fdlibm minimax kernels.  Written in Horner form, these are
+	// z + z^3 P(z^2) and 1 - z^2/2 + z^4 Q(z^2).
+	sin_poly := 1.58962301576546568060e-10
+	sin_poly = sin_poly*zz - 2.50507477628578072866e-8
+	sin_poly = sin_poly*zz + 2.75573136213857245213e-6
+	sin_poly = sin_poly*zz - 1.98412698295895385996e-4
+	sin_poly = sin_poly*zz + 8.33333333332211858878e-3
+	sin_poly = sin_poly*zz - 1.66666666666666307295e-1
+	sine = z + z*zz*sin_poly
+
+	cos_poly := -1.13585365213876817300e-11
+	cos_poly = cos_poly*zz + 2.08757008419747316778e-9
+	cos_poly = cos_poly*zz - 2.75573141792967388112e-7
+	cos_poly = cos_poly*zz + 2.48015872888517045348e-5
+	cos_poly = cos_poly*zz - 1.38888888888730564116e-3
+	cos_poly = cos_poly*zz + 4.16666666666665929218e-2
+	cosine = 1.0 - 0.5*zz + zz*zz*cos_poly
+
+	if j == 1 || j == 2 {
+		sine, cosine = cosine, sine
+	}
+	if sin_negative {
+		sine = -sine
+	}
+	if cos_negative {
+		cosine = -cosine
+	}
+	return
+}
+
+// Payne-Hanek reduction by pi/4 used by the older compact kernel below.
+// `x` is finite and positive.  The returned
+// octant is modulo eight and `z` is the small residual in radians.
+@(private = "file")
+num_trig_reduce :: proc "contextless" (x: Number) -> (j: u64, z: Number) #no_bounds_check {
+	@(static, rodata) four_over_pi := [20]u64 {
+		0x0000000000000001, 0x45f306dc9c882a53,
+		0xf84eafa3ea69bb81, 0xb6c52b3278872083,
+		0xfca2c757bd778ac3, 0x6e48dc74849ba5c0,
+		0x0c925dd413a32439, 0xfc3bd63962534e7d,
+		0xd1046bea5d768909, 0xd338e04d68befc82,
+		0x7323ac7306a673e9, 0x3908bf177bf25076,
+		0x3ff12fffbc0b301f, 0xde5e2316b414da3e,
+		0xda6cfd9e4f96136e, 0x9e8c7ecd3cbfd45a,
+		0xea4f758fd7cbe2f6, 0x7a0e73ef14a525d4,
+		0xd7f6bf623f1aba10, 0xac06608df8f6d757,
+	}
+	SHIFT :: 52
+	BIAS :: 1023
+
+	ix := transmute(u64)x
+	exponent := int((ix >> SHIFT) & 0x7ff) - BIAS - SHIFT
+	ix = (ix & 0x000f_ffff_ffff_ffff) | (u64(1) << SHIFT)
+
+	digit := uint(exponent + 61) / 64
+	shift := uint(exponent + 61) % 64
+	// Odin defines an over-wide unsigned shift as zero.  That lets the same
+	// expression cover the uncommon, but valid, shift==0 window boundary.
+	z0 := (four_over_pi[digit] << shift) |
+		(four_over_pi[digit+1] >> (64-shift))
+	z1 := (four_over_pi[digit+1] << shift) |
+		(four_over_pi[digit+2] >> (64-shift))
+	z2 := (four_over_pi[digit+2] << shift) |
+		(four_over_pi[digit+3] >> (64-shift))
+
+	p2 := u128(z2) * u128(ix)
+	p1 := u128(z1) * u128(ix)
+	z2_hi := u64(p2 >> 64)
+	z1_hi, z1_lo := u64(p1 >> 64), u64(p1)
+	lo := z1_lo + z2_hi
+	carry := u64(lo < z1_lo)
+	hi := z0*ix + z1_hi
+	old_hi := hi
+	hi += carry
+	_ = old_hi // addition modulo 2^64 is intentional
+
+	j = hi >> 61
+	hi = hi<<3 | lo>>61
+	leading := uint(0)
+	probe := hi
+	for probe & (u64(1)<<63) == 0 {
+		leading += 1
+		probe <<= 1
+	}
+	e := u64(BIAS - (leading + 1))
+	hi = (hi << (leading + 1)) | (lo >> (64-(leading+1)))
+	hi >>= 12
+	hi |= e << SHIFT
+	z = transmute(Number)hi
+	if j & 1 != 0 {
+		j = (j + 1) & 7
+		z -= 1
+	}
+	return j, z * (3.141592653589793238462643383279502884 / 4)
+}
+
+@(private = "file")
+num_sin_kernel :: proc "contextless" (x, tail: Number) -> Number {
+	S1 :: -1.66666666666666324348e-1
+	S2 :: 8.33333333332248946124e-3
+	S3 :: -1.98412698298579493134e-4
+	S4 :: 2.75573137070700676789e-6
+	S5 :: -2.50507602534068634195e-8
+	S6 :: 1.58969099521155010221e-10
+	z := x*x
+	w := z*z
+	r := S2 + z*(S3+z*S4) + z*w*(S5+z*S6)
+	v := z*x
+	return x - ((z*(0.5*tail-v*r)-tail)-v*S1)
+}
+
+@(private = "file")
+num_cos_kernel :: proc "contextless" (x, tail: Number) -> Number {
+	C1 :: 4.16666666666666019037e-2
+	C2 :: -1.38888888888741095749e-3
+	C3 :: 2.48015872894767294178e-5
+	C4 :: -2.75573143513906633035e-7
+	C5 :: 2.08757232129817482790e-9
+	C6 :: -1.13596475577881948265e-11
+	z := x*x
+	w := z*z
+	r := z*(C1+z*(C2+z*C3)) + w*w*(C4+z*(C5+z*C6))
+	half_z := 0.5*z
+	w = 1-half_z
+	return w + (((1-w)-half_z)+(z*r-x*tail))
+}
+
+// The large fdlibm reducer works in base 2^24.  It multiplies only the window
+// of 2/pi that can affect the low three quotient bits, then reconstructs the
+// remainder as a two-double expansion.  Retaining that tail keeps results near enormous
+// multiples of pi/2 accurate to the last bit.
+@(private = "file")
+num_rem_pio2_large :: proc "contextless" (input: [3]Number, nx, e0: int) -> (n: int, y0, y1: Number) #no_bounds_check {
+	IPIO2 := [66]i32 {
+		0xA2F983,0x6E4E44,0x1529FC,0x2757D1,0xF534DD,0xC0DB62,
+		0x95993C,0x439041,0xFE5163,0xABDEBB,0xC561B7,0x246E3A,
+		0x424DD2,0xE00649,0x2EEA09,0xD1921C,0xFE1DEB,0x1CB129,
+		0xA73EE8,0x8235F5,0x2EBB44,0x84E99C,0x7026B4,0x5F7E41,
+		0x3991D6,0x398353,0x39F49C,0x845F8B,0xBDF928,0x3B1FF8,
+		0x97FFDE,0x05980F,0xEF2F11,0x8B5A0A,0x6D1F6D,0x367ECF,
+		0x27CB09,0xB74F46,0x3F669E,0x5FEA2D,0x7527BA,0xC7EBE5,
+		0xF17B3D,0x0739F7,0x8A5292,0xEA6BFB,0x5FB11F,0x8D5D08,
+		0x560330,0x46FC7B,0x6BABF0,0xCFBC20,0x9AF436,0x1DA9E3,
+		0x91615E,0xE61B08,0x659985,0x5F14A0,0x68408D,0xFFD880,
+		0x4D7327,0x310606,0x1556CA,0x73A8C9,0x60E27B,0xC08C6B,
+	}
+	PIO2 := [5]Number {
+		1.57079625129699707031e+0,
+		7.54978941586159635335e-8,
+		5.39030252995776476554e-15,
+		3.28200341580791294123e-22,
+		1.27065575308067607349e-29,
+	}
+	f, fq, q: [20]Number
+	iq: [20]i32
+	jk, jp := 4, 4
+	jx := nx-1
+	jv := (e0-3)/24
+	if jv < 0 {
+		jv = 0
+	}
+	q0 := e0-24*(jv+1)
+	j := jv-jx
+	m := jx+jk
+	for i := 0; i <= m; i += 1 {
+		f[i] = j < 0 ? 0 : Number(IPIO2[j])
+		j += 1
+	}
+	for i := 0; i <= jk; i += 1 {
+		fw := Number(0)
+		for jj := 0; jj <= jx; jj += 1 {
+			fw += input[jj]*f[jx+i-jj]
+		}
+		q[i] = fw
+	}
+
+	jz := jk
+	ih := 0
+	z := Number(0)
+	for {
+		z = q[jz]
+		i, jj := 0, jz
+		for jj > 0 {
+			fw := Number(i32(math.ldexp(z, -24)))
+			iq[i] = i32(z-16777216.0*fw)
+			z = q[jj-1]+fw
+			i += 1
+			jj -= 1
+		}
+		z = math.ldexp(z, q0)
+		z -= 8*math.floor(z*0.125)
+		n = int(i32(z))
+		z -= Number(n)
+		ih = 0
+		if q0 > 0 {
+			i = int(iq[jz-1] >> uint(24-q0))
+			n += i
+			iq[jz-1] -= i32(i << uint(24-q0))
+			ih = int(iq[jz-1] >> uint(23-q0))
+		} else if q0 == 0 {
+			ih = int(iq[jz-1] >> 23)
+		} else if z >= 0.5 {
+			ih = 2
+		}
+		if ih > 0 {
+			n += 1
+			carry := false
+			for ii := 0; ii < jz; ii += 1 {
+				value := iq[ii]
+				if !carry {
+					if value != 0 {
+						carry = true
+						iq[ii] = 0x1000000-value
+					}
+				} else {
+					iq[ii] = 0xffffff-value
+				}
+			}
+			if q0 == 1 {
+				iq[jz-1] &= 0x7fffff
+			} else if q0 == 2 {
+				iq[jz-1] &= 0x3fffff
+			}
+			if ih == 2 {
+				z = 1-z
+				if carry {
+					z -= math.ldexp(Number(1), q0)
+				}
+			}
+		}
+
+		need_more := false
+		if z == 0 {
+			bits := i32(0)
+			for ii := jz-1; ii >= jk; ii -= 1 {
+				bits |= iq[ii]
+			}
+			if bits == 0 {
+				k := 1
+				for iq[jk-k] == 0 {
+					k += 1
+				}
+				for ii := jz+1; ii <= jz+k; ii += 1 {
+					f[jx+ii] = Number(IPIO2[jv+ii])
+					fw := Number(0)
+					for jj := 0; jj <= jx; jj += 1 {
+						fw += input[jj]*f[jx+ii-jj]
+					}
+					q[ii] = fw
+				}
+				jz += k
+				need_more = true
+			}
+		}
+		if !need_more {
+			break
+		}
+	}
+
+	if z == 0 {
+		jz -= 1
+		q0 -= 24
+		for iq[jz] == 0 {
+			jz -= 1
+			q0 -= 24
+		}
+	} else {
+		z = math.ldexp(z, -q0)
+		if z >= 16777216 {
+			fw := Number(i32(math.ldexp(z, -24)))
+			iq[jz] = i32(z-16777216*fw)
+			jz += 1
+			q0 += 24
+			iq[jz] = i32(fw)
+		} else {
+			iq[jz] = i32(z)
+		}
+	}
+
+	fw := math.ldexp(Number(1), q0)
+	for i := jz; i >= 0; i -= 1 {
+		q[i] = fw*Number(iq[i])
+		fw *= 1.0/16777216.0
+	}
+	for i := jz; i >= 0; i -= 1 {
+		fw = 0
+		for k := 0; k <= jp && k <= jz-i; k += 1 {
+			fw += PIO2[k]*q[i+k]
+		}
+		fq[jz-i] = fw
+	}
+	fw = 0
+	for i := jz; i >= 0; i -= 1 {
+		fw += fq[i]
+	}
+	y0 = ih == 0 ? fw : -fw
+	fw = fq[0]-fw
+	for i := 1; i <= jz; i += 1 {
+		fw += fq[i]
+	}
+	y1 = ih == 0 ? fw : -fw
+	return n&7, y0, y1
+}
+
+@(private = "file")
+num_rem_pio2 :: proc "contextless" (x: Number) -> (n: int, y0, y1: Number) #no_bounds_check {
+	PIO4 :: 7.85398163397448278999e-1
+	INVPIO2 :: 6.36619772367581382433e-1
+	PIO2_1 :: 1.57079632673412561417e+0
+	PIO2_1T :: 6.07710050650619224932e-11
+	PIO2_2 :: 6.07710050630396597660e-11
+	PIO2_2T :: 2.02226624879595063154e-21
+	PIO2_3 :: 2.02226624871116645580e-21
+	PIO2_3T :: 8.47842766036889956997e-32
+	TOINT :: 6755399441055744.0
+
+	bits := transmute(u64)x
+	ix := u32(bits>>32) & 0x7fff_ffff
+	if ix < 0x4139_21fb {
+		fn := x*INVPIO2 + (x < 0 ? -TOINT : TOINT)
+		fn -= x < 0 ? -TOINT : TOINT
+		n = int(i32(fn))
+		r := x-fn*PIO2_1
+		w := fn*PIO2_1T
+		if r-w < -PIO4 {
+			n -= 1; fn -= 1; r = x-fn*PIO2_1; w = fn*PIO2_1T
+		} else if r-w > PIO4 {
+			n += 1; fn += 1; r = x-fn*PIO2_1; w = fn*PIO2_1T
+		}
+		y0 = r-w
+		ey := int((transmute(u64)y0>>52)&0x7ff)
+		ex := int(ix>>20)
+		if ex-ey > 16 {
+			t := r
+			w = fn*PIO2_2
+			r = t-w
+			w = fn*PIO2_2T-((t-r)-w)
+			y0 = r-w
+			ey = int((transmute(u64)y0>>52)&0x7ff)
+			if ex-ey > 49 {
+				t = r
+				w = fn*PIO2_3
+				r = t-w
+				w = fn*PIO2_3T-((t-r)-w)
+				y0 = r-w
+			}
+		}
+		y1 = (r-y0)-w
+		return
+	}
+
+	normalized_bits := (bits & 0x000f_ffff_ffff_ffff) | (u64(1023+23)<<52)
+	z := transmute(Number)normalized_bits
+	pieces: [3]Number
+	for i in 0..<2 {
+		pieces[i] = Number(i32(z))
+		z = (z-pieces[i])*16777216
+	}
+	pieces[2] = z
+	nx := 3
+	for pieces[nx-1] == 0 {
+		nx -= 1
+	}
+	n, y0, y1 = num_rem_pio2_large(pieces, nx, int(ix>>20)-(1023+23))
+	if bits>>63 != 0 {
+		return -n, -y0, -y1
+	}
+	return
+}
+
+@(private = "file")
+num_sincos :: proc "contextless" (x: Number) -> (sine, cosine: Number) {
+	bits := transmute(u64)x
+	ax := bits & 0x7fff_ffff_ffff_ffff
+	if ax == 0 {
+		return x, 1
+	}
+	if ax >= 0x7ff0_0000_0000_0000 {
+		if ax > 0x7ff0_0000_0000_0000 {
+			return x, x
+		}
+		nan := transmute(Number)u64(0x7ff8_0000_0000_0000)
+		return nan, nan
+	}
+	if ax <= 0x3fe9_21fb_5444_2d18 {
+		return num_sin_kernel(x, 0), num_cos_kernel(x, 0)
+	}
+	n, hi, lo := num_rem_pio2(x)
+	s := num_sin_kernel(hi, lo)
+	c := num_cos_kernel(hi, lo)
+	switch n&3 {
+	case 0: return s, c
+	case 1: return c, -s
+	case 2: return -s, -c
+	case:   return -c, s
+	}
+}
+
+num_sin :: proc "contextless" (x: Number) -> Number {
+	s, _ := num_sincos(x)
+	return s
+}
+
+num_cos :: proc "contextless" (x: Number) -> Number {
+	_, c := num_sincos(x)
+	return c
+}
+
+// core:math's tangent is implemented as its intrinsic sine divided by its
+// intrinsic cosine.  Keep the same definition, but feed it our pure kernels.
+num_tan :: proc "contextless" (x: Number) -> Number {
+	s, c := num_sincos(x)
+	return s / c
+}
+
+// Exponential follows fdlibm's e_exp (also used by musl and Go).  We first
+// write x = k*ln(2) + r with |r| <= ln(2)/2.  Splitting ln(2) into high and
+// low words keeps the subtraction accurate.  A degree-five minimax polynomial
+// approximates r*(exp(r)+1)/(exp(r)-1); rearranging that rational expression
+// gives exp(r) without cancellation, after which ldexp supplies the exact 2^k.
+num_exp :: proc "contextless" (x: Number) -> Number {
+	LN2_HI :: 6.93147180369123816490e-1
+	LN2_LO :: 1.90821492927058770002e-10
+	LOG2_E :: 1.44269504088896338700e+00
+	OVERFLOW :: 7.09782712893383973096e+02
+	UNDERFLOW :: -7.45133219101941108420e+02
+	NEAR_ZERO :: 1.0 / (1 << 28)
+
+	ux := transmute(u64)x
+	ax := ux & 0x7fff_ffff_ffff_ffff
+	if ax > 0x7ff0_0000_0000_0000 {
+		return x
+	}
+	if ax == 0x7ff0_0000_0000_0000 {
+		return ux >> 63 == 0 ? x : 0
+	}
+	if x > OVERFLOW {
+		return transmute(Number)u64(0x7ff0_0000_0000_0000)
+	}
+	if x < UNDERFLOW {
+		return 0
+	}
+	if x > -NEAR_ZERO && x < NEAR_ZERO {
+		return 1 + x
+	}
+
+	k := x < 0 ? int(LOG2_E*x - 0.5) : int(LOG2_E*x + 0.5)
+	hi := x - Number(k)*LN2_HI
+	lo := Number(k)*LN2_LO
+	r := hi - lo
+	t := r * r
+	c := r - t*(1.66666666666666657415e-1 +
+		t*(-2.77777777770155933842e-3 +
+		t*(6.61375632143793436117e-5 +
+		t*(-1.65339022054652515390e-6 +
+		t*4.13813679705723846039e-8))))
+	y := 1 - ((lo - (r*c)/(2-c)) - hi)
+	return math.ldexp(y, k)
+}
+
+@(private = "file")
+num_pow_odd_integer :: proc "contextless" (x: Number) -> bool {
+	ax := x < 0 ? -x : x
+	if ax >= Number(u64(1)<<53) {
+		// Beyond 2^53 every representable integral double is even.
+		return false
+	}
+	whole, fraction := math.modf(ax)
+	return fraction == 0 && (u64(whole) & 1) != 0
+}
+
+@(private = "file")
+num_pow_clear_low_word :: proc "contextless" (x: Number) -> Number {
+	return transmute(Number)(transmute(u64)x & 0xffff_ffff_0000_0000)
+}
+
+// The finite, positive-base core of fdlibm's e_pow.  It computes log2(a) as
+// two doubles, multiplies that double-double value by y, and finally evaluates
+// 2^(high+low).  Keeping the low pieces is what prevents the many-ulp drift of
+// the simpler exp(y*log(a)) formula when |y| is large.
+@(private = "file")
+num_pow_positive :: proc "contextless" (a, y: Number, negative_result: bool) -> Number {
+	BP := [2]Number{1.0, 1.5}
+	DP_H := [2]Number{0.0, 5.84962487220764160156e-1}
+	DP_L := [2]Number{0.0, 1.35003920212974897128e-8}
+	L1 :: 5.99999999999994648725e-1
+	L2 :: 4.28571428578550184252e-1
+	L3 :: 3.33333329818377432918e-1
+	L4 :: 2.72728123808534006489e-1
+	L5 :: 2.30660745775561754067e-1
+	L6 :: 2.06975017800338417784e-1
+	P1 :: 1.66666666666666019037e-1
+	P2 :: -2.77777777770155933842e-3
+	P3 :: 6.61375632143793436117e-5
+	P4 :: -1.65339022054652515390e-6
+	P5 :: 4.13813679705723846039e-8
+	LG2 :: 6.93147180559945286227e-1
+	LG2_H :: 6.93147182464599609375e-1
+	LG2_L :: -1.90465429995776804525e-9
+	OVT :: 8.0085662595372944372e-17
+	CP :: 9.61796693925975554329e-1
+	CP_H :: 9.61796700954437255859e-1
+	CP_L :: -7.02846165095275826516e-9
+	IVLN2 :: 1.44269504088896338700e+0
+	IVLN2_H :: 1.44269502162933349609e+0
+	IVLN2_L :: 1.92596299112661746887e-8
+
+	ax := a
+	abits := transmute(u64)ax
+	ix := u32(abits >> 32) & 0x7fff_ffff
+	ay := transmute(u64)y & 0x7fff_ffff_ffff_ffff
+	t1, t2: Number
+
+	if ay > 0x41e0_0000_0000_0000 { // |y| > 2^31
+		// Unless a is extraordinarily close to one, a huge exponent has an
+		// unambiguous overflow/underflow result.
+		if ay > 0x43f0_0000_0000_0000 { // |y| > 2^64
+			if a < 1 {
+				return y < 0 ? transmute(Number)u64(0x7ff0_0000_0000_0000) : 0
+			}
+			if a > 1 {
+				return y > 0 ? transmute(Number)u64(0x7ff0_0000_0000_0000) : 0
+			}
+		}
+		if ix < 0x3fef_ffff {
+			return y < 0 ? transmute(Number)u64(0x7ff0_0000_0000_0000) : 0
+		}
+		if ix > 0x3ff0_0000 {
+			return y > 0 ? transmute(Number)u64(0x7ff0_0000_0000_0000) : 0
+		}
+
+		// Here |1-a| <= 2^-20.  The short log1p series has enough spare
+		// precision, and avoids subtracting two nearly equal logarithms.
+		t := a - 1
+		w := t*t*(0.5 - t*(1.0/3.0 - t*0.25))
+		u := IVLN2_H*t
+		v := t*IVLN2_L - w*IVLN2
+		t1 = num_pow_clear_low_word(u + v)
+		t2 = v - (t1 - u)
+	} else {
+		n := 0
+		if ix < 0x0010_0000 {
+			ax *= 9007199254740992.0 // normalize a subnormal with 2^53
+			n -= 53
+			abits = transmute(u64)ax
+			ix = u32(abits >> 32) & 0x7fff_ffff
+		}
+		n += int(ix >> 20) - 1023
+		j := ix & 0x000f_ffff
+		ix = j | 0x3ff0_0000
+		k := 0
+		if j <= 0x3988e {
+			k = 0
+		} else if j < 0xbb67a {
+			k = 1
+		} else {
+			n += 1
+			ix -= 0x0010_0000
+		}
+		abits = (abits & 0x0000_0000_ffff_ffff) | (u64(ix) << 32)
+		ax = transmute(Number)abits
+
+		u := ax - BP[k]
+		v := 1 / (ax + BP[k])
+		s := u*v
+		s_hi := num_pow_clear_low_word(s)
+		th_bits := u64(((ix >> 1) | 0x2000_0000) + 0x0008_0000 + u32(k<<18)) << 32
+		t_hi := transmute(Number)th_bits
+		t_lo := ax - (t_hi - BP[k])
+		s_lo := v*((u - s_hi*t_hi) - s_hi*t_lo)
+		s2 := s*s
+		r := s2*s2*(L1 + s2*(L2 + s2*(L3 + s2*(L4 + s2*(L5 + s2*L6)))))
+		r += s_lo*(s_hi+s)
+		s2 = s_hi*s_hi
+		t_hi = num_pow_clear_low_word(3.0 + s2 + r)
+		t_lo = r - ((t_hi-3.0)-s2)
+		u = s_hi*t_hi
+		v = s_lo*t_hi + t_lo*s
+		p_hi := num_pow_clear_low_word(u+v)
+		p_lo := v - (p_hi-u)
+		z_hi := CP_H*p_hi
+		z_lo := CP_L*p_hi + p_lo*CP + DP_L[k]
+		dn := Number(n)
+		t1 = num_pow_clear_low_word(((z_hi+z_lo)+DP_H[k])+dn)
+		t2 = z_lo - (((t1-dn)-DP_H[k])-z_hi)
+	}
+
+	y1 := num_pow_clear_low_word(y)
+	p_lo := (y-y1)*t1 + y*t2
+	p_hi := y1*t1
+	z := p_lo+p_hi
+	sign := negative_result ? Number(-1) : Number(1)
+	if z > 1024 || (z == 1024 && p_lo+OVT > z-p_hi) {
+		return sign * transmute(Number)u64(0x7ff0_0000_0000_0000)
+	}
+	if z < -1075 || (z == -1075 && p_lo <= z-p_hi) {
+		return sign * 0
+	}
+
+	// Split z into an integer n and a residual in [-0.5,0.5], using fdlibm's
+	// bit operation rather than a rounding-mode-sensitive library helper.
+	zbits := transmute(u64)z
+	jz := i32(u32(zbits >> 32))
+	magnitude_hi := u32(jz) & 0x7fff_ffff
+	n := 0
+	if magnitude_hi > 0x3fe0_0000 {
+		k := int(magnitude_hi >> 20) - 1023
+		nword := jz + i32(u32(0x0010_0000) >> u32(k+1))
+		k = int((u32(nword)&0x7fff_ffff)>>20)-1023
+		tbits := u64(u32(nword) & ~(u32(0x000f_ffff) >> u32(k))) << 32
+		t := transmute(Number)tbits
+		n = int(((u32(nword)&0x000f_ffff)|0x0010_0000) >> u32(20-k))
+		if jz < 0 {
+			n = -n
+		}
+		p_hi -= t
+	}
+
+	t := num_pow_clear_low_word(p_lo+p_hi)
+	u := t*LG2_H
+	v := (p_lo-(t-p_hi))*LG2 + t*LG2_L
+	z = u+v
+	w := v-(z-u)
+	t = z*z
+	t1 = z - t*(P1+t*(P2+t*(P3+t*(P4+t*P5))))
+	r := (z*t1)/(t1-2) - (w+z*w)
+	z = 1-(r-z)
+
+	zbits = transmute(u64)z
+	new_high := i64(u32(zbits>>32)) + i64(n)*0x0010_0000
+	if new_high >> 20 <= 0 {
+		z = math.ldexp(z, n)
+	} else {
+		zbits = (zbits & 0x0000_0000_ffff_ffff) | (u64(new_high) << 32)
+		z = transmute(Number)zbits
+	}
+	return sign*z
+}
+
+// Power needs more care than `exp(y*log(x))`: that tempting formula rounds exact
+// powers, mishandles negative bases, and loses the signs of zero and infinity.
+// fdlibm instead computes log2(|x|) as a high/low pair, multiplies both pieces
+// by y, and evaluates 2^(high+low) with another split reduction.  In particular,
+// representable integer powers such as 2^53 and 2^1023 are assembled exactly.
+num_pow :: proc "contextless" (x, y: Number) -> Number {
+	ux, uy := transmute(u64)x, transmute(u64)y
+	ax, ay := ux & 0x7fff_ffff_ffff_ffff, uy & 0x7fff_ffff_ffff_ffff
+	inf_bits :: u64(0x7ff0_0000_0000_0000)
+	nan_bits :: u64(0x7ff8_0000_0000_0000)
+
+	if ay == 0 || x == 1 {
+		return 1
+	}
+	if y == 1 {
+		return x
+	}
+	if ax > inf_bits || ay > inf_bits {
+		return transmute(Number)nan_bits
+	}
+	if ax == 0 {
+		if y < 0 {
+			if ux >> 63 != 0 && num_pow_odd_integer(y) {
+				return transmute(Number)u64(0xfff0_0000_0000_0000)
+			}
+			return transmute(Number)inf_bits
+		}
+		if ux >> 63 != 0 && num_pow_odd_integer(y) {
+			return x
+		}
+		return 0
+	}
+	if ay == inf_bits {
+		if x == -1 {
+			return 1
+		}
+		if ((x < 0 ? -x : x) < 1) == (uy >> 63 == 0) {
+			return 0
+		}
+		return transmute(Number)inf_bits
+	}
+	if ax == inf_bits {
+		if ux >> 63 != 0 {
+			// pow(-inf,y) has the same magnitude/sign rules as pow(-0,-y).
+			zero := transmute(Number)u64(0x8000_0000_0000_0000)
+			return num_pow(zero, -y)
+		}
+		return y < 0 ? 0 : transmute(Number)inf_bits
+	}
+	if y == 0.5 {
+		return math.sqrt(x)
+	}
+	if y == -0.5 {
+		return 1 / math.sqrt(x)
+	}
+
+	yi, yf := math.modf(y < 0 ? -y : y)
+	if yf != 0 && x < 0 {
+		return transmute(Number)nan_bits
+	}
+	if x == -1 {
+		return num_pow_odd_integer(y) ? -1 : 1
+	}
+	_ = yi
+	negative_result := x < 0 && num_pow_odd_integer(y)
+	return num_pow_positive(x < 0 ? -x : x, y, negative_result)
+}
+
 // A correct IEEE-754 double `fmod`, implemented in pure Odin.
 //
 // Why not `libc.fmod`? On at least one of our target toolchains (Windows/MSVC via
@@ -1395,7 +2168,7 @@ flt_arith :: proc "contextless" (op: Arith_Op, v1, v2: Number) -> Number {
 		return v1 / v2
 	case .Pow:
 		// luai_numpow special-cases the common square to avoid calling pow().
-		return v2 == 2 ? v1 * v1 : libc.pow(v1, v2)
+		return v2 == 2 ? v1 * v1 : num_pow(v1, v2)
 	case .IDiv:
 		return math.floor(v1 / v2)
 	case .Unm:
