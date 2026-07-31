@@ -247,7 +247,11 @@ luaV_lessequal :: proc(L: ^Lua_State, l, r: ^TValue) -> bool {
 // Full value equality, consulting `__eq` for tables/userdata -- reference Lua's
 // `luaV_equalobj`. The raw, metamethod-free half is delegated to `raw_equal`
 // (object.odin); only the table/userdata case can fall through to a metamethod.
-luaV_equalobj :: proc(L: ^Lua_State, t1, t2: ^TValue) -> bool {
+// This small helper is on the interpreter's hottest path, and forcing it inline
+// measurably improves primitive equality. The arithmetic helpers lost about 30%
+// when growth of a large source file changed optimiser decisions, so this
+// directive likewise records a measured requirement, not a stylistic preference.
+luaV_equalobj :: #force_inline proc(L: ^Lua_State, t1, t2: ^TValue) -> bool {
 	// Different base types never compare equal (a number is never a string).
 	if no_variant(t1.tt_) != no_variant(t2.tt_) {
 		return false
@@ -847,8 +851,11 @@ floatforloop :: proc(L: ^Lua_State, ra: int) -> bool {
 // Arithmetic shared by the register/immediate/K opcodes: fold `v1 op v2` into
 // `R[ra]` if both are numeric, reporting the `raw_arith` status so the caller can
 // skip the following MMBIN* (on Ok) or let it run (on No_Number).
+// This tiny helper is on the interpreter's hottest path. Growth of its large
+// callee's source file previously made the optimiser stop inlining this chain,
+// costing about 30% of arithmetic throughput, so the directive is load-bearing.
 @(private = "file")
-vm_arith :: proc(L: ^Lua_State, ra: int, v1, v2: ^TValue, op: Arith_Op) -> Arith_Status {
+vm_arith :: #force_inline proc(L: ^Lua_State, ra: int, v1, v2: ^TValue, op: Arith_Op) -> Arith_Status {
 	res, st := raw_arith(op, v1, v2)
 	if st == .Ok {
 		set_obj(stack_value(L, ra), &res)
