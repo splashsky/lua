@@ -700,7 +700,7 @@ luaG_traceexec :: proc(L: ^Lua_State, pc: int) -> i32 {
 // must not call lua_sethook, walk frames, allocate, or otherwise race the VM.
 // The owner fills the immutable hook description before arming it; the handler
 // publishes only `pending`, and the interpreter thread performs the real
-// lua_sethook at the next instruction boundary.
+// lua_sethook at the next call, return, or loop back-edge.
 Async_Hook_Request :: struct {
 	pending: i32,
 	hook:    Hook_Proc,
@@ -741,9 +741,15 @@ lua_disarm_async_hook :: proc(L: ^Lua_State, request: ^Async_Hook_Request) {
 
 // Called solely by the interpreter thread. Acquire/exchange pairs with the
 // handler's publication, so every ordinary Lua field remains single-threaded.
+// The initial load matters for performance: an exchange is a locked read/modify/
+// write even when no interrupt is pending, whereas the overwhelmingly common
+// zero case needs only an acquire load and a branch.
 lua_apply_async_hook :: proc(L: ^Lua_State) -> bool {
 	request := async_hook_request
-	if request == nil || intrinsics.atomic_exchange(&request.pending, i32(0)) == 0 {
+	if request == nil || intrinsics.atomic_load(&request.pending) == 0 {
+		return false
+	}
+	if intrinsics.atomic_exchange(&request.pending, i32(0)) == 0 {
 		return false
 	}
 	lua_sethook(L, request.hook, request.mask, request.count)

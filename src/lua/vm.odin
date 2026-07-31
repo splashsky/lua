@@ -860,6 +860,30 @@ vm_arith :: proc(L: ^Lua_State, ra: int, v1, v2: ^TValue, op: Arith_Op) -> Arith
 // The interpreter loop
 // ---------------------------------------------------------------------------
 
+// The console handler cannot safely touch Lua_State because Windows invokes it
+// on another thread. It therefore leaves us a tiny atomic mailbox message, and
+// the VM opens that mailbox only at control-flow edges: calls, returns, and loop
+// back-edges. Those are the same places where an interrupt becomes observable in
+// reference Lua, and every non-terminating Lua loop eventually crosses one.
+//
+// Please resist the tempting simplification of calling this at the top of the
+// dispatch loop. That makes every ordinary bytecode instruction perform an
+// atomic load for an event that almost never occurs. Here straight-line code pays
+// nothing, while loops and frame transitions pay one acquire load per edge. The
+// exchange and lua_sethook happen only after the handler has published a request.
+// Freestanding Lua has no console or signal source at all, so the compile-time
+// branch reduces this helper to `return trap` and emits no mailbox access.
+luaV_poll_async_hook :: #force_inline proc(L: ^Lua_State, trap: i32) -> i32 {
+	when ODIN_OS == .Freestanding {
+		return trap
+	} else {
+		if lua_apply_async_hook(L) {
+			return 1
+		}
+		return trap
+	}
+}
+
 luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 	ci_idx := ci_idx_in
 
@@ -895,11 +919,6 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 		// before anything that can raise (so error line info is correct) and
 		// before every frame switch (so the caller resumes correctly).
 		for {
-			// Console/signal callbacks only publish an atomic request. Applying it
-			// here keeps all hook and frame mutation on the VM's own thread.
-			if lua_apply_async_hook(L) {
-				trap = 1
-			}
 			// Hook trap: when a line/count hook is installed this frame is marked
 			// trapping, and we consult `luaG_traceexec` before each instruction.
 			// In the common (no-hook) case `trap` is 0 and this costs one branch.
@@ -1246,7 +1265,11 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				luaF_newtbcupval(L, ra)
 
 			case .JMP:
-				pc += getarg_sJ(i)
+				offset := getarg_sJ(i)
+				pc += offset
+				if offset < 0 {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 
 			case .EQ:
 				ra := stack_value(L, base + getarg_A(i))
@@ -1254,7 +1277,11 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				L.frames[ci_idx].u.l.savedpc = pc
 				L.top = L.frames[ci_idx].top
 				cond := luaV_equalobj(L, ra, rb)
+				oldpc := pc
 				pc = docondjump(code, pc, i, cond)
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 
 			case .LT:
 				ra := stack_value(L, base + getarg_A(i))
@@ -1269,7 +1296,11 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 					L.top = L.frames[ci_idx].top
 					cond = lessthanothers(L, ra, rb)
 				}
+				oldpc := pc
 				pc = docondjump(code, pc, i, cond)
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 
 			case .LE:
 				ra := stack_value(L, base + getarg_A(i))
@@ -1284,12 +1315,20 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 					L.top = L.frames[ci_idx].top
 					cond = lessequalothers(L, ra, rb)
 				}
+				oldpc := pc
 				pc = docondjump(code, pc, i, cond)
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 
 			case .EQK:
 				ra := stack_value(L, base + getarg_A(i))
 				rb := &k[getarg_B(i)]
+				oldpc := pc
 				pc = docondjump(code, pc, i, raw_equal(ra, rb))
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 
 			case .EQI:
 				ra := stack_value(L, base + getarg_A(i))
@@ -1300,20 +1339,44 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				} else if is_float(ra) {
 					cond = flt_value(ra) == Number(im)
 				}
+				oldpc := pc
 				pc = docondjump(code, pc, i, cond)
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 
 			case .LTI:
+				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Lt)
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 			case .LEI:
+				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Le)
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 			case .GTI:
+				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Gt)
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 			case .GEI:
+				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Ge)
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 
 			case .TEST:
 				ra := stack_value(L, base + getarg_A(i))
+				oldpc := pc
 				pc = docondjump(code, pc, i, !is_falsy(ra))
+				if pc <= oldpc {
+					trap = luaV_poll_async_hook(L, trap)
+				}
 
 			case .TESTSET:
 				ra := base + getarg_A(i)
@@ -1323,10 +1386,15 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				} else {
 					set_obj(stack_value(L, ra), rb)
 					ni := code[pc]
-					pc += getarg_sJ(ni) + 1
+					offset := getarg_sJ(ni)
+					pc += offset + 1
+					if offset < 0 {
+						trap = luaV_poll_async_hook(L, trap)
+					}
 				}
 
 			case .CALL:
+				trap = luaV_poll_async_hook(L, trap)
 				ra := base + getarg_A(i)
 				b := getarg_B(i)
 				nresults := getarg_C(i) - 1
@@ -1345,6 +1413,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				trap = L.frames[ci_idx].u.l.trap
 
 			case .TAILCALL:
+				trap = luaV_poll_async_hook(L, trap)
 				ra := base + getarg_A(i)
 				b := getarg_B(i)
 				nparams1 := getarg_C(i)
@@ -1375,6 +1444,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				continue newframe
 
 			case .RETURN:
+				trap = luaV_poll_async_hook(L, trap)
 				ra := base + getarg_A(i)
 				n := getarg_B(i) - 1
 				nparams1 := getarg_C(i)
@@ -1401,6 +1471,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				continue newframe
 
 			case .RETURN0:
+				trap = luaV_poll_async_hook(L, trap)
 				if L.hookmask != 0 {
 					ra := base + getarg_A(i)
 					L.top = ra
@@ -1424,6 +1495,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				continue newframe
 
 			case .RETURN1:
+				trap = luaV_poll_async_hook(L, trap)
 				if L.hookmask != 0 {
 					ra := base + getarg_A(i)
 					L.top = ra + 1
@@ -1461,9 +1533,11 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 						set_int(stack_value(L, ra), u2s(count - 1)) // decrement counter
 						set_int(stack_value(L, ra + 2), int_add(idx, step)) // advance control
 						pc -= getarg_Bx(i) // jump back
+						trap = luaV_poll_async_hook(L, trap)
 					}
 				} else if floatforloop(L, ra) { // float loop
 					pc -= getarg_Bx(i)
+					trap = luaV_poll_async_hook(L, trap)
 				}
 
 			case .FORPREP:
@@ -1500,6 +1574,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				if !is_nil(stack_value(L, ra + 3)) { // control var not nil: continue
 					pc -= getarg_Bx(i)
+					trap = luaV_poll_async_hook(L, trap)
 				}
 
 			case .SETLIST:
