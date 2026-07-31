@@ -1840,6 +1840,56 @@ num_rem_pio2_large :: proc "contextless" (input: [3]Number, nx, e0: int) -> (n: 
 }
 
 @(private = "file")
+num_rem_pio2_wide :: proc "contextless" (x: Number) -> (n: int, y0, y1: Number) {
+	INVPIO2 :: 6.36619772367581382433e-1
+	PIO2_1 :: 1.57079632673412561417e+0
+	PIO2_2 :: 6.07710050630396597660e-11
+	PIO2_3 :: 2.02226624871116645580e-21
+	PIO2_3T :: 8.47842766036889956997e-32
+	PIO4 :: 7.85398163397448278999e-1
+	TOINT :: 6755399441055744.0
+
+	fn := x*INVPIO2 + (x < 0 ? -TOINT : TOINT)
+	fn -= x < 0 ? -TOINT : TOINT
+	n = int(i32(fn))
+
+	// PIO2_1 has 33 significant bits.  fdlibm therefore stops its ordinary
+	// Cody-Waite path once n needs more than 20 bits: n*PIO2_1 would cease to
+	// be exact.  Splitting the integer quotient at bit 12 leaves at most 19
+	// significant bits in the high part and 12 in the low part, making every
+	// product with each 33-bit pi/2 chunk exact all the way to n=2^31-1.
+	// A rounded 2/pi product can be one integer off only when x is extremely
+	// close to a half-way boundary.  Correct that quotient explicitly instead
+	// of sending a rare but perfectly ordinary input to Payne-Hanek.
+	for _ in 0..<2 {
+		n_hi := (i64(n)>>12)<<12
+		f_hi := Number(n_hi)
+		f_lo := fn-f_hi
+		hi, lo := x, Number(0)
+		products := [8]Number{
+			f_hi*PIO2_1, f_lo*PIO2_1,
+			f_hi*PIO2_2, f_lo*PIO2_2,
+			f_hi*PIO2_3, f_lo*PIO2_3,
+			f_hi*PIO2_3T, f_lo*PIO2_3T,
+		}
+		for product in products {
+			next := hi-product
+			lo += (hi-next)-product
+			hi = next
+		}
+		y0 = hi+lo
+		y1 = hi-y0+lo
+		if y0 >= -PIO4 && y0 <= PIO4 {
+			return
+		}
+		adjust := y0 < 0 ? -1 : 1
+		n += adjust
+		fn += Number(adjust)
+	}
+	return
+}
+
+@(private = "file")
 num_rem_pio2 :: proc "contextless" (x: Number) -> (n: int, y0, y1: Number) #no_bounds_check {
 	PIO4 :: 7.85398163397448278999e-1
 	INVPIO2 :: 6.36619772367581382433e-1
@@ -1884,6 +1934,9 @@ num_rem_pio2 :: proc "contextless" (x: Number) -> (n: int, y0, y1: Number) #no_b
 		}
 		y1 = (r-y0)-w
 		return
+	}
+	if ix < 0x41e9_21fb {
+		return num_rem_pio2_wide(x)
 	}
 
 	normalized_bits := (bits & 0x000f_ffff_ffff_ffff) | (u64(1023+23)<<52)
@@ -1943,33 +1996,163 @@ num_cos :: proc "contextless" (x: Number) -> Number {
 	return c
 }
 
-// core:math's tangent is implemented as its intrinsic sine divided by its
-// intrinsic cosine.  Keep the same definition, but feed it our pure kernels.
-num_tan :: proc "contextless" (x: Number) -> Number {
-	s, c := num_sincos(x)
-	return s / c
+// fdlibm's tangent kernel is worth keeping separate from sin/cos.  Dividing two
+// independently rounded kernels can lose a second ulp, especially near pi/2;
+// this degree-27 odd polynomial carries the reduction tail directly and uses a
+// compensated reciprocal for odd quadrants.
+@(private = "file")
+num_tan_kernel :: proc "contextless" (x_in, tail_in: Number, odd: bool) -> Number {
+	@(static, rodata) T := [13]Number{
+		3.33333333333334091986e-01, 1.33333333333201242699e-01,
+		5.39682539762260521377e-02, 2.18694882948595424599e-02,
+		8.86323982359930005737e-03, 3.59207910759131235356e-03,
+		1.45620945432529025516e-03, 5.88041240820264096874e-04,
+		2.46463134818469906812e-04, 7.81794442939557092300e-05,
+		7.14072491382608190305e-05, -1.85586374855275456654e-05,
+		2.59073051863633712884e-05,
+	}
+	PIO4 :: 7.85398163397448278999e-01
+	PIO4_LO :: 3.06161699786838301793e-17
+	x, tail := x_in, tail_in
+	big := (transmute(u64)x & 0x7fff_ffff_0000_0000) >= 0x3fe5_9428_0000_0000
+	negative := false
+	if big {
+		negative = x < 0
+		if negative {
+			x, tail = -x, -tail
+		}
+		x = (PIO4-x)+(PIO4_LO-tail)
+		tail = 0
+	}
+	z := x*x
+	w2 := z*z
+	r := T[1]+w2*(T[3]+w2*(T[5]+w2*(T[7]+w2*(T[9]+w2*T[11]))))
+	v := z*(T[2]+w2*(T[4]+w2*(T[6]+w2*(T[8]+w2*(T[10]+w2*T[12])))))
+	s := z*x
+	r = tail+z*(s*(r+v)+tail)+s*T[0]
+	w := x+r
+	if big {
+		sign := odd ? Number(-1) : Number(1)
+		value := sign-2*(x+(r-w*w/(w+sign)))
+		return negative ? -value : value
+	}
+	if !odd {
+		return w
+	}
+	w0 := transmute(Number)(transmute(u64)w & 0xffff_ffff_0000_0000)
+	v = r-(w0-x)
+	a := -1/w
+	a0 := transmute(Number)(transmute(u64)a & 0xffff_ffff_0000_0000)
+	return a0+a*(1+a0*w0+a0*v)
 }
 
-// Exponential follows fdlibm's e_exp (also used by musl and Go).  We first
-// write x = k*ln(2) + r with |r| <= ln(2)/2.  Splitting ln(2) into high and
-// low words keeps the subtraction accurate.  A degree-five minimax polynomial
-// approximates r*(exp(r)+1)/(exp(r)-1); rearranging that rational expression
-// gives exp(r) without cancellation, after which ldexp supplies the exact 2^k.
+num_tan :: proc "contextless" (x: Number) -> Number {
+	bits := transmute(u64)x
+	ax := bits & 0x7fff_ffff_ffff_ffff
+	if ax == 0 {
+		return x
+	}
+	if ax >= 0x7ff0_0000_0000_0000 {
+		s, c := num_sincos(x)
+		return s/c
+	}
+	if ax <= 0x3fe9_21fb_5444_2d18 {
+		return num_tan_kernel(x, 0, false)
+	}
+	n, hi, lo := num_rem_pio2(x)
+	return num_tan_kernel(hi, lo, n&1 != 0)
+}
+
+// The scale can briefly have an exponent outside the binary64 range.  Arm's
+// exp algorithm (the implementation used by current musl) repairs those two
+// narrow edge bands before converting the constructed bits back to a double.
+// The underflow side deliberately rounds at exponent zero before applying
+// 2^-1022; that avoids the classic one-extra-rounding error in subnormals.
+@(private = "file")
+num_exp_special :: proc "contextless" (tmp: Number, sbits, ki: u64) -> Number {
+	bits := sbits
+	if u32(ki) & 0x8000_0000 == 0 {
+		bits -= u64(1009) << 52
+		scale := transmute(Number)bits
+		return 5.486124068793689e303 * (scale + scale*tmp) // 2^1009
+	}
+	bits += u64(1022) << 52
+	scale := transmute(Number)bits
+	y := scale + scale*tmp
+	if (y < 0 ? -y : y) < 1 {
+		one := y < 0 ? Number(-1) : Number(1)
+		lo := scale-y + scale*tmp
+		hi := one+y
+		lo = one-hi+y+lo
+		y = (hi+lo)-one
+		if y == 0 {
+			y = transmute(Number)(bits & 0x8000_0000_0000_0000)
+		}
+	}
+	return 2.2250738585072014e-308*y // 2^-1022
+}
+
+// Evaluate sign*exp(x+xtail).  This is Arm's 2018 table-driven exp, via musl:
+//
+//	x = k*(ln2/128) + r
+//	exp(x) = 2^(k/128) * exp(r)
+//
+// A 128-entry table supplies a high scale and a tiny correction tail.  Since
+// |r| is only ln(2)/256, four polynomial coefficients are enough.  Compared
+// with fdlibm's one-entry reduction this trades 2 KiB of read-only data for a
+// much shorter dependency chain while retaining musl's < 0.52 ulp bound.
+@(private = "file")
+num_exp_inline :: #force_inline proc "contextless" (x, xtail: Number, sign_bias: u64) -> Number #no_bounds_check {
+	INV_LN2_N :: 1.4426950408889634 * 128
+	NEG_LN2_HI_N :: -0.0054152123481117087
+	NEG_LN2_LO_N :: -1.2864023111638346e-14
+	SHIFT :: 6755399441055744.0
+	C2 :: 0.49999999999996786
+	C3 :: 0.16666666666665886
+	C4 :: 0.0416666808410674
+	C5 :: 0.008333335853059549
+
+	x_bits := transmute(u64)x
+	abstop := u32((x_bits >> 52) & 0x7ff)
+	if abstop < 0x3c9 {
+		one := Number(1)
+		return sign_bias == 0 ? one : -one
+	}
+	if abstop >= 0x409 {
+		if x_bits>>63 != 0 {
+			return transmute(Number)(sign_bias == 0 ? u64(0) : u64(0x8000_0000_0000_0000))
+		}
+		return transmute(Number)(u64(0x7ff0_0000_0000_0000) |
+			(sign_bias == 0 ? u64(0) : u64(0x8000_0000_0000_0000)))
+	}
+	z := INV_LN2_N*x
+	kd := z+SHIFT
+	ki := transmute(u64)kd
+	kd -= SHIFT
+	r := x + kd*NEG_LN2_HI_N + kd*NEG_LN2_LO_N + xtail
+	idx := 2*(ki&127)
+	top := (ki+sign_bias)<<45
+	tail := transmute(Number)EXP_TABLE[idx]
+	sbits := EXP_TABLE[idx+1]+top
+	r2 := r*r
+	tmp := tail+r+r2*(C2+r*C3)+r2*r2*(C4+r*C5)
+	if abstop == 0 || abstop >= 0x408 {
+		return num_exp_special(tmp, sbits, ki)
+	}
+	scale := transmute(Number)sbits
+	return scale+scale*tmp
+}
+
 num_exp :: proc "contextless" (x: Number) -> Number {
-	LN2_HI :: 6.93147180369123816490e-1
-	LN2_LO :: 1.90821492927058770002e-10
-	LOG2_E :: 1.44269504088896338700e+00
 	OVERFLOW :: 7.09782712893383973096e+02
 	UNDERFLOW :: -7.45133219101941108420e+02
-	NEAR_ZERO :: 1.0 / (1 << 28)
-
 	ux := transmute(u64)x
 	ax := ux & 0x7fff_ffff_ffff_ffff
 	if ax > 0x7ff0_0000_0000_0000 {
 		return x
 	}
 	if ax == 0x7ff0_0000_0000_0000 {
-		return ux >> 63 == 0 ? x : 0
+		return ux>>63 == 0 ? x : 0
 	}
 	if x > OVERFLOW {
 		return transmute(Number)u64(0x7ff0_0000_0000_0000)
@@ -1977,22 +2160,10 @@ num_exp :: proc "contextless" (x: Number) -> Number {
 	if x < UNDERFLOW {
 		return 0
 	}
-	if x > -NEAR_ZERO && x < NEAR_ZERO {
-		return 1 + x
+	if ax < 0x3c90_0000_0000_0000 { // |x| < 2^-54
+		return 1+x
 	}
-
-	k := x < 0 ? int(LOG2_E*x - 0.5) : int(LOG2_E*x + 0.5)
-	hi := x - Number(k)*LN2_HI
-	lo := Number(k)*LN2_LO
-	r := hi - lo
-	t := r * r
-	c := r - t*(1.66666666666666657415e-1 +
-		t*(-2.77777777770155933842e-3 +
-		t*(6.61375632143793436117e-5 +
-		t*(-1.65339022054652515390e-6 +
-		t*4.13813679705723846039e-8))))
-	y := 1 - ((lo - (r*c)/(2-c)) - hi)
-	return math.ldexp(y, k)
+	return num_exp_inline(x, 0, 0)
 }
 
 @(private = "file")
@@ -2006,172 +2177,77 @@ num_pow_odd_integer :: proc "contextless" (x: Number) -> bool {
 	return fraction == 0 && (u64(whole) & 1) != 0
 }
 
+// Return log(x) as a rounded head plus a roughly 15-bit tail.  This is the log
+// half of Arm's pow algorithm, as shipped by musl.  The normalized mantissa is
+// split into 128 intervals.  Each table entry chooses c so that z/c-1 is tiny
+// and, crucially, exactly representable after the non-FMA split below.
 @(private = "file")
-num_pow_clear_low_word :: proc "contextless" (x: Number) -> Number {
-	return transmute(Number)(transmute(u64)x & 0xffff_ffff_0000_0000)
+num_pow_log_inline :: #force_inline proc "contextless" (ix: u64) -> (result, tail: Number) #no_bounds_check {
+	OFF :: u64(0x3fe6_9555_0000_0000)
+	LN2_HI :: 0.6931471805598903
+	LN2_LO :: 5.497923018708371e-14
+
+	tmp := ix-OFF
+	i := (tmp>>45)&127
+	k := transmute(i64)tmp>>52
+	iz := ix-(tmp&(u64(0xfff)<<52))
+	z := transmute(Number)iz
+	entry := POW_LOG_TABLE[i]
+
+	// The FMA-free construction from musl: rounding z to 32 significant
+	// mantissa bits makes rhi, rlo, and rhi^2 exact products.
+	zhi := transmute(Number)((iz+(u64(1)<<31)) & 0xffff_ffff_0000_0000)
+	zlo := z-zhi
+	rhi := zhi*entry.invc-1
+	rlo := zlo*entry.invc
+	r := rhi+rlo
+	kd := Number(k)
+	t1 := kd*LN2_HI+entry.logc
+	t2 := t1+r
+	lo1 := kd*LN2_LO+entry.logctail
+	lo2 := t1-t2+r
+	ar := POW_LOG_POLY[0]*r
+	ar2 := r*ar
+	ar3 := r*ar2
+	arhi := POW_LOG_POLY[0]*rhi
+	arhi2 := rhi*arhi
+	hi := t2+arhi2
+	lo3 := rlo*(ar+arhi)
+	lo4 := t2-hi+arhi2
+	p := ar3*(POW_LOG_POLY[1]+r*POW_LOG_POLY[2]+
+		ar2*(POW_LOG_POLY[3]+r*POW_LOG_POLY[4]+
+		ar2*(POW_LOG_POLY[5]+r*POW_LOG_POLY[6])))
+	lo := lo1+lo2+lo3+lo4+p
+	result = hi+lo
+	tail = hi-result+lo
+	return
 }
 
-// The finite, positive-base core of fdlibm's e_pow.  It computes log2(a) as
-// two doubles, multiplies that double-double value by y, and finally evaluates
-// 2^(high+low).  Keeping the low pieces is what prevents the many-ulp drift of
-// the simpler exp(y*log(a)) formula when |y| is large.
+// Positive finite core of pow.  The log table above and the shared exp table
+// replace fdlibm's general double-double path.  We still carry a head/tail
+// product into exp, so large exponents do not magnify a rounded log.  Arm's
+// published non-FMA error bound is about 0.54 ulp.
 @(private = "file")
-num_pow_positive :: proc "contextless" (a, y: Number, negative_result: bool) -> Number {
-	BP := [2]Number{1.0, 1.5}
-	DP_H := [2]Number{0.0, 5.84962487220764160156e-1}
-	DP_L := [2]Number{0.0, 1.35003920212974897128e-8}
-	L1 :: 5.99999999999994648725e-1
-	L2 :: 4.28571428578550184252e-1
-	L3 :: 3.33333329818377432918e-1
-	L4 :: 2.72728123808534006489e-1
-	L5 :: 2.30660745775561754067e-1
-	L6 :: 2.06975017800338417784e-1
-	P1 :: 1.66666666666666019037e-1
-	P2 :: -2.77777777770155933842e-3
-	P3 :: 6.61375632143793436117e-5
-	P4 :: -1.65339022054652515390e-6
-	P5 :: 4.13813679705723846039e-8
-	LG2 :: 6.93147180559945286227e-1
-	LG2_H :: 6.93147182464599609375e-1
-	LG2_L :: -1.90465429995776804525e-9
-	OVT :: 8.0085662595372944372e-17
-	CP :: 9.61796693925975554329e-1
-	CP_H :: 9.61796700954437255859e-1
-	CP_L :: -7.02846165095275826516e-9
-	IVLN2 :: 1.44269504088896338700e+0
-	IVLN2_H :: 1.44269502162933349609e+0
-	IVLN2_L :: 1.92596299112661746887e-8
-
-	ax := a
-	abits := transmute(u64)ax
-	ix := u32(abits >> 32) & 0x7fff_ffff
-	ay := transmute(u64)y & 0x7fff_ffff_ffff_ffff
-	t1, t2: Number
-
-	if ay > 0x41e0_0000_0000_0000 { // |y| > 2^31
-		// Unless a is extraordinarily close to one, a huge exponent has an
-		// unambiguous overflow/underflow result.
-		if ay > 0x43f0_0000_0000_0000 { // |y| > 2^64
-			if a < 1 {
-				return y < 0 ? transmute(Number)u64(0x7ff0_0000_0000_0000) : 0
-			}
-			if a > 1 {
-				return y > 0 ? transmute(Number)u64(0x7ff0_0000_0000_0000) : 0
-			}
-		}
-		if ix < 0x3fef_ffff {
-			return y < 0 ? transmute(Number)u64(0x7ff0_0000_0000_0000) : 0
-		}
-		if ix > 0x3ff0_0000 {
-			return y > 0 ? transmute(Number)u64(0x7ff0_0000_0000_0000) : 0
-		}
-
-		// Here |1-a| <= 2^-20.  The short log1p series has enough spare
-		// precision, and avoids subtracting two nearly equal logarithms.
-		t := a - 1
-		w := t*t*(0.5 - t*(1.0/3.0 - t*0.25))
-		u := IVLN2_H*t
-		v := t*IVLN2_L - w*IVLN2
-		t1 = num_pow_clear_low_word(u + v)
-		t2 = v - (t1 - u)
-	} else {
-		n := 0
-		if ix < 0x0010_0000 {
-			ax *= 9007199254740992.0 // normalize a subnormal with 2^53
-			n -= 53
-			abits = transmute(u64)ax
-			ix = u32(abits >> 32) & 0x7fff_ffff
-		}
-		n += int(ix >> 20) - 1023
-		j := ix & 0x000f_ffff
-		ix = j | 0x3ff0_0000
-		k := 0
-		if j <= 0x3988e {
-			k = 0
-		} else if j < 0xbb67a {
-			k = 1
-		} else {
-			n += 1
-			ix -= 0x0010_0000
-		}
-		abits = (abits & 0x0000_0000_ffff_ffff) | (u64(ix) << 32)
-		ax = transmute(Number)abits
-
-		u := ax - BP[k]
-		v := 1 / (ax + BP[k])
-		s := u*v
-		s_hi := num_pow_clear_low_word(s)
-		th_bits := u64(((ix >> 1) | 0x2000_0000) + 0x0008_0000 + u32(k<<18)) << 32
-		t_hi := transmute(Number)th_bits
-		t_lo := ax - (t_hi - BP[k])
-		s_lo := v*((u - s_hi*t_hi) - s_hi*t_lo)
-		s2 := s*s
-		r := s2*s2*(L1 + s2*(L2 + s2*(L3 + s2*(L4 + s2*(L5 + s2*L6)))))
-		r += s_lo*(s_hi+s)
-		s2 = s_hi*s_hi
-		t_hi = num_pow_clear_low_word(3.0 + s2 + r)
-		t_lo = r - ((t_hi-3.0)-s2)
-		u = s_hi*t_hi
-		v = s_lo*t_hi + t_lo*s
-		p_hi := num_pow_clear_low_word(u+v)
-		p_lo := v - (p_hi-u)
-		z_hi := CP_H*p_hi
-		z_lo := CP_L*p_hi + p_lo*CP + DP_L[k]
-		dn := Number(n)
-		t1 = num_pow_clear_low_word(((z_hi+z_lo)+DP_H[k])+dn)
-		t2 = z_lo - (((t1-dn)-DP_H[k])-z_hi)
+num_pow_positive :: #force_inline proc "contextless" (a, y: Number, negative_result: bool) -> Number {
+	ix := transmute(u64)a
+	if ix>>52 == 0 {
+		// log_inline encodes negative exponents in the sign bit.  Scaling by
+		// 2^52 normalizes every subnormal without losing a bit.
+		ix = transmute(u64)(a*4503599627370496.0)
+		ix -= u64(52)<<52
 	}
+	hi, lo := num_pow_log_inline(ix)
 
-	y1 := num_pow_clear_low_word(y)
-	p_lo := (y-y1)*t1 + y*t2
-	p_hi := y1*t1
-	z := p_lo+p_hi
-	sign := negative_result ? Number(-1) : Number(1)
-	if z > 1024 || (z == 1024 && p_lo+OVT > z-p_hi) {
-		return sign * transmute(Number)u64(0x7ff0_0000_0000_0000)
-	}
-	if z < -1075 || (z == -1075 && p_lo <= z-p_hi) {
-		return sign * 0
-	}
-
-	// Split z into an integer n and a residual in [-0.5,0.5], using fdlibm's
-	// bit operation rather than a rounding-mode-sensitive library helper.
-	zbits := transmute(u64)z
-	jz := i32(u32(zbits >> 32))
-	magnitude_hi := u32(jz) & 0x7fff_ffff
-	n := 0
-	if magnitude_hi > 0x3fe0_0000 {
-		k := int(magnitude_hi >> 20) - 1023
-		nword := jz + i32(u32(0x0010_0000) >> u32(k+1))
-		k = int((u32(nword)&0x7fff_ffff)>>20)-1023
-		tbits := u64(u32(nword) & ~(u32(0x000f_ffff) >> u32(k))) << 32
-		t := transmute(Number)tbits
-		n = int(((u32(nword)&0x000f_ffff)|0x0010_0000) >> u32(20-k))
-		if jz < 0 {
-			n = -n
-		}
-		p_hi -= t
-	}
-
-	t := num_pow_clear_low_word(p_lo+p_hi)
-	u := t*LG2_H
-	v := (p_lo-(t-p_hi))*LG2 + t*LG2_L
-	z = u+v
-	w := v-(z-u)
-	t = z*z
-	t1 = z - t*(P1+t*(P2+t*(P3+t*(P4+t*P5))))
-	r := (z*t1)/(t1-2) - (w+z*w)
-	z = 1-(r-z)
-
-	zbits = transmute(u64)z
-	new_high := i64(u32(zbits>>32)) + i64(n)*0x0010_0000
-	if new_high >> 20 <= 0 {
-		z = math.ldexp(z, n)
-	} else {
-		zbits = (zbits & 0x0000_0000_ffff_ffff) | (u64(new_high) << 32)
-		z = transmute(Number)zbits
-	}
-	return sign*z
+	// Dekker-style split used by musl when hardware FMA is unavailable.
+	iy := transmute(u64)y
+	yhi := transmute(Number)(iy & 0xffff_ffff_f800_0000)
+	ylo := y-yhi
+	lhi := transmute(Number)(transmute(u64)hi & 0xffff_ffff_f800_0000)
+	llo := hi-lhi+lo
+	ehi := yhi*lhi
+	elo := ylo*lhi+y*llo
+	sign_bias := negative_result ? u64(0x40000) : u64(0)
+	return num_exp_inline(ehi, elo, sign_bias)
 }
 
 // Power needs more care than `exp(y*log(x))`: that tempting formula rounds exact
@@ -2229,17 +2305,23 @@ num_pow :: proc "contextless" (x, y: Number) -> Number {
 	if y == -0.5 {
 		return 1 / math.sqrt(x)
 	}
+	if y == 1.5 && x > 0 {
+		// x^(3/2) is both common and exactly reducible to the already-fast,
+		// correctly rounded square root plus one multiply.
+		return x*math.sqrt(x)
+	}
 
-	yi, yf := math.modf(y < 0 ? -y : y)
-	if yf != 0 && x < 0 {
-		return transmute(Number)nan_bits
+	if x < 0 {
+		_, fraction := math.modf(y < 0 ? -y : y)
+		if fraction != 0 {
+			return transmute(Number)nan_bits
+		}
+		if x == -1 {
+			return num_pow_odd_integer(y) ? -1 : 1
+		}
+		return num_pow_positive(-x, y, num_pow_odd_integer(y))
 	}
-	if x == -1 {
-		return num_pow_odd_integer(y) ? -1 : 1
-	}
-	_ = yi
-	negative_result := x < 0 && num_pow_odd_integer(y)
-	return num_pow_positive(x < 0 ? -x : x, y, negative_result)
+	return num_pow_positive(x, y, false)
 }
 
 // A correct IEEE-754 double `fmod`, implemented in pure Odin.
@@ -2370,8 +2452,16 @@ flt_arith :: #force_inline proc "contextless" (op: Arith_Op, v1, v2: Number) -> 
 	case .Div:
 		return v1 / v2
 	case .Pow:
-		// luai_numpow special-cases the common square to avoid calling pow().
-		return v2 == 2 ? v1 * v1 : num_pow(v1, v2)
+		// Reference Lua already special-cases squares.  Cubes are just as
+		// common in numeric code and two hardware multiplies preserve all IEEE
+		// signs/special values, so avoid the general logarithm there too.
+		if v2 == 2 {
+			return v1*v1
+		}
+		if v2 == 3 {
+			return v1*v1*v1
+		}
+		return num_pow(v1, v2)
 	case .IDiv:
 		return math.floor(v1 / v2)
 	case .Unm:
