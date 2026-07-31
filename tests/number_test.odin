@@ -97,6 +97,38 @@ str2num_preserves_negative_zero :: proc(t: ^testing.T) {
 }
 
 @(test)
+str2num_decimal_fast_path_boundaries :: proc(t: ^testing.T) {
+	// These exercise both sides of every fast-path guard. The expected bits come
+	// from Odin's independent correctly-rounded parser, not from our parser.
+	cases := []string {
+		"0.1",
+		"-0.0",
+		"1.5",
+		"3.14",
+		"9007199254740992e22",
+		"9007199254740993e22",
+		"9007199254740992e-22",
+		"9007199254740992e23",
+		"9007199254740992e-23",
+		"1234567890123456789e-22",
+		"1e-308",
+		"1e309",
+	}
+	for s in cases {
+		expected, expected_ok := strconv.parse_f64(s)
+		// strconv reports range overflow through `ok` while still returning the
+		// same infinity that C strtod (and Lua) return.
+		testing.expectf(t, expected_ok || s == "1e309", "independent parser rejected %q", s)
+		v, size := lua.str_to_number(transmute([]byte)s)
+		testing.expectf(t, size == uint(len(s)) + 1, "%q returned the wrong consumed length", s)
+		testing.expectf(t, lua.is_float(&v), "%q did not parse as a float", s)
+		got := lua.flt_value(&v)
+		testing.expectf(t, transmute(u64)got == transmute(u64)expected,
+			"%q parsed to bits %x, expected %x", s, transmute(u64)got, transmute(u64)expected)
+	}
+}
+
+@(test)
 str2num_rejects_garbage :: proc(t: ^testing.T) {
 	fails := []string {
 		"", // empty

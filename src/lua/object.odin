@@ -999,11 +999,40 @@ lua_getlocaledecpoint :: proc "contextless" () -> byte {
 	return '.'
 }
 
-// Parse the decimal prefix after Lua's ASCII leading-space handling. strconv's
-// fast path handles small exact cases; difficult inputs fall back to an exact
-// decimal representation which is shifted and rounded to nearest-even binary64.
-// Its `ok` result also reports range overflow, whereas C parsing still returns inf,
-// so syntax is checked here and range status is deliberately not used.
+// These powers are exact binary64 values, not rounded decimal approximations.
+// For k <= 22, 10^k is 2^k * 5^k and the odd part 5^k still fits within the
+// binary64 significand. Keeping the table here also makes the fast path one
+// floating operation instead of a little exponentiation loop.
+@(private = "file")
+EXACT_POWERS_OF_TEN := [23]Number {
+	1.0,
+	10.0,
+	100.0,
+	1000.0,
+	10000.0,
+	100000.0,
+	1000000.0,
+	10000000.0,
+	100000000.0,
+	1000000000.0,
+	10000000000.0,
+	100000000000.0,
+	1000000000000.0,
+	10000000000000.0,
+	100000000000000.0,
+	1000000000000000.0,
+	10000000000000000.0,
+	100000000000000000.0,
+	1000000000000000000.0,
+	10000000000000000000.0,
+	100000000000000000000.0,
+	1000000000000000000000.0,
+	10000000000000000000000.0,
+}
+
+// Parse the decimal prefix after Lua's ASCII leading-space handling. Common
+// short decimals take a deliberately narrow fast path; everything else still
+// goes through strconv's exact decimal engine unchanged.
 @(private = "file")
 parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
 	context = runtime.default_context()
@@ -1011,31 +1040,97 @@ parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
 	i := 0
 	for i < n && is_space(s[i]) {i += 1}
 	start := i
-	if i < n && (s[i] == '+' || s[i] == '-') {i += 1}
+	negative := false
+	if i < n && (s[i] == '+' || s[i] == '-') {
+		negative = s[i] == '-'
+		i += 1
+	}
 
 	digits := 0
-	for i < n && is_digit(s[i]) {i += 1; digits += 1}
+	significand: u64
+	significant_digits := 0
+	too_many_digits := false
+	fraction_digits := 0
+	for i < n && is_digit(s[i]) {
+		digit := u64(s[i] - '0')
+		if significant_digits != 0 || digit != 0 {
+			significant_digits += 1
+			if significant_digits <= 19 {
+				significand = significand * 10 + digit
+			} else {
+				too_many_digits = true
+			}
+		}
+		i += 1
+		digits += 1
+	}
 	if i < n && s[i] == '.' {
 		i += 1
-		for i < n && is_digit(s[i]) {i += 1; digits += 1}
+		for i < n && is_digit(s[i]) {
+			digit := u64(s[i] - '0')
+			if significant_digits != 0 || digit != 0 {
+				significant_digits += 1
+				if significant_digits <= 19 {
+					significand = significand * 10 + digit
+				} else {
+					too_many_digits = true
+				}
+			}
+			i += 1
+			digits += 1
+			fraction_digits += 1
+		}
 	}
 	if digits == 0 {
 		return 0, 0
 	}
+	exp10 := -fraction_digits
+	exp_too_large := false
 	if i < n && (s[i] == 'e' || s[i] == 'E') {
 		i += 1
-		if i < n && (s[i] == '+' || s[i] == '-') {i += 1}
+		exp_negative := false
+		if i < n && (s[i] == '+' || s[i] == '-') {
+			exp_negative = s[i] == '-'
+			i += 1
+		}
 		if i >= n || !is_digit(s[i]) {
 			return 0, 0
 		}
-		for i < n && is_digit(s[i]) {i += 1}
+		explicit_exp := 0
+		for i < n && is_digit(s[i]) {
+			if explicit_exp <= 100000 {
+				explicit_exp = explicit_exp * 10 + int(s[i] - '0')
+			} else {
+				exp_too_large = true
+			}
+			i += 1
+		}
+		exp10 += exp_negative ? -explicit_exp : explicit_exp
 	}
 
-	// Do not use parse_f64_prefix's small-number fast path here: its chained
-	// floating multiplications are excellent for general parsing but do not
-	// promise byte-for-byte C-parser rounding on every boundary. Feeding the
-	// validated token directly through strconv's exact decimal engine keeps all
-	// source digits until its final nearest-even binary64 rounding step.
+	// This test is intentionally stricter than "it fits in u64". Every integer
+	// significand <= 2^53 converts to binary64 exactly; a few larger integers do
+	// too because enough low bits are zero, and the cast-back check proves that
+	// rather than assuming it. Every 10^k in the table above is also exact for
+	// |k| <= 22. The final multiply or divide is therefore the only rounded
+	// operation, so IEEE-754 gives us the correctly rounded result. If any
+	// premise is missing, we do not try to be clever: the existing
+	// arbitrary-precision decimal conversion below gets the original token,
+	// preserving subnormals, overflow, and halfway cases.
+	exact_significand := Number(significand)
+	if !too_many_digits && !exp_too_large &&
+	   u64(exact_significand) == significand && exp10 >= -22 && exp10 <= 22 {
+		value := exact_significand
+		if exp10 < 0 {
+			value /= EXACT_POWERS_OF_TEN[-exp10]
+		} else {
+			value *= EXACT_POWERS_OF_TEN[exp10]
+		}
+		return negative ? -value : value, i
+	}
+
+	// Feeding the validated token directly through strconv's exact decimal
+	// engine keeps all source digits until its final nearest-even rounding step.
 	d: strconv_decimal.Decimal
 	strconv_decimal.set(&d, string(s[start:i]))
 	info := strconv.Float_Info{mantbits = 52, expbits = 11, bias = -1023}

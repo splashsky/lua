@@ -172,33 +172,67 @@ tzi_info :: proc() -> (standard, daylight: i64, tzi: win32.TIME_ZONE_INFORMATION
 }
 
 @(private = "file")
+transition_day :: proc(year: i64, rule: win32.SYSTEMTIME) -> int {
+	if rule.year != 0 {
+		return int(rule.day)
+	}
+
+	// A zero year is Windows' compact recurring-rule form: `day` is the
+	// occurrence (1st through 4th, or 5th meaning last) of `day_of_week` in the
+	// named month. Work from civil day numbers so leap years need no separate
+	// table.
+	month := int(rule.month)
+	first_wday := int(floor_mod(days_from_civil(year, month, 1) + 4, 7))
+	wanted_wday := int(rule.day_of_week)
+	first := 1 + int(floor_mod(i64(wanted_wday - first_wday), 7))
+	if rule.day < 5 {
+		return first + 7 * (int(rule.day) - 1)
+	}
+	next_year, next_month := year, month + 1
+	if next_month == 13 {
+		next_year += 1
+		next_month = 1
+	}
+	days_in_month := int(days_from_civil(next_year, next_month, 1) -
+		days_from_civil(year, month, 1))
+	return first + 7 * ((days_in_month - first) / 7)
+}
+
+@(private = "file")
+transition_timestamp :: proc(year: i64, rule: win32.SYSTEMTIME, prior_offset: i64) -> i64 {
+	day := transition_day(year, rule)
+	local_nominal := days_from_civil(year, int(rule.month), day) * 86400 +
+		i64(rule.hour) * 3600 + i64(rule.minute) * 60 + i64(rule.second)
+	return local_nominal - prior_offset
+}
+
+@(private = "file")
 local_at_timestamp :: proc(t: i64) -> (Civil_Time, bool) {
 	when ODIN_OS == .Windows {
 		utc := civil_at_timestamp(t)
-		// SYSTEMTIME uses a 16-bit year and Windows local-time conversion rejects
-		// dates before the FILETIME epoch. UTC formatting remains pure-Odin and
-		// does not inherit this local-time limitation.
+		// Windows' CRT applies the current TIME_ZONE_INFORMATION recurrence to
+		// every year. SystemTimeToTzSpecificLocalTime(nil, ...) looks tempting,
+		// but it consults the registry's historical dynamic rules instead. Those
+		// differ observably for old timestamps (for example, US DST in 1970), so
+		// doing the small recurrence calculation here is both cheaper and the
+		// byte-for-byte match for reference Lua's localtime.
 		if utc.year < 1601 || utc.year > 30827 {
 			return {}, false
 		}
-		u := win32.SYSTEMTIME {
-			year = u16(utc.year),
-			month = u16(utc.month),
-			day = u16(utc.day),
-			hour = u16(utc.hour),
-			minute = u16(utc.minute),
-			second = u16(utc.second),
-		}
-		l: win32.SYSTEMTIME
-		if !win32.SystemTimeToTzSpecificLocalTime(nil, &u, &l) {
+		std, dst, rules, ok := tzi_info()
+		if !ok {
 			return {}, false
 		}
-		local_nominal := days_from_civil(i64(l.year), int(l.month), int(l.day)) * 86400 +
-			i64(l.hour) * 3600 + i64(l.minute) * 60 + i64(l.second)
-		out := civil_at_timestamp(local_nominal)
-		out.offset = local_nominal - t
-		std, dst, _, ok := tzi_info()
-		out.isdst = ok && dst != std && out.offset == dst ? 1 : 0
+		in_dst := false
+		if dst != std && rules.DaylightDate.month != 0 && rules.StandardDate.month != 0 {
+			start := transition_timestamp(utc.year, rules.DaylightDate, std)
+			finish := transition_timestamp(utc.year, rules.StandardDate, dst)
+			in_dst = start < finish ? (t >= start && t < finish) : (t >= start || t < finish)
+		}
+		offset := in_dst ? dst : std
+		out := civil_at_timestamp(t + offset)
+		out.offset = offset
+		out.isdst = in_dst ? 1 : 0
 		return out, true
 	} else {
 		zone, loaded := load_local_zone()
@@ -497,7 +531,6 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 	alternate := len(op) == 2
 	ch := op[len(op) - 1]
 	zone_buf: [128]u8
-	std, _, _, _ := tzi_info()
 	switch ch {
 	case '%': luaL_addchar(B, '%')
 	case 'a': luaL_addstring(B, WDAY_SHORT[c.wday])
@@ -546,6 +579,12 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 		if utc {
 			// This surprising result matches Windows strftime: gmtime fills no
 			// explicit zone field, so %z/%Z still use the process's standard zone.
+			//
+			// Keep this OS query inside the one conversion that needs it. It used
+			// to run unconditionally at the top of format_conversion, meaning a
+			// format such as "%Y-%m-%dT%H:%M:%S" made six separate kernel calls
+			// even though it never asked for a time-zone offset.
+			std, _, _, _ := tzi_info()
 			off = std
 		}
 		sign := "+"
