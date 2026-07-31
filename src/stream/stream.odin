@@ -19,6 +19,7 @@ package stream
 // is also the minimum guarantee made by C's ungetc.
 
 import "base:runtime"
+import "core:bytes"
 import "core:io"
 import "core:os"
 import "core:strings"
@@ -337,21 +338,36 @@ write_translated :: proc(s: ^Stream, data: []u8) -> bool {
 	// completely raw.
 	when ODIN_OS == .Windows {
 		if s.text_mode {
-			start := 0
-			for c, i in data {
-				if c != '\n' {
-					continue
+			// Translating by writing each plain run and then each CRLF separately
+			// looks pleasantly simple, but every raw write is a WriteFile syscall.
+			// A normal buffered flush can contain hundreds of newlines, so that
+			// approach accidentally made one flush perform a syscall per newline.
+			//
+			// Translate into stack scratch instead.  There is no hot-path heap
+			// allocation, and the usual 8 KiB stream buffer expands into one raw
+			// write.  Every input byte can be an LF and become two output bytes,
+			// so the scratch is deliberately twice DEFAULT_BUFFER_SIZE.  A stream
+			// may use a larger setvbuf buffer, therefore fullness is checked by
+			// output bytes and the translation is emitted in bounded chunks.
+			scratch: [DEFAULT_BUFFER_SIZE * 2]u8
+			used := 0
+			for c in data {
+				needed := c == '\n' ? 2 : 1
+				if used + needed > len(scratch) {
+					if !raw_write_all(s, scratch[:used]) {
+						return false
+					}
+					used = 0
 				}
-				if i > start && !raw_write_all(s, data[start:i]) {
-					return false
+				if c == '\n' {
+					scratch[used] = '\r'
+					used += 1
 				}
-				if !raw_write_all(s, []u8{'\r', '\n'}) {
-					return false
-				}
-				start = i + 1
+				scratch[used] = c
+				used += 1
 			}
-			if start < len(data) {
-				return raw_write_all(s, data[start:])
+			if used > 0 {
+				return raw_write_all(s, scratch[:used])
 			}
 			return true
 		}
@@ -431,12 +447,7 @@ prepare_write :: proc(s: ^Stream) -> bool {
 }
 
 @(private = "file")
-raw_next :: proc(s: ^Stream) -> (u8, i64, i64, bool) {
-	if s.raw_saved {
-		s.raw_saved = false
-		s.raw_cursor = s.raw_saved_after
-		return s.raw_saved_byte, s.raw_saved_before, s.raw_saved_after, true
-	}
+refill_read_buffer :: proc(s: ^Stream) -> bool {
 	if s.read_index >= s.read_count {
 		size := s.buffer_size
 		if s.mode == .Unbuffered {
@@ -452,8 +463,21 @@ raw_next :: proc(s: ^Stream) -> (u8, i64, i64, bool) {
 			if err != nil && err != io.Error.EOF && err != os.General_Error.Broken_Pipe {
 				fail(s, err)
 			}
-			return 0, s.raw_cursor, s.raw_cursor, false
+			return false
 		}
+	}
+	return true
+}
+
+@(private = "file")
+raw_next :: proc(s: ^Stream) -> (u8, i64, i64, bool) {
+	if s.raw_saved {
+		s.raw_saved = false
+		s.raw_cursor = s.raw_saved_after
+		return s.raw_saved_byte, s.raw_saved_before, s.raw_saved_after, true
+	}
+	if !refill_read_buffer(s) {
+		return 0, s.raw_cursor, s.raw_cursor, false
 	}
 	before := s.raw_cursor
 	b := s.read_buffer[s.read_index]
@@ -526,16 +550,147 @@ ungetc :: proc(c: i32, s: ^Stream) -> i32 {
 	return c
 }
 
-read :: proc(s: ^Stream, dst: []u8) -> int {
-	n := 0
-	for n < len(dst) {
-		c := getc(s)
-		if c == EOF {
-			break
-		}
-		dst[n] = u8(c)
-		n += 1
+// Copy logical input bytes into `dst`, optionally stopping just after a delimiter.
+//
+// This operation exists because a C `getc` in the reference interpreter is a
+// macro that usually advances a pointer inside FILE. Calling an Odin procedure
+// for every byte cannot compete with that, especially when a line contains tens
+// of bytes between newlines. The ordinary case below scans the current stream
+// buffer once and copies the whole run at once; refilling and the comparatively
+// rare special characters still go through the stream layer.
+//
+// There are two details that are easy to get subtly wrong here. First, pushback
+// is logical input and must precede even bytes already waiting in the raw buffer,
+// so it is always consumed through `getc` before the fast path starts. Second,
+// Windows text streams cannot bulk-copy raw data across CR or Ctrl-Z: CRLF is one
+// logical newline and Ctrl-Z is logical EOF. The text-mode path scans only as far
+// as one of those bytes, then lets `getc` perform the existing translation. A
+// lone CR's saved look-ahead byte is handled the same way. Thus the fast path is
+// merely batching bytes for which translation is provably a no-op.
+@(private = "file")
+read_bulk :: proc(s: ^Stream, dst: []u8, stop_at_delimiter: bool, delimiter: u8) -> (n: int, found: bool) {
+	if s == nil || !prepare_read(s) {
+		return
 	}
+	for n < len(dst) {
+		// `raw_saved` is the look-ahead after a lone CR. Like pushback, it must
+		// pass through getc so raw_cursor/logical_pos retain their exact cookies.
+		if s.pushback || s.raw_saved {
+			c := getc(s)
+			if c == EOF {
+				return
+			}
+			dst[n] = u8(c)
+			n += 1
+			if stop_at_delimiter && u8(c) == delimiter {
+				found = true
+				return
+			}
+			continue
+		}
+		if s.text_eof {
+			s.eof_flag = true
+			return
+		}
+		if !refill_read_buffer(s) {
+			s.eof_flag = true
+			return
+		}
+
+		available := min(s.read_count - s.read_index, len(dst) - n)
+		take := available
+		special := false
+		span := s.read_buffer[s.read_index:s.read_index + available]
+		if stop_at_delimiter {
+			if i := bytes.index_byte(span, delimiter); i >= 0 {
+				take = i
+				special = true
+			}
+		}
+		when ODIN_OS == .Windows {
+			if s.text_mode {
+				// Search only before an already-found delimiter. In the usual
+				// line-reading case that is a few dozen bytes, rather than
+				// rescanning the rest of an 8 KiB buffer for every line.
+				text_span := span[:take]
+				if i := bytes.index_byte(text_span, '\r'); i >= 0 {
+					take = i
+					special = true
+					text_span = text_span[:i]
+				}
+				if i := bytes.index_byte(text_span, 0x1a); i >= 0 {
+					take = i
+					special = true
+				}
+			}
+		}
+
+		if take > 0 {
+			before := s.raw_cursor
+			copy(dst[n:n + take], s.read_buffer[s.read_index:s.read_index + take])
+			s.read_index += take
+			s.raw_cursor += i64(take)
+			s.logical_pos = s.raw_cursor
+			s.last_before = before + i64(take) - 1
+			s.last_after = s.raw_cursor
+			n += take
+		}
+		if n == len(dst) {
+			return
+		}
+		if special {
+			when ODIN_OS == .Windows {
+				if s.text_mode &&
+				   s.read_buffer[s.read_index] == '\r' &&
+				   s.read_index + 1 < s.read_count &&
+				   s.read_buffer[s.read_index + 1] == '\n' {
+					// CRLF wholly inside this raw buffer is the overwhelmingly
+					// common Windows line ending. We already stopped before the
+					// CR, so collapse the pair here instead of taking another
+					// procedure-call round trip through getc. The position cookie
+					// still advances by both raw bytes, while ungetc metadata
+					// describes the one logical newline exactly as getc would.
+					before := s.raw_cursor
+					s.read_index += 2
+					s.raw_cursor += 2
+					s.last_before = before
+					s.last_after = s.raw_cursor
+					s.logical_pos = s.raw_cursor
+					dst[n] = '\n'
+					n += 1
+					if stop_at_delimiter && delimiter == '\n' {
+						found = true
+						return
+					}
+					continue
+				}
+			}
+			// getc consumes the delimiter itself and performs CRLF/Ctrl-Z
+			// translation when the raw byte was special only because of text mode.
+			c := getc(s)
+			if c == EOF {
+				return
+			}
+			dst[n] = u8(c)
+			n += 1
+			if stop_at_delimiter && u8(c) == delimiter {
+				found = true
+				return
+			}
+		}
+	}
+	return
+}
+
+// Read up to and including `delimiter`. If the delimiter is not in the current
+// raw buffer, the operation copies that whole translated run, refills, and keeps
+// going until `dst` is full or input ends.
+read_until :: proc(s: ^Stream, dst: []u8, delimiter: u8) -> (n: int, found: bool) {
+	return read_bulk(s, dst, true, delimiter)
+}
+
+read :: proc(s: ^Stream, dst: []u8) -> int {
+	n, _ := read_bulk(s, dst, false, 0)
 	return n
 }
 

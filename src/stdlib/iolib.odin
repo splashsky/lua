@@ -566,29 +566,25 @@ test_eof :: proc(L: ^lua.Lua_State, f: ^stream.Stream) -> bool {
 read_line :: proc(L: ^lua.Lua_State, f: ^stream.Stream, chop: bool) -> bool {
 	b: Buffer
 	luaL_buffinit(L, &b)
-	c: i32 = stream.EOF
+	found_newline := false
 	for {
 		buff := luaL_prepbuffsize(&b, LUAL_BUFFERSIZE)
-		i: uint = 0
-		for i < LUAL_BUFFERSIZE {
-			c = stream.getc(f)
-			if c == stream.EOF || c == '\n' {
-				break
+		n, found := stream.read_until(f, buff[:LUAL_BUFFERSIZE], '\n')
+		added := n
+		if found {
+			found_newline = true
+			if chop {
+				added -= 1
 			}
-			buff[i] = u8(c)
-			i += 1
 		}
-		luaL_addsize(&b, i)
-		if c == stream.EOF || c == '\n' {
+		luaL_addsize(&b, uint(added))
+		if found || n < LUAL_BUFFERSIZE {
 			break
 		}
 	}
-	if !chop && c == '\n' { // want the newline and have one?
-		luaL_addchar(&b, '\n')
-	}
 	luaL_pushresult(&b)
 	// Success if we read a newline or produced any bytes at all.
-	return c == '\n' || lua.lua_rawlen(L, -1) > 0
+	return found_newline || lua.lua_rawlen(L, -1) > 0
 }
 
 // Read the entire remaining file in buffer-sized chunks -- reference `read_all`.

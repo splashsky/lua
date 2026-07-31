@@ -95,6 +95,53 @@ io_line_formats :: proc(t: ^testing.T) {
 }
 
 @(test)
+io_bulk_read_edge_cases :: proc(t: ^testing.T) {
+	L := io_state()
+	defer lua.close_state(L)
+	src :=
+		IO_PREAMBLE +
+		"local path = tmppath('bulk.tmp')\n" +
+		"local function put(data)\n" +
+		"  local f = assert(io.open(path, 'wb')); assert(f:write(data)); f:close()\n" +
+		"end\n" +
+		"local function lines(data, mode)\n" +
+		"  put(data); local out = {}\n" +
+		"  for line in io.lines(path, mode or 'l') do out[#out+1] = line end\n" +
+		"  return out\n" +
+		"end\n" +
+		// Empty input, empty lines, only newlines, and a final unterminated line.
+		"put(''); local f = assert(io.open(path, 'r'))\n" +
+		"assert(f:read('l') == nil and f:read('L') == nil); f:close()\n" +
+		"local a = lines('\\n'); assert(#a == 1 and a[1] == '')\n" +
+		"a = lines('\\n\\n\\n', 'L')\n" +
+		"assert(#a == 3 and a[1] == '\\n' and a[2] == '\\n' and a[3] == '\\n')\n" +
+		"a = lines('one\\n\\ntail'); assert(#a == 3 and a[1] == 'one' and a[2] == '' and a[3] == 'tail')\n" +
+		// Cross several stream/Lua-buffer boundaries before finding the newline.
+		"local long = ''; for i = 1, 20000 do long = long .. 'x' end\n" +
+		"put(long .. '\\nlast'); f = assert(io.open(path, 'r'))\n" +
+		"assert(f:read('l') == long and f:read('L') == 'last' and f:read('l') == nil); f:close()\n" +
+		// read_number leaves one byte in ungetc pushback; the bulk line reader
+		// must return that byte before touching the stream's buffered raw bytes.
+		"put('12x\\n'); f = assert(io.open(path, 'r'))\n" +
+		"assert(f:read('n') == 12 and f:read('l') == 'x'); f:close()\n" +
+		// A binary fixture lets the same bytes exercise Windows text translation
+		// and the translation-free binary path.
+		"local raw = '\\r\\nA\\rB\\r\\nC\\x1aD\\n'; put(raw)\n" +
+		"f = assert(io.open(path, 'rb')); assert(f:read('a') == raw); f:close()\n" +
+		"f = assert(io.open(path, 'r'))\n" +
+		"local first = f:read('L')\n" +
+		"if first == '\\n' then\n" + // Windows text mode
+		"  assert(f:seek() == 2)\n" +
+		"  assert(f:read('l') == 'A\\rB' and f:seek() == 7)\n" +
+		"  assert(f:read('a') == 'C' and f:seek() == 8 and f:read(1) == nil)\n" +
+		"else\n" + // Other hosts do not translate text streams
+		"  assert(first == '\\r\\n' and f:read('l') == 'A\\rB\\r' and f:read('a') == 'C\\x1aD\\n')\n" +
+		"end\n" +
+		"f:close(); os.remove(path); return 'ok'"
+	testing.expect(t, io_eval(t, L, src) == "ok", "bulk lines preserve edge, pushback, text, and binary semantics")
+}
+
+@(test)
 io_number_and_chars :: proc(t: ^testing.T) {
 	L := io_state()
 	defer lua.close_state(L)
