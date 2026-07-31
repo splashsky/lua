@@ -18,5 +18,10 @@ local function run(N)
 	io.flush()
 end
 
-for _, n in ipairs({12500, 25000, 50000, 100000}) do run(n) end
+-- Use simple argument-safe names for discovery while preserving the historical
+-- "N=..." result lines. Each size can now get a fresh process just like the
+-- regular harness.bench workloads.
+for _, n in ipairs({12500, 25000, 50000, 100000}) do
+	if harness.selected("scale_" .. n) then run(n) end
+end
 harness.report_heap()

@@ -9,7 +9,9 @@
 #     ./build/bench.sh
 #     ./build/bench.sh tables.lua
 #     ./build/bench.sh --no-build
+#     ./build/bench.sh --no-build --isolated micro.lua
 #     REFLUA=/path/to/lua ./build/bench.sh
+#     REFLUA=/path/to/lua ./build/bench.sh --in-process
 
 set -euo pipefail
 
@@ -33,14 +35,22 @@ mkdir -p "$OUT_DIR"
 LUA_EXE="$OUT_DIR/lua"
 
 NO_BUILD=0
+ISOLATED=0
+IN_PROCESS=0
 FILE=""
 for arg in "$@"; do
     case "$arg" in
         --no-build) NO_BUILD=1 ;;
-        micro.lua|tables.lua|scaling.lua) FILE="$arg" ;;
+        --isolated) ISOLATED=1 ;;
+        --in-process) IN_PROCESS=1 ;;
+        micro.lua|tables.lua|stdlib.lua|scaling.lua) FILE="$arg" ;;
         *) echo "Unknown argument '$arg'." >&2; exit 1 ;;
     esac
 done
+if [[ "$ISOLATED" -eq 1 && "$IN_PROCESS" -eq 1 ]]; then
+    echo "Choose either --isolated or --in-process, not both." >&2
+    exit 1
+fi
 
 if [[ "$NO_BUILD" -eq 0 ]]; then
     echo "==> Building lua -> $LUA_EXE"
@@ -56,19 +66,25 @@ if [[ -n "${REFLUA:-}" && ! -x "$REFLUA" ]]; then
     exit 1
 fi
 
-FILES=(micro.lua tables.lua scaling.lua)
+FILES=(micro.lua tables.lua stdlib.lua scaling.lua)
 if [[ -n "$FILE" ]]; then FILES=("$FILE"); fi
 
 run_benchmark() {
-    local exe="$1" file="$2" label="$3"
+    local exe="$1" file="$2" label="$3" benchmark="${4:-}"
     local usage_file="$OUT_DIR/resource-usage.txt"
+    local mode="all-in-one process"
+    local command=("$exe" "$file")
+    if [[ -n "$benchmark" ]]; then
+        mode="isolated process : $benchmark"
+        command+=("$benchmark")
+    fi
     rm -f "$usage_file"
 
-    echo "===== $label : $file ====="
+    echo "===== $label : $file [$mode] ====="
     if [[ -x /usr/bin/time ]] && /usr/bin/time -v true >/dev/null 2>&1; then
         (
             cd "$BENCH_DIR"
-            /usr/bin/time -v -o "$usage_file" "$exe" "$file"
+            /usr/bin/time -v -o "$usage_file" "${command[@]}"
         )
         local peak
         peak="$(awk -F: '/Maximum resident set size/ {gsub(/^[ \t]+/, "", $2); print $2}' "$usage_file")"
@@ -79,7 +95,7 @@ run_benchmark() {
             # BSD time has -l but not GNU time's -o. Its report follows the
             # command's stderr, so capture that stream while leaving the
             # benchmark result on stdout for us to see.
-            /usr/bin/time -l "$exe" "$file" 2>"$usage_file"
+            /usr/bin/time -l "${command[@]}" 2>"$usage_file"
         )
         local peak_bytes
         peak_bytes="$(awk '/maximum resident set size/ {print $1}' "$usage_file")"
@@ -91,17 +107,40 @@ run_benchmark() {
     else
         # POSIX does not standardize a maximum-RSS field. Preserve benchmark
         # output and state the limitation rather than inventing a measurement.
-        (cd "$BENCH_DIR" && "$exe" "$file")
+        (cd "$BENCH_DIR" && "${command[@]}")
         echo "peakRSS unavailable (/usr/bin/time lacks -v and -l)"
     fi
     echo ""
 }
 
+# A reference comparison opts into isolation unless the caller explicitly asks
+# for the old interaction-sensitive protocol. Standalone runs stay all-in-one,
+# preserving the quick, familiar behavior of invoking this script casually.
+USE_ISOLATION="$ISOLATED"
+if [[ -n "${REFLUA:-}" && "$IN_PROCESS" -eq 0 ]]; then USE_ISOLATION=1; fi
+
 for file in "${FILES[@]}"; do
-    run_benchmark "$LUA_EXE" "$file" "lua-odin"
-    if [[ -n "${REFLUA:-}" ]]; then
-        # Keeping the reference immediately adjacent minimizes load drift.
-        run_benchmark "$REFLUA" "$file" "reference Lua"
+    if [[ "$USE_ISOLATION" -eq 1 ]]; then
+        # Ask the Lua file for its names so this runner never carries a second,
+        # inevitably stale copy of the suite inventory.
+        # macOS still ships Bash 3.2, which predates mapfile. Command
+        # substitution plus this small read loop keeps the runner portable.
+        benchmark_list="$(cd "$BENCH_DIR" && "$LUA_EXE" "$file" --list)"
+        benchmarks=()
+        while IFS= read -r benchmark; do
+            benchmarks+=("$benchmark")
+        done <<< "$benchmark_list"
+        for benchmark in "${benchmarks[@]}"; do
+            run_benchmark "$LUA_EXE" "$file" "lua-odin" "$benchmark"
+            if [[ -n "${REFLUA:-}" ]]; then
+                run_benchmark "$REFLUA" "$file" "reference Lua" "$benchmark"
+            fi
+        done
+    else
+        run_benchmark "$LUA_EXE" "$file" "lua-odin"
+        if [[ -n "${REFLUA:-}" ]]; then
+            run_benchmark "$REFLUA" "$file" "reference Lua"
+        fi
     fi
 done
 
