@@ -1987,13 +1987,68 @@ num_sincos :: proc "contextless" (x: Number) -> (sine, cosine: Number) {
 }
 
 num_sin :: proc "contextless" (x: Number) -> Number {
-	s, _ := num_sincos(x)
-	return s
+	bits := transmute(u64)x
+	ax := bits & 0x7fff_ffff_ffff_ffff
+	if ax == 0 {
+		return x // preserve -0
+	}
+	if ax >= 0x7ff0_0000_0000_0000 {
+		if ax > 0x7ff0_0000_0000_0000 {
+			return x // preserve a NaN payload
+		}
+		return transmute(Number)u64(0x7ff8_0000_0000_0000)
+	}
+
+	// 0x3fe921fb54442d18 is pi/4 rounded to binary64.  The fdlibm sine
+	// polynomial is proved for the whole interval [-pi/4, pi/4], so values in
+	// this range need no quadrant calculation and, more importantly, no
+	// subtraction of an approximate pi/2.  Skipping reduction is exact as a
+	// routing decision: its error contribution is zero, while reducing here
+	// would only add the rounding error of that unnecessary subtraction.
+	if ax <= 0x3fe9_21fb_5444_2d18 {
+		return num_sin_kernel(x, 0)
+	}
+
+	n, hi, lo := num_rem_pio2(x)
+	if n&1 == 0 {
+		s := num_sin_kernel(hi, lo)
+		return n&2 == 0 ? s : -s
+	}
+	c := num_cos_kernel(hi, lo)
+	return n&2 == 0 ? c : -c
 }
 
 num_cos :: proc "contextless" (x: Number) -> Number {
-	_, c := num_sincos(x)
-	return c
+	bits := transmute(u64)x
+	ax := bits & 0x7fff_ffff_ffff_ffff
+	if ax == 0 {
+		return 1
+	}
+	if ax >= 0x7ff0_0000_0000_0000 {
+		if ax > 0x7ff0_0000_0000_0000 {
+			return x // preserve a NaN payload
+		}
+		return transmute(Number)u64(0x7ff8_0000_0000_0000)
+	}
+
+	// This is the same direct-kernel boundary as sine: the exact binary64
+	// encoding 0x3fe921fb54442d18 is pi/4 rounded to nearest.  fdlibm's cosine
+	// kernel has a sub-ulp approximation bound throughout [-pi/4, pi/4], so
+	// calling it directly contributes no argument-reduction error at all.
+	// This matters especially for tiny inputs: the old shared sincos path also
+	// evaluated the entire sine polynomial and discarded it, which was the
+	// measured cosine asymmetry rather than an unavoidable cost of cosine.
+	if ax <= 0x3fe9_21fb_5444_2d18 {
+		return num_cos_kernel(x, 0)
+	}
+
+	n, hi, lo := num_rem_pio2(x)
+	if n&1 == 0 {
+		c := num_cos_kernel(hi, lo)
+		return n&2 == 0 ? c : -c
+	}
+	s := num_sin_kernel(hi, lo)
+	return n&2 == 0 ? -s : s
 }
 
 // fdlibm's tangent kernel is worth keeping separate from sin/cos.  Dividing two
