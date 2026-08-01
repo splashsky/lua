@@ -2750,19 +2750,27 @@ flt_arith :: #force_inline proc "contextless" (op: Arith_Op, v1, v2: Number) -> 
 	return 0
 }
 
-// The raw arithmetic entry point, faithful to `luaO_rawarith`. It decides,
-// per operator, whether to work in the integer or float domain:
+// The destination-writing arithmetic entry point, faithful to `luaO_rawarith`.
+// It decides, per operator, whether to work in the integer or float domain:
 //   * bitwise/shift ops need both operands to be integers (or integral floats);
 //   * '/' and '^' always work in floats;
 //   * everything else stays in integers when both operands are integers, else
 //     promotes to floats.
-// On success it writes `res` and returns Ok. If an operand isn't a number it
+// On success it writes `dst` and returns Ok. If an operand isn't a number it
 // returns No_Number (the VM will try a metamethod later); if an integer divide or
 // modulo hits a zero divisor it returns Div_By_Zero (the VM raises an error).
+//
+// The destination is deliberately supplied by the caller. The older shape built
+// a temporary TValue, took its address for set_int/set_float, and then copied it
+// into the VM register. Taking that address makes the compiler materialize the
+// temporary in stack memory on the interpreter's hottest path. Reference Lua
+// avoids that round trip by having each arithmetic opcode write straight into
+// its destination register, so we preserve the same shape here.
+//
 // This small dispatcher is on the interpreter's hottest path. Growth of this
 // large file previously made the optimiser stop inlining it, costing about 30%
 // of arithmetic throughput, so the directive is load-bearing rather than stylistic.
-raw_arith :: #force_inline proc "contextless" (op: Arith_Op, p1, p2: ^TValue) -> (res: TValue, status: Arith_Status) {
+raw_arith_to :: #force_inline proc "contextless" (op: Arith_Op, p1, p2, dst: ^TValue) -> Arith_Status {
 	switch op {
 	case .Band, .Bor, .Bxor, .Shl, .Shr, .Bnot:
 		// Integer-only: operands must be integers or exactly-integral floats.
@@ -2770,40 +2778,106 @@ raw_arith :: #force_inline proc "contextless" (op: Arith_Op, p1, p2: ^TValue) ->
 		i2, ok2 := to_integer_no_string(p2, .Eq)
 		if ok1 && ok2 {
 			r, _ := int_arith(op, i1, i2) // never divides; ok is always true
-			set_int(&res, r)
-			return res, .Ok
+			set_int(dst, r)
+			return .Ok
 		}
-		return res, .No_Number
+		return .No_Number
 
 	case .Div, .Pow:
 		// Float-only.
 		n1, ok1 := to_number_no_string(p1)
 		n2, ok2 := to_number_no_string(p2)
 		if ok1 && ok2 {
-			set_float(&res, flt_arith(op, n1, n2))
-			return res, .Ok
+			set_float(dst, flt_arith(op, n1, n2))
+			return .Ok
 		}
-		return res, .No_Number
+		return .No_Number
 
-	case .Add, .Sub, .Mul, .Mod, .IDiv, .Unm:
-		// Stay integer when both are integers; otherwise promote to float.
+	case .Add:
 		if is_integer(p1) && is_integer(p2) {
-			r, ok := int_arith(op, p1.value_.i, p2.value_.i)
-			if !ok {
-				return res, .Div_By_Zero
-			}
-			set_int(&res, r)
-			return res, .Ok
+			// Addition cannot fail. Keeping it out of int_arith avoids carrying
+			// the divide-by-zero result needed only by modulo and floor division.
+			set_int(dst, int_add(p1.value_.i, p2.value_.i))
+			return .Ok
 		}
 		n1, ok1 := to_number_no_string(p1)
 		n2, ok2 := to_number_no_string(p2)
 		if ok1 && ok2 {
-			set_float(&res, flt_arith(op, n1, n2))
-			return res, .Ok
+			set_float(dst, n1 + n2)
+			return .Ok
 		}
-		return res, .No_Number
+		return .No_Number
+
+	case .Sub:
+		if is_integer(p1) && is_integer(p2) {
+			// Subtraction has the same infallible wrapping integer path as add.
+			set_int(dst, int_sub(p1.value_.i, p2.value_.i))
+			return .Ok
+		}
+		n1, ok1 := to_number_no_string(p1)
+		n2, ok2 := to_number_no_string(p2)
+		if ok1 && ok2 {
+			set_float(dst, n1 - n2)
+			return .Ok
+		}
+		return .No_Number
+
+	case .Mul:
+		if is_integer(p1) && is_integer(p2) {
+			// Multiplication wraps through the unsigned-domain helper and, like
+			// add/sub, has no error status to test on the successful integer path.
+			set_int(dst, int_mul(p1.value_.i, p2.value_.i))
+			return .Ok
+		}
+		n1, ok1 := to_number_no_string(p1)
+		n2, ok2 := to_number_no_string(p2)
+		if ok1 && ok2 {
+			set_float(dst, n1 * n2)
+			return .Ok
+		}
+		return .No_Number
+
+	case .Mod, .IDiv:
+		// These two integer operations genuinely can fail, so they retain the
+		// zero-divisor result that the VM turns into the operation-specific error.
+		if is_integer(p1) && is_integer(p2) {
+			r, ok := int_arith(op, p1.value_.i, p2.value_.i)
+			if !ok {
+				return .Div_By_Zero
+			}
+			set_int(dst, r)
+			return .Ok
+		}
+		n1, ok1 := to_number_no_string(p1)
+		n2, ok2 := to_number_no_string(p2)
+		if ok1 && ok2 {
+			set_float(dst, flt_arith(op, n1, n2))
+			return .Ok
+		}
+		return .No_Number
+
+	case .Unm:
+		if is_integer(p1) && is_integer(p2) {
+			set_int(dst, int_neg(p1.value_.i))
+			return .Ok
+		}
+		n1, ok1 := to_number_no_string(p1)
+		n2, ok2 := to_number_no_string(p2)
+		if ok1 && ok2 {
+			set_float(dst, -n1)
+			return .Ok
+		}
+		return .No_Number
 	}
-	return res, .No_Number
+	return .No_Number
+}
+
+// Non-VM callers still benefit from the convenient value-returning interface.
+// They are cold enough that materializing this wrapper's local result is harmless;
+// keeping it here also prevents the fast interpreter path from paying that cost.
+raw_arith :: #force_inline proc "contextless" (op: Arith_Op, p1, p2: ^TValue) -> (res: TValue, status: Arith_Status) {
+	status = raw_arith_to(op, p1, p2, &res)
+	return
 }
 
 // ---------------------------------------------------------------------------

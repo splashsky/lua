@@ -848,19 +848,21 @@ floatforloop :: proc(L: ^Lua_State, ra: int) -> bool {
 	return false
 }
 
-// Arithmetic shared by the register/immediate/K opcodes: fold `v1 op v2` into
-// `R[ra]` if both are numeric, reporting the `raw_arith` status so the caller can
-// skip the following MMBIN* (on Ok) or let it run (on No_Number).
+// Arithmetic shared by the register/immediate/K opcodes: fold `v1 op v2` straight
+// into `R[ra]` if both are numeric, reporting the status so the caller can skip
+// the following MMBIN* (on Ok) or let it run (on No_Number).
+//
+// Writing straight into the register is important here. Building a local TValue
+// and taking its address makes the compiler spill that temporary to stack memory,
+// only for us to reload and copy it into the register. Reference Lua's opcode
+// macros avoid that extra round trip, and raw_arith_to gives this interpreter the
+// same destination-writing shape without changing the cold API/metamethod paths.
 // This tiny helper is on the interpreter's hottest path. Growth of its large
 // callee's source file previously made the optimiser stop inlining this chain,
 // costing about 30% of arithmetic throughput, so the directive is load-bearing.
 @(private = "file")
 vm_arith :: #force_inline proc(L: ^Lua_State, ra: int, v1, v2: ^TValue, op: Arith_Op) -> Arith_Status {
-	res, st := raw_arith(op, v1, v2)
-	if st == .Ok {
-		set_obj(stack_value(L, ra), &res)
-	}
-	return st
+	return raw_arith_to(op, v1, v2, stack_value(L, ra))
 }
 
 // ---------------------------------------------------------------------------
