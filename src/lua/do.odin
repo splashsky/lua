@@ -387,12 +387,21 @@ moveresults :: proc(L: ^Lua_State, res: int, nres: int, fwanted: u32) {
 		r := res
 		if (fwanted & CIST_TBC) != 0 {
 			// Results movement must run after closing to-be-closed variables,
-			// because a __close can yield/err. TBC support lands with the VM's
-			// close op; until a tbc upvalue can exist this branch is unreachable.
+			// because a __close can yield/err.
 			ci := &L.frames[L.ci]
 			ci.u2 = nres
 			ci.callstatus |= CIST_CLSRET
 			r = luaF_close(L, r, CLOSEKTOP, true)
+			// Re-derive the frame pointer rather than reusing the one above.
+			// `luaF_close` runs arbitrary `__close` handlers, and a handler that
+			// calls deep enough grows the frame array, which reallocates
+			// `L.frames` and leaves any pointer taken before the call dangling.
+			// Reference Lua holds its `ci` across this safely only because its
+			// CallInfo nodes are individually allocated and linked, so they never
+			// move; our contiguous array does move. `luaD_poscall` just below
+			// already re-derives after `rethook` for exactly this reason, and this
+			// was the one place in the call path that did not.
+			ci = &L.frames[L.ci]
 			ci.callstatus &~= CIST_CLSRET
 			if L.hookmask != 0 {
 				rethook(L, L.ci, nres)
