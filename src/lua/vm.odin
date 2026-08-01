@@ -867,6 +867,32 @@ vm_arith :: #force_inline proc(L: ^Lua_State, ra: int, v1, v2: ^TValue, op: Arit
 // The interpreter loop
 // ---------------------------------------------------------------------------
 
+// Unlike the value stack, a Proto's code array never moves after the prototype
+// has been built. That makes a local instruction pointer safe here: it cannot be
+// invalidated by a call, allocation, or stack growth. We still deliberately keep
+// Call_Info.savedpc as an integer, though. A call frame outlives this dispatch-loop
+// activation, and persistent state is easier to reason about when it contains no
+// pointer that could ever become stale.
+//
+// Odin does not define arithmetic on multipointers, so these forced-inline
+// helpers are our spelling of pointer movement and pointer-to-index conversion.
+// The bargain is intentional: ordinary dispatch avoids one index scale-and-add
+// for every instruction executed, while the less frequent savedpc sync pays one
+// subtraction from the code base.
+@(private = "file")
+vm_pc_add :: #force_inline proc "contextless" (pc: [^]Instruction, offset: int) -> [^]Instruction {
+	bytes := uintptr(abs(offset)) * size_of(Instruction)
+	if offset < 0 {
+		return ([^]Instruction)(rawptr(uintptr(pc) - bytes))
+	}
+	return ([^]Instruction)(rawptr(uintptr(pc) + bytes))
+}
+
+@(private = "file")
+vm_pc_index :: #force_inline proc "contextless" (pc, code: [^]Instruction) -> int {
+	return int((uintptr(pc) - uintptr(code)) / size_of(Instruction))
+}
+
 // The console handler cannot safely touch Lua_State because Windows invokes it
 // on another thread. It therefore leaves us a tiny atomic mailbox message, and
 // the VM opens that mailbox only at control-flow edges: calls, returns, and loop
@@ -901,7 +927,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 		k := cl.p.k
 		code := cl.p.code
 		base := L.frames[ci_idx].func + 1 // stack index of R[0]
-		pc := L.frames[ci_idx].u.l.savedpc
+		pc := vm_pc_add(code, L.frames[ci_idx].u.l.savedpc)
 		// Reference Lua's `luaG_tracecall`, inlined at the `startfunc`/`returning`
 		// entry. `trap` starts from the hook mask; when any hook is active we arm
 		// this frame's `u.l.trap` (so an `updatetrap` after a nested call reloads a
@@ -913,7 +939,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 			ci0 := &L.frames[ci_idx]
 			ci0.u.l.trap = 1 // ensure hooks keep being checked after nested calls
 			trap = 1
-			if pc == 0 { // first instruction of a fresh (non-resuming) call?
+			if pc == code { // first instruction of a fresh (non-resuming) call?
 				if (cl.p.flag & u8(PF_VAHID | PF_VATAB)) != 0 {
 					trap = 0 // hooks begin at the VARARGPREP instruction
 				} else if (ci0.callstatus & CIST_HOOKYIELD) == 0 {
@@ -922,7 +948,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 			}
 		}
 
-		// The dispatch loop. `pc` indexes `code`; `savedpc` is synced from `pc`
+		// The dispatch loop. `pc` walks the immutable code array directly; `savedpc` is synced as an index
 		// before anything that can raise (so error line info is correct) and
 		// before every frame switch (so the caller resumes correctly).
 		for {
@@ -930,12 +956,12 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 			// trapping, and we consult `luaG_traceexec` before each instruction.
 			// In the common (no-hook) case `trap` is 0 and this costs one branch.
 			if trap != 0 {
-				L.frames[ci_idx].u.l.savedpc = pc
-				trap = luaG_traceexec(L, pc)
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
+				trap = luaG_traceexec(L, vm_pc_index(pc, code))
 				base = L.frames[ci_idx].func + 1 // reference `updatebase` (no-op in the index model)
 			}
-			i := code[pc]
-			pc += 1
+			i := pc[0]
+			pc = vm_pc_add(pc, 1)
 			switch get_opcode(i) {
 
 			case .MOVE:
@@ -951,15 +977,15 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				set_obj(stack_value(L, base + getarg_A(i)), &k[getarg_Bx(i)])
 
 			case .LOADKX:
-				set_obj(stack_value(L, base + getarg_A(i)), &k[getarg_Ax(code[pc])])
-				pc += 1
+				set_obj(stack_value(L, base + getarg_A(i)), &k[getarg_Ax(pc[0])])
+				pc = vm_pc_add(pc, 1)
 
 			case .LOADFALSE:
 				set_bool(stack_value(L, base + getarg_A(i)), false)
 
 			case .LFALSESKIP:
 				set_bool(stack_value(L, base + getarg_A(i)), false)
-				pc += 1 // skip the next instruction (a LOADTRUE)
+				pc = vm_pc_add(pc, 1) // skip the next instruction (a LOADTRUE)
 
 			case .LOADTRUE:
 				set_bool(stack_value(L, base + getarg_A(i)), true)
@@ -988,47 +1014,47 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				upval := upval_value(cl.upvals[getarg_B(i)])
 				rc := &k[getarg_C(i)]
-				vm_gettable(L, ci_idx, pc, upval, rc, ra)
+				vm_gettable(L, ci_idx, vm_pc_index(pc, code), upval, rc, ra)
 
 			case .GETTABLE:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
 				rc := stack_value(L, base + getarg_C(i))
-				vm_gettable_hot(L, ci_idx, pc, rb, rc, ra)
+				vm_gettable_hot(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra)
 
 			case .GETI:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
-				vm_geti(L, ci_idx, pc, rb, Integer(getarg_C(i)), ra)
+				vm_geti(L, ci_idx, vm_pc_index(pc, code), rb, Integer(getarg_C(i)), ra)
 
 			case .GETFIELD:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
 				rc := &k[getarg_C(i)]
-				vm_gettable(L, ci_idx, pc, rb, rc, ra)
+				vm_gettable(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra)
 
 			case .SETTABUP:
 				upval := upval_value(cl.upvals[getarg_A(i)])
 				rb := &k[getarg_B(i)]
 				rc := vm_rkc(L, base, k, i)
-				vm_settable(L, ci_idx, pc, upval, rb, rc)
+				vm_settable(L, ci_idx, vm_pc_index(pc, code), upval, rb, rc)
 
 			case .SETTABLE:
 				ra := stack_value(L, base + getarg_A(i))
 				rb := stack_value(L, base + getarg_B(i))
 				rc := vm_rkc(L, base, k, i)
-				vm_settable_hot(L, ci_idx, pc, ra, rb, rc)
+				vm_settable_hot(L, ci_idx, vm_pc_index(pc, code), ra, rb, rc)
 
 			case .SETI:
 				ra := stack_value(L, base + getarg_A(i))
 				rc := vm_rkc(L, base, k, i)
-				vm_seti(L, ci_idx, pc, ra, Integer(getarg_B(i)), rc)
+				vm_seti(L, ci_idx, vm_pc_index(pc, code), ra, Integer(getarg_B(i)), rc)
 
 			case .SETFIELD:
 				ra := stack_value(L, base + getarg_A(i))
 				rb := &k[getarg_B(i)]
 				rc := vm_rkc(L, base, k, i)
-				vm_settable(L, ci_idx, pc, ra, rb, rc)
+				vm_settable(L, ci_idx, vm_pc_index(pc, code), ra, rb, rc)
 
 			case .NEWTABLE:
 				ra := base + getarg_A(i)
@@ -1038,9 +1064,9 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 					b = u32(1) << (b - 1) // hash size is 2^(b-1)
 				}
 				if testarg_k(i) != 0 {
-					c += u32(getarg_Ax(code[pc])) * u32(MAXARG_vC + 1)
+					c += u32(getarg_Ax(pc[0])) * u32(MAXARG_vC + 1)
 				}
-				pc += 1 // skip the EXTRAARG
+				pc = vm_pc_add(pc, 1) // skip the EXTRAARG
 				L.top = ra + 1 // correct top in case allocation triggers a GC
 				t := luaH_new(L)
 				set_table(stack_value(L, ra), t)
@@ -1054,7 +1080,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				rb := stack_value(L, base + getarg_B(i))
 				rc := &k[getarg_C(i)]
 				set_obj(stack_value(L, ra + 1), rb) // R[A+1] := object
-				vm_gettable(L, ci_idx, pc, rb, rc, ra) // R[A] := object[method]
+				vm_gettable(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra) // R[A] := object[method]
 
 			case .ADDI:
 				ra := base + getarg_A(i)
@@ -1062,58 +1088,58 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				aux: TValue
 				set_int(&aux, Integer(getarg_sC(i)))
 				if vm_arith(L, ra, v1, &aux, .Add) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 
 			case .ADDK:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Add) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .SUBK:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Sub) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .MULK:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Mul) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .MODK:
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				st := vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Mod)
 				if st == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				} else if st == .Div_By_Zero {
 					luaG_runerror(L, "attempt to perform 'n%%0'")
 				}
 			case .POWK:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Pow) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .DIVK:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Div) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .IDIVK:
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				st := vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .IDiv)
 				if st == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				} else if st == .Div_By_Zero {
 					luaG_runerror(L, "attempt to divide by zero")
 				}
 			case .BANDK:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Band) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .BORK:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Bor) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .BXORK:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Bxor) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 
 			case .SHLI:
@@ -1121,7 +1147,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				rb := stack_value(L, base + getarg_B(i))
 				ic := getarg_sC(i)
 				if ib, ok := to_integer_no_string(rb, .Eq); ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 					set_int(stack_value(L, ra), vm_shiftl(Integer(ic), ib))
 				}
 			case .SHRI:
@@ -1129,93 +1155,93 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				rb := stack_value(L, base + getarg_B(i))
 				ic := getarg_sC(i)
 				if ib, ok := to_integer_no_string(rb, .Eq); ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 					set_int(stack_value(L, ra), vm_shiftl(ib, -Integer(ic)))
 				}
 
 			case .ADD:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Add) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .SUB:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Sub) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .MUL:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Mul) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .MOD:
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				st := vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Mod)
 				if st == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				} else if st == .Div_By_Zero {
 					luaG_runerror(L, "attempt to perform 'n%%0'")
 				}
 			case .POW:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Pow) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .DIV:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Div) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .IDIV:
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				st := vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .IDiv)
 				if st == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				} else if st == .Div_By_Zero {
 					luaG_runerror(L, "attempt to divide by zero")
 				}
 			case .BAND:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Band) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .BOR:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Bor) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .BXOR:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Bxor) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .SHL:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Shl) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 			case .SHR:
 				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Shr) == .Ok {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				}
 
 			case .MMBIN:
 				ra := stack_value(L, base + getarg_A(i))
-				pi := code[pc - 2] // the original arithmetic instruction
+				pi := pc[-2] // the original arithmetic instruction
 				rb := stack_value(L, base + getarg_B(i))
 				result := base + getarg_A(pi)
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				luaT_trybinTM(L, ra, rb, result, getarg_C(i))
 
 			case .MMBINI:
 				ra := stack_value(L, base + getarg_A(i))
-				pi := code[pc - 2]
+				pi := pc[-2]
 				imm := getarg_sB(i)
 				result := base + getarg_A(pi)
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				luaT_trybiniTM(L, ra, Integer(imm), getarg_k(i) != 0, result, getarg_C(i))
 
 			case .MMBINK:
 				ra := stack_value(L, base + getarg_A(i))
-				pi := code[pc - 2]
+				pi := pc[-2]
 				imm := &k[getarg_B(i)]
 				result := base + getarg_A(pi)
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				luaT_trybinassocTM(L, ra, imm, getarg_k(i) != 0, result, getarg_C(i))
 
@@ -1223,7 +1249,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
 				if vm_arith(L, ra, rb, rb, .Unm) != .Ok {
-					L.frames[ci_idx].u.l.savedpc = pc
+					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					L.top = L.frames[ci_idx].top
 					luaT_trybinTM(L, rb, rb, ra, TM_UNM)
 				}
@@ -1232,7 +1258,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
 				if vm_arith(L, ra, rb, rb, .Bnot) != .Ok {
-					L.frames[ci_idx].u.l.savedpc = pc
+					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					L.top = L.frames[ci_idx].top
 					luaT_trybinTM(L, rb, rb, ra, TM_BNOT)
 				}
@@ -1247,7 +1273,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 
 			case .LEN:
 				ra := base + getarg_A(i)
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				luaV_objlen(L, ra, stack_value(L, base + getarg_B(i)))
 
@@ -1255,25 +1281,25 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				n := getarg_B(i)
 				L.top = ra + n // mark the end of the operand run
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				luaV_concat(L, n)
 				L.top = ra + 1 // result at ra; anchor it for the GC
 				luaC_checkGC(L)
 
 			case .CLOSE:
 				ra := base + getarg_A(i)
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				luaF_close(L, ra, int(Thread_Status.Ok), true)
 
 			case .TBC:
 				ra := base + getarg_A(i)
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				luaF_newtbcupval(L, ra)
 
 			case .JMP:
 				offset := getarg_sJ(i)
-				pc += offset
+				pc = vm_pc_add(pc, offset)
 				if offset < 0 {
 					trap = luaV_poll_async_hook(L, trap)
 				}
@@ -1281,12 +1307,12 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 			case .EQ:
 				ra := stack_value(L, base + getarg_A(i))
 				rb := stack_value(L, base + getarg_B(i))
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				cond := luaV_equalobj(L, ra, rb)
 				oldpc := pc
-				pc = docondjump(code, pc, i, cond)
-				if pc <= oldpc {
+				pc = docondjump(pc, i, cond)
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 
@@ -1299,13 +1325,13 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				} else if is_number(ra) && is_number(rb) {
 					cond = LTnum(ra, rb)
 				} else {
-					L.frames[ci_idx].u.l.savedpc = pc
+					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					L.top = L.frames[ci_idx].top
 					cond = lessthanothers(L, ra, rb)
 				}
 				oldpc := pc
-				pc = docondjump(code, pc, i, cond)
-				if pc <= oldpc {
+				pc = docondjump(pc, i, cond)
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 
@@ -1318,13 +1344,13 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				} else if is_number(ra) && is_number(rb) {
 					cond = LEnum(ra, rb)
 				} else {
-					L.frames[ci_idx].u.l.savedpc = pc
+					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					L.top = L.frames[ci_idx].top
 					cond = lessequalothers(L, ra, rb)
 				}
 				oldpc := pc
-				pc = docondjump(code, pc, i, cond)
-				if pc <= oldpc {
+				pc = docondjump(pc, i, cond)
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 
@@ -1332,8 +1358,8 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := stack_value(L, base + getarg_A(i))
 				rb := &k[getarg_B(i)]
 				oldpc := pc
-				pc = docondjump(code, pc, i, raw_equal(ra, rb))
-				if pc <= oldpc {
+				pc = docondjump(pc, i, raw_equal(ra, rb))
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 
@@ -1347,41 +1373,41 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 					cond = flt_value(ra) == Number(im)
 				}
 				oldpc := pc
-				pc = docondjump(code, pc, i, cond)
-				if pc <= oldpc {
+				pc = docondjump(pc, i, cond)
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 
 			case .LTI:
 				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Lt)
-				if pc <= oldpc {
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 			case .LEI:
 				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Le)
-				if pc <= oldpc {
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 			case .GTI:
 				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Gt)
-				if pc <= oldpc {
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 			case .GEI:
 				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Ge)
-				if pc <= oldpc {
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 
 			case .TEST:
 				ra := stack_value(L, base + getarg_A(i))
 				oldpc := pc
-				pc = docondjump(code, pc, i, !is_falsy(ra))
-				if pc <= oldpc {
+				pc = docondjump(pc, i, !is_falsy(ra))
+				if uintptr(pc) <= uintptr(oldpc) {
 					trap = luaV_poll_async_hook(L, trap)
 				}
 
@@ -1389,12 +1415,12 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
 				if is_falsy(rb) == (getarg_k(i) != 0) {
-					pc += 1
+					pc = vm_pc_add(pc, 1)
 				} else {
 					set_obj(stack_value(L, ra), rb)
-					ni := code[pc]
+					ni := pc[0]
 					offset := getarg_sJ(ni)
-					pc += offset + 1
+					pc = vm_pc_add(pc, offset + 1)
 					if offset < 0 {
 						trap = luaV_poll_async_hook(L, trap)
 					}
@@ -1408,7 +1434,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				if b != 0 {
 					L.top = ra + b // fixed arg count
 				}
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				newci := luaD_precall(L, ra, nresults)
 				if newci >= 0 { // Lua callee: run it in this same trampoline
 					ci_idx = newci
@@ -1433,7 +1459,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				} else {
 					b = L.top - ra
 				}
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				if testarg_k(i) != 0 {
 					luaF_closeupval(L, base) // close any open upvalues
 				}
@@ -1458,7 +1484,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				if n < 0 {
 					n = L.top - ra // variable results: take what's on the stack
 				}
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				if testarg_k(i) != 0 { // there may be open upvalues / tbc vars
 					L.frames[ci_idx].u2 = n
 					if L.top < L.frames[ci_idx].top {
@@ -1482,7 +1508,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				if L.hookmask != 0 {
 					ra := base + getarg_A(i)
 					L.top = ra
-					L.frames[ci_idx].u.l.savedpc = pc
+					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					luaD_poscall(L, ci_idx, 0)
 				} else {
 					nres := get_nresults(L.frames[ci_idx].callstatus)
@@ -1506,7 +1532,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				if L.hookmask != 0 {
 					ra := base + getarg_A(i)
 					L.top = ra + 1
-					L.frames[ci_idx].u.l.savedpc = pc
+					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					luaD_poscall(L, ci_idx, 1)
 				} else {
 					nres := get_nresults(L.frames[ci_idx].callstatus)
@@ -1539,20 +1565,20 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 						idx := int_value(stack_value(L, ra + 2))
 						set_int(stack_value(L, ra), u2s(count - 1)) // decrement counter
 						set_int(stack_value(L, ra + 2), int_add(idx, step)) // advance control
-						pc -= getarg_Bx(i) // jump back
+						pc = vm_pc_add(pc, -(getarg_Bx(i))) // jump back
 						trap = luaV_poll_async_hook(L, trap)
 					}
 				} else if floatforloop(L, ra) { // float loop
-					pc -= getarg_Bx(i)
+					pc = vm_pc_add(pc, -(getarg_Bx(i)))
 					trap = luaV_poll_async_hook(L, trap)
 				}
 
 			case .FORPREP:
 				ra := base + getarg_A(i)
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				if forprep(L, ra) {
-					pc += getarg_Bx(i) + 1 // skip the loop body entirely
+					pc = vm_pc_add(pc, getarg_Bx(i) + 1) // skip the loop body entirely
 				}
 
 			case .TFORPREP:
@@ -1563,9 +1589,9 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				set_obj(&temp, stack_value(L, ra + 3))
 				set_obj(stack_value(L, ra + 3), stack_value(L, ra + 2))
 				set_obj(stack_value(L, ra + 2), &temp)
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				luaF_newtbcupval(L, ra + 2)
-				pc += getarg_Bx(i) // fall through to the TFORCALL at the loop end
+				pc = vm_pc_add(pc, getarg_Bx(i)) // fall through to the TFORCALL at the loop end
 
 			case .TFORCALL:
 				ra := base + getarg_A(i)
@@ -1573,14 +1599,14 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				set_obj(stack_value(L, ra + 4), stack_value(L, ra + 1)) // state
 				set_obj(stack_value(L, ra + 3), stack_value(L, ra)) // iterator func
 				L.top = ra + 3 + 3
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				luaD_call(L, ra + 3, getarg_C(i)) // runs to completion
 				// The following TFORLOOP is fetched normally next iteration.
 
 			case .TFORLOOP:
 				ra := base + getarg_A(i)
 				if !is_nil(stack_value(L, ra + 3)) { // control var not nil: continue
-					pc -= getarg_Bx(i)
+					pc = vm_pc_add(pc, -(getarg_Bx(i)))
 					trap = luaV_poll_async_hook(L, trap)
 				}
 
@@ -1596,8 +1622,8 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				}
 				last += n
 				if testarg_k(i) != 0 {
-					last += u32(getarg_Ax(code[pc])) * u32(MAXARG_vC + 1)
-					pc += 1
+					last += u32(getarg_Ax(pc[0])) * u32(MAXARG_vC + 1)
+					pc = vm_pc_add(pc, 1)
 				}
 				if last > h.asize {
 					luaH_resizearray(L, h, last)
@@ -1615,7 +1641,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 			case .CLOSURE:
 				ra := base + getarg_A(i)
 				p := cl.p.p[getarg_Bx(i)]
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				pushclosure(L, p, cl.upvals, base, ra)
 				L.top = ra + 1 // closure at ra; anchor it for the GC
 				luaC_checkGC(L)
@@ -1624,7 +1650,7 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				n := getarg_C(i) - 1
 				vatab := getarg_B(i) if getarg_k(i) != 0 else -1
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				luaT_getvarargs(L, ci_idx, ra, n, vatab)
 
@@ -1636,12 +1662,12 @@ luaV_execute :: proc(L: ^Lua_State, ci_idx_in: int) {
 			case .ERRNNIL:
 				ra := stack_value(L, base + getarg_A(i))
 				if !is_nil(ra) {
-					L.frames[ci_idx].u.l.savedpc = pc
+					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					luaG_errnnil(L, cl, getarg_Bx(i))
 				}
 
 			case .VARARGPREP:
-				L.frames[ci_idx].u.l.savedpc = pc
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				luaT_adjustvarargs(L, ci_idx, cl.p)
 				// `luaT_adjustvarargs` is a protected point that may have installed
 				// a hook; reload `trap` from the frame (reference's `updatetrap`).
@@ -1677,7 +1703,7 @@ Order_I :: enum {
 // against a small immediate that always has an exact float representation, using a
 // metamethod when R[A] isn't a number. Returns the updated `pc`.
 @(private = "file")
-vm_orderI :: proc(L: ^Lua_State, ci_idx: int, code: [^]Instruction, pc_in: int, base: int, i: Instruction, kind: Order_I) -> int {
+vm_orderI :: proc(L: ^Lua_State, ci_idx: int, code: [^]Instruction, pc_in: [^]Instruction, base: int, i: Instruction, kind: Order_I) -> [^]Instruction {
 	pc := pc_in
 	ra := stack_value(L, base + getarg_A(i))
 	im := getarg_sB(i)
@@ -1723,11 +1749,11 @@ vm_orderI :: proc(L: ^Lua_State, ci_idx: int, code: [^]Instruction, pc_in: int, 
 			flip = true
 		}
 		isf := getarg_C(i) != 0
-		L.frames[ci_idx].u.l.savedpc = pc
+		L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 		L.top = L.frames[ci_idx].top
 		cond = luaT_callorderiTM(L, ra, im, flip, isf, event) > 0
 	}
-	return docondjump(code, pc, i, cond)
+	return docondjump(pc, i, cond)
 }
 
 // A register-or-constant C operand -- reference Lua's `RKC(i)`. The `k` bit picks
@@ -1744,12 +1770,12 @@ vm_rkc :: proc(L: ^Lua_State, base: int, k: [^]TValue, i: Instruction) -> ^TValu
 // instruction's `k` bit, take the following JMP; otherwise skip it. Returns the
 // updated `pc`.
 @(private = "file")
-docondjump :: proc "contextless" (code: [^]Instruction, pc: int, i: Instruction, cond: bool) -> int {
+docondjump :: proc "contextless" (pc: [^]Instruction, i: Instruction, cond: bool) -> [^]Instruction {
 	if cond != (getarg_k(i) != 0) {
-		return pc + 1 // condition failed: skip the jump
+		return vm_pc_add(pc, 1) // condition failed: skip the jump
 	}
-	ni := code[pc] // the JMP that follows
-	return pc + getarg_sJ(ni) + 1
+	ni := pc[0] // the JMP that follows
+	return vm_pc_add(pc, getarg_sJ(ni) + 1)
 }
 
 // Finish an opcode interrupted by a yield -- reference Lua's `luaV_finishOp`. The
