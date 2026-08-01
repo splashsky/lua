@@ -2622,10 +2622,20 @@ num_fmod :: proc "contextless" (x, y: Number) -> Number {
 	sx := ux >> 63 // sign bit of x
 	uxi := ux
 
-	// If y is zero, NaN, or infinite -- or x is NaN/infinite -- the result is NaN
-	// (0/0 style), which we produce arithmetically so it carries the right payload.
-	if (uy << 1) == 0 || ey == 0x7ff || ex == 0x7ff {
+	// A zero divisor and a NaN/infinite dividend are the genuinely invalid fmod
+	// cases. We make their NaN arithmetically instead of choosing a payload by
+	// hand, just as the old implementation did.
+	if (uy << 1) == 0 || ex == 0x7ff {
 		return (x * y) / (x * y)
+	}
+	// An infinite divisor is different: every finite x is already smaller than
+	// |y|, so C fmod returns x unchanged. A NaN divisor still has to produce NaN;
+	// the fraction bits distinguish it from either infinity.
+	if ey == 0x7ff {
+		if (uy & 0x000f_ffff_ffff_ffff) != 0 {
+			return (x * y) / (x * y)
+		}
+		return x
 	}
 	// |x| <= |y|: either x is already the remainder, or (if equal magnitude) 0.
 	if (uxi << 1) <= (uy << 1) {
@@ -2701,7 +2711,11 @@ num_fmod :: proc "contextless" (x, y: Number) -> Number {
 }
 
 // Float modulus, faithful to `luaV_modf` / `luai_nummod`: an `fmod` corrected so
-// the remainder takes the sign of the divisor.
+// the remainder takes the sign of the divisor. The correction is genuinely
+// surprising for infinity: fmod(-1, +inf) first returns -1, then Lua sees that
+// a negative remainder disagrees with a positive divisor and adds +inf, making
+// the language-level result +inf. A negative divisor already agrees with that
+// remainder, so -1 % -inf stays -1 instead of being adjusted.
 @(private = "file")
 flt_mod :: proc "contextless" (a, b: Number) -> Number {
 	m := num_fmod(a, b)

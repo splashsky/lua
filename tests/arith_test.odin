@@ -9,6 +9,7 @@ package tests
 
 import "core:testing"
 import lua "luao:lua"
+import aux "luao:stdlib"
 
 @(private = "file")
 ival :: proc(x: lua.Integer) -> lua.TValue {
@@ -22,6 +23,31 @@ fval :: proc(x: lua.Number) -> lua.TValue {
 	v: lua.TValue
 	lua.set_float(&v, x)
 	return v
+}
+
+// Keep the black-box Lua conformance chunk in the normal Odin suite instead of
+// letting it quietly rot as an unreferenced file. Loading the file through the
+// public auxiliary API also checks the same parser/VM/library path an embedding
+// application uses; a direct raw_arith-only test would miss the diagnostic bug
+// this chunk is meant to guard.
+@(test)
+arithmetic_semantics_chunk :: proc(t: ^testing.T) {
+	L := lua.new_state(lua.default_allocator())
+	testing.expect(t, L != nil)
+	if L == nil {
+		return
+	}
+	defer lua.close_state(L)
+	aux.luaL_openlibs(L)
+
+	status := aux.luaL_loadfilex(L, "tests\\arithmetic_semantics.lua")
+	if status == .Ok {
+		status = lua.lua_pcall(L, 0, 0, 0)
+	}
+	if status != .Ok {
+		message, _ := lua.lua_tolstring(L, -1)
+		testing.expectf(t, false, "arithmetic_semantics.lua failed: %s", message)
+	}
 }
 
 // Run raw_arith on two integer operands, expecting an integer result.
