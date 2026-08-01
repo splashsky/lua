@@ -1030,11 +1030,98 @@ EXACT_POWERS_OF_TEN := [23]Number {
 	10000000000000000000000.0,
 }
 
-// Parse the decimal prefix after Lua's ASCII leading-space handling. Common
-// short decimals take a deliberately narrow fast path; everything else still
-// goes through strconv's exact decimal engine unchanged.
+// Convert a normalized decimal mantissa with Eisel-Lemire, the algorithm used
+// by Go's strconv, Rust's lexical conversion, and modern C++ from_chars
+// implementations. The cached row is a rounded-down 128-bit approximation of
+// 10^exp10. Multiplying its high limb by the normalized 64-bit mantissa gives
+// the leading product bits from which binary64's exponent and significand come.
+//
+// The approximation is normally far more accurate than binary64 needs, but the
+// few hard cases are the reason this routine returns `ok`. We decline when:
+//
+//   * the exponent is outside the cache, or the answer is subnormal/infinite;
+//   * the low product says the first 64-bit approximation may carry into bits
+//     used for rounding, and even the full 128-bit cached power cannot resolve
+//     that carry; or
+//   * the discarded product is exactly on the halfway pattern where the cached
+//     power's downward error could choose the wrong ties-to-even neighbour.
+//
+// In each case the caller retains the original decimal and asks the existing
+// arbitrary-precision converter. Thus an Eisel-Lemire success means the leading
+// bits prove one unique nearest-even result; uncertainty is never guessed at.
 @(private = "file")
-parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
+eisel_lemire_64 :: proc "contextless" (
+	mantissa: u64,
+	exp10: int,
+	negative: bool,
+) -> (Number, bool) {
+	sign := negative ? (u64(1) << 63) : 0
+	if mantissa == 0 {
+		return transmute(Number)sign, true
+	}
+	if exp10 < EISEL_LEMIRE_MIN_EXP10 || exp10 > EISEL_LEMIRE_MAX_EXP10 {
+		return 0, false
+	}
+
+	clz := uint(intrinsics.count_leading_zeros(mantissa))
+	man := mantissa << clz
+	ret_exp2 := (217706 * exp10 >> 16) + 64 + 1023 - int(clz)
+	power := EISEL_LEMIRE_POWERS[exp10 - EISEL_LEMIRE_MIN_EXP10]
+
+	product := u128(man) * u128(power[1])
+	x_hi, x_lo := u64(product >> 64), u64(product)
+
+	// The low nine bits are the rounding window. If they are all ones and
+	// adding the mantissa wraps the low limb, the omitted low half of the
+	// cached power might carry into that window. Add that half and retry with
+	// all 128 approximation bits; if it is still carry-ambiguous, decline.
+	if x_hi & 0x1ff == 0x1ff && x_lo + man < man {
+		lower_product := u128(man) * u128(power[0])
+		y_hi, y_lo := u64(lower_product >> 64), u64(lower_product)
+		merged_lo := x_lo + y_hi
+		merged_hi := x_hi + u64(merged_lo < x_lo)
+		if merged_hi & 0x1ff == 0x1ff &&
+		   merged_lo + 1 == 0 && y_lo + man < man {
+			return 0, false
+		}
+		x_hi, x_lo = merged_hi, merged_lo
+	}
+
+	msb := x_hi >> 63
+	ret_mantissa := x_hi >> uint(msb + 9)
+	ret_exp2 -= int(1 ~ msb)
+
+	// Here the retained 54 bits end in ...01 and every discarded bit is zero.
+	// That is exactly the boundary where the rounded-down cached power cannot
+	// distinguish "just below half" from an exact tie, whose even neighbour
+	// may be the other float. The big-decimal fallback resolves it exactly.
+	if x_lo == 0 && x_hi & 0x1ff == 0 && ret_mantissa & 3 == 1 {
+		return 0, false
+	}
+
+	ret_mantissa += ret_mantissa & 1
+	ret_mantissa >>= 1
+	if ret_mantissa >> 53 != 0 {
+		ret_mantissa >>= 1
+		ret_exp2 += 1
+	}
+	if ret_exp2 <= 0 || ret_exp2 >= 0x7ff {
+		return 0, false
+	}
+
+	bits := sign | (u64(ret_exp2) << 52) |
+		(ret_mantissa & 0x000f_ffff_ffff_ffff)
+	return transmute(Number)bits, true
+}
+
+// Parse the decimal prefix after Lua's ASCII leading-space handling. Common
+// short decimals first use exact floating-point arithmetic, then Eisel-Lemire;
+// every uncertain case still goes through strconv's exact decimal engine.
+@(private = "file")
+parse_decimal_slice_internal :: proc "contextless" (
+	s: []byte,
+	allow_fast_paths: bool,
+) -> (Number, int) {
 	context = runtime.default_context()
 	n := len(s)
 	i := 0
@@ -1049,7 +1136,7 @@ parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
 	digits := 0
 	significand: u64
 	significant_digits := 0
-	too_many_digits := false
+	truncated := false
 	fraction_digits := 0
 	for i < n && is_digit(s[i]) {
 		digit := u64(s[i] - '0')
@@ -1057,8 +1144,8 @@ parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
 			significant_digits += 1
 			if significant_digits <= 19 {
 				significand = significand * 10 + digit
-			} else {
-				too_many_digits = true
+			} else if digit != 0 {
+				truncated = true
 			}
 		}
 		i += 1
@@ -1072,8 +1159,8 @@ parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
 				significant_digits += 1
 				if significant_digits <= 19 {
 					significand = significand * 10 + digit
-				} else {
-					too_many_digits = true
+				} else if digit != 0 {
+					truncated = true
 				}
 			}
 			i += 1
@@ -1118,7 +1205,7 @@ parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
 	// arbitrary-precision decimal conversion below gets the original token,
 	// preserving subnormals, overflow, and halfway cases.
 	exact_significand := Number(significand)
-	if !too_many_digits && !exp_too_large &&
+	if allow_fast_paths && significant_digits <= 19 && !exp_too_large &&
 	   u64(exact_significand) == significand && exp10 >= -22 && exp10 <= 22 {
 		value := exact_significand
 		if exp10 < 0 {
@@ -1129,6 +1216,28 @@ parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
 		return negative ? -value : value, i
 	}
 
+	// Dropping digits changes the decimal exponent by their count. If all
+	// dropped digits were zero, this normalized mantissa is exact. Otherwise
+	// the original value lies in [mantissa, mantissa+1) * 10^exp10. Running
+	// both endpoints and accepting only identical bit patterns proves that the
+	// entire interval rounds to one binary64 value; disagreement falls back.
+	dropped_digits := max(significant_digits - 19, 0)
+	normalized_exp10 := exp10 + dropped_digits
+	if allow_fast_paths && !exp_too_large {
+		if value, ok := eisel_lemire_64(significand, normalized_exp10, negative); ok {
+			if !truncated {
+				return value, i
+			}
+			if upper, upper_ok := eisel_lemire_64(
+				significand + 1,
+				normalized_exp10,
+				negative,
+			); upper_ok && transmute(u64)upper == transmute(u64)value {
+				return value, i
+			}
+		}
+	}
+
 	// Feeding the validated token directly through strconv's exact decimal
 	// engine keeps all source digits until its final nearest-even rounding step.
 	d: strconv_decimal.Decimal
@@ -1136,6 +1245,22 @@ parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
 	info := strconv.Float_Info{mantbits = 52, expbits = 11, bias = -1023}
 	bits, _ := strconv.decimal_to_float_bits(&d, &info)
 	return transmute(Number)bits, i
+}
+
+@(private = "file")
+parse_decimal_slice :: proc "contextless" (s: []byte) -> (Number, int) {
+	return parse_decimal_slice_internal(s, true)
+}
+
+// Verification hook for the exhaustive strtod harness. This deliberately runs
+// the same tokenizer and the same arbitrary-precision oracle as production, but
+// disables both bypasses so a corpus can compare their IEEE-754 bit patterns.
+parse_decimal_slice_forced_slow :: proc "contextless" (s: []byte) -> (Number, int) {
+	return parse_decimal_slice_internal(s, false)
+}
+
+parse_decimal_slice_for_verification :: proc "contextless" (s: []byte) -> (Number, int) {
+	return parse_decimal_slice_internal(s, true)
 }
 
 // Convert one float spelling -- decimal or hex -- with a whole-string check,
