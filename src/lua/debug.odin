@@ -522,7 +522,11 @@ luaG_opinterror :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, msg: string) {
 // reference Lua's `luaG_tointerror`.
 luaG_tointerror :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue) {
 	bad := p2
-	if _, ok := to_integer_no_string(p1, .Floor); !ok {
+	// Bitwise operators accept an integral float, but they do not silently floor
+	// a fractional one. Re-test with the same exact-conversion rule used by the
+	// operation itself; using floor here would make -0.5 look valid and wrongly
+	// blame the second operand even though the first conversion actually failed.
+	if _, ok := to_integer_no_string(p1, .Eq); !ok {
 		bad = p1
 	}
 	luaG_runerror(L, "number%s has no integer representation", varinfo(L, bad))

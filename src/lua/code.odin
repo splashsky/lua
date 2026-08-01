@@ -1261,8 +1261,12 @@ validop :: proc "contextless" (op: int, v1, v2: ^TValue) -> bool {
 	switch op {
 	case int(Arith_Op.Band), int(Arith_Op.Bor), int(Arith_Op.Bxor),
 	     int(Arith_Op.Shl), int(Arith_Op.Shr), int(Arith_Op.Bnot):
-		_, ok1 := to_integer_no_string(v1, .Floor)
-		_, ok2 := to_integer_no_string(v2, .Floor)
+		// Runtime bitwise conversion is exact: 4.0 is an integer, 4.5 is not.
+		// Folding must ask the same question rather than treating floorability as
+		// convertibility, or it can approve an expression the raw operation must
+		// reject and send the compiler down an inconsistent path.
+		_, ok1 := to_integer_no_string(v1, .Eq)
+		_, ok2 := to_integer_no_string(v2, .Eq)
 		return ok1 && ok2
 	case int(Arith_Op.Div), int(Arith_Op.IDiv), int(Arith_Op.Mod):
 		return nvalue(v2) != 0
