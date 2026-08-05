@@ -2614,14 +2614,7 @@ num_pow :: proc "contextless" (x, y: Number) -> Number {
 // The remainder returned here has the SIGN OF `x` and satisfies `|result| < |y|`,
 // matching C `fmod`. The Lua-visible sign correction (remainder takes the divisor's
 // sign) is applied separately in `flt_mod` below.
-// This must never be inlined. It is a loop-based reduction, and `flt_mod` above it
-// is reached through the force-inlined arithmetic chain that gets stamped into
-// `luaV_execute` at every arithmetic opcode. Letting this body inline through that
-// chain balloons the interpreter loop and costs far more elsewhere than modulo could
-// ever gain -- adding eight lines here once cost 11% on recursion and 3% on plain
-// calls, neither of which performs a modulo at all. The same file-size sensitivity is
-// recorded on `raw_arith` and `vm_arith`.
-num_fmod :: #force_no_inline proc "contextless" (x, y: Number) -> Number {
+num_fmod :: proc "contextless" (x, y: Number) -> Number {
 	ux := transmute(u64)x
 	uy := transmute(u64)y
 	ex := int(ux >> 52) & 0x7ff // biased exponent of x
