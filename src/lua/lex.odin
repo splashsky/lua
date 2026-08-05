@@ -76,7 +76,7 @@ TK_STRING :: FIRST_RESERVED + 37
 // `token - FIRST_RESERVED`. ORDER RESERVED -- this array must stay lock-step with
 // the constants above. Reference Lua's `luaX_tokens`.
 @(rodata)
-luaX_tokens := [?]string {
+lex_tokens := [?]string {
 	"and",
 	"break",
 	"do",
@@ -147,7 +147,7 @@ LexState :: struct {
 	t:          Token, // current token
 	lookahead:  Token, // look-ahead token
 	fs:         ^FuncState, // current function (parser)
-	L:          ^Lua_State,
+	L:          ^State,
 	z:          ^Zio, // input stream
 	buff:       ^Mbuffer, // buffer for building token text
 	h:          ^Table, // anchors scanned strings against collection
@@ -214,12 +214,12 @@ buff_remove :: #force_inline proc(ls: ^LexState, n: uint) {
 // and fix them so the collector never frees them -- reference Lua's `luaX_init`.
 // Marking each keyword with `extra = i + 1` is what lets `isreserved` recognize it
 // later; `_ENV` is fixed but left with `extra == 0` so it stays a normal name.
-luaX_init :: proc(L: ^Lua_State) {
-	e := luaS_new(L, LUA_ENV) // create the env name
-	luaC_fix(L, obj2gco(e)) // never collect this name
+lex_init :: proc(L: ^State) {
+	e := string_new(L, ENV_NAME) // create the env name
+	gc_fix(L, obj2gco(e)) // never collect this name
 	for i in 0 ..< NUM_RESERVED {
-		ts := luaS_new(L, luaX_tokens[i])
-		luaC_fix(L, obj2gco(ts)) // reserved words are never collected
+		ts := string_new(L, lex_tokens[i])
+		gc_fix(L, obj2gco(ts)) // reserved words are never collected
 		ts.extra = u8(i + 1) // mark as reserved word #(i+1)
 	}
 }
@@ -230,7 +230,7 @@ luaX_init :: proc(L: ^Lua_State) {
 // the parser does. `_ENV`, `break`, and `global` are all fixed strings, so caching
 // them here is safe. Under `LUA_COMPAT_GLOBAL` we clear `global`'s reserved mark so
 // it lexes as an ordinary identifier.
-luaX_setinput :: proc(L: ^Lua_State, ls: ^LexState, z: ^Zio, source: ^TString, firstchar: int) {
+lex_setinput :: proc(L: ^State, ls: ^LexState, z: ^Zio, source: ^TString, firstchar: int) {
 	ls.t.token = 0
 	ls.L = L
 	ls.current = firstchar
@@ -240,14 +240,14 @@ luaX_setinput :: proc(L: ^Lua_State, ls: ^LexState, z: ^Zio, source: ^TString, f
 	ls.linenumber = 1
 	ls.lastline = 1
 	ls.source = source
-	ls.envn = luaS_new(L, LUA_ENV) // get env string
-	ls.brkn = luaS_new(L, "break") // get "break" string
-	when LUA_COMPAT_GLOBAL {
+	ls.envn = string_new(L, ENV_NAME) // get env string
+	ls.brkn = string_new(L, "break") // get "break" string
+	when COMPAT_GLOBAL {
 		// Compatibility mode: "global" is not a reserved word.
-		ls.glbn = luaS_new(L, "global")
+		ls.glbn = string_new(L, "global")
 		ls.glbn.extra = 0 // mark it as not reserved
 	}
-	mbuffer_resize(ls.L, ls.buff, LUA_MINBUFFER) // initialize the buffer
+	mbuffer_resize(ls.L, ls.buff, MINBUFFER) // initialize the buffer
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +268,7 @@ luaX_setinput :: proc(L: ^Lua_State, ls: ^LexState, z: ^Zio, source: ^TString, f
 anchorstr :: proc(ls: ^LexState, ts: ^TString) -> ^TString {
 	L := ls.L
 	oldts: TValue
-	luaH_getstr(ls.h, ts, &oldts)
+	table_getstr(ls.h, ts, &oldts)
 	if !is_nil(&oldts) { // string already present?
 		return str_value(&oldts) // reuse the stored copy
 	}
@@ -276,15 +276,15 @@ anchorstr :: proc(ls: ^LexState, ts: ^TString) -> ^TString {
 	stv := stack_value(L, L.top)
 	set_string(stv, ts) // push (anchor) the string on the stack
 	L.top += 1
-	luaH_set(L, ls.h, stv, stv)
-	luaC_checkGC(L) // pace the collector while the string is still anchored
+	table_set(L, ls.h, stv, stv)
+	gc_checkGC(L) // pace the collector while the string is still anchored
 	L.top -= 1 // remove the string from the stack
 	return ts
 }
 
 // Create a string from raw bytes and anchor it. Reference `luaX_newstring`.
-luaX_newstring :: proc(ls: ^LexState, str: [^]u8, l: uint) -> ^TString {
-	return anchorstr(ls, luaS_newlstr(ls.L, str, l))
+lex_newstring :: proc(ls: ^LexState, str: [^]u8, l: uint) -> ^TString {
+	return anchorstr(ls, string_newlstr(ls.L, str, l))
 }
 
 // ---------------------------------------------------------------------------
@@ -315,17 +315,17 @@ inclinenumber :: proc(ls: ^LexState) {
 // Render a token for an error message -- reference Lua's `luaX_token2str`. Single
 // printable bytes become `'x'`; control bytes become `'<\NN>'`; multi-char tokens
 // and reserved words are quoted; value tokens use their descriptive spelling.
-luaX_token2str :: proc(ls: ^LexState, token: int) -> string {
+lex_token2str :: proc(ls: ^LexState, token: int) -> string {
 	if token < FIRST_RESERVED { // single-byte symbol?
 		if is_print(token) {
-			return string(str_slice(luaO_pushfstring(ls.L, "'%c'", token)))
+			return string(str_slice(object_pushfstring(ls.L, "'%c'", token)))
 		} else { // control character
-			return string(str_slice(luaO_pushfstring(ls.L, "'<\\%d>'", token)))
+			return string(str_slice(object_pushfstring(ls.L, "'<\\%d>'", token)))
 		}
 	} else {
-		s := luaX_tokens[token - FIRST_RESERVED]
+		s := lex_tokens[token - FIRST_RESERVED]
 		if token < TK_EOS { // fixed-format symbol or reserved word?
-			return string(str_slice(luaO_pushfstring(ls.L, "'%s'", s)))
+			return string(str_slice(object_pushfstring(ls.L, "'%s'", s)))
 		} else { // names, strings, and numerals
 			return s
 		}
@@ -340,10 +340,10 @@ txtToken :: proc(ls: ^LexState, token: int) -> string {
 	switch token {
 	case TK_NAME, TK_STRING, TK_FLT, TK_INT:
 		return string(
-			str_slice(luaO_pushfstring(ls.L, "'%s'", string(ls.buff.buffer[:ls.buff.n]))),
+			str_slice(object_pushfstring(ls.L, "'%s'", string(ls.buff.buffer[:ls.buff.n]))),
 		)
 	case:
-		return luaX_token2str(ls, token)
+		return lex_token2str(ls, token)
 	}
 }
 
@@ -353,16 +353,16 @@ txtToken :: proc(ls: ^LexState, token: int) -> string {
 // stack for `set_error_object` to pick up as the error value.
 @(private = "file")
 lexerror :: proc(ls: ^LexState, msg: string, token: int) {
-	full := luaG_addinfo(ls.L, msg, ls.source, ls.linenumber)
+	full := debug_addinfo(ls.L, msg, ls.source, ls.linenumber)
 	msg2 := string(str_slice(full))
 	if token != 0 {
-		luaO_pushfstring(ls.L, "%s near %s", msg2, txtToken(ls, token))
+		object_pushfstring(ls.L, "%s near %s", msg2, txtToken(ls, token))
 	}
 	throw(ls.L, .Err_Syntax)
 }
 
 // Raise a syntax error blaming the current token -- reference `luaX_syntaxerror`.
-luaX_syntaxerror :: proc(ls: ^LexState, msg: string) {
+lex_syntaxerror :: proc(ls: ^LexState, msg: string) {
 	lexerror(ls, msg, ls.t.token)
 }
 
@@ -480,7 +480,7 @@ read_long_string :: proc(ls: ^LexState, seminfo: ^SemInfo, sep: uint) {
 			what := seminfo != nil ? "string" : "comment"
 			msg := string(
 				str_slice(
-					luaO_pushfstring(
+					object_pushfstring(
 						ls.L,
 						"unfinished long %s (starting at line %d)",
 						what,
@@ -510,7 +510,7 @@ read_long_string :: proc(ls: ^LexState, seminfo: ^SemInfo, sep: uint) {
 	}
 	if seminfo != nil {
 		// Trim `sep` chars from the front (the "[==[") and back (the "]==]").
-		seminfo.ts = luaX_newstring(ls, ls.buff.buffer[sep:], ls.buff.n - 2 * sep)
+		seminfo.ts = lex_newstring(ls, ls.buff.buffer[sep:], ls.buff.n - 2 * sep)
 	}
 }
 
@@ -578,7 +578,7 @@ readutf8esc :: proc(ls: ^LexState) -> u32 {
 @(private = "file")
 utf8esc :: proc(ls: ^LexState) {
 	buff: [UTF8BUFFSZ]u8
-	n := luaO_utf8esc(buff[:], readutf8esc(ls))
+	n := object_utf8esc(buff[:], readutf8esc(ls))
 	for n > 0 { // append the encoded bytes, in order
 		save(ls, int(buff[UTF8BUFFSZ - n]))
 		n -= 1
@@ -697,7 +697,7 @@ read_string :: proc(ls: ^LexState, del: int, seminfo: ^SemInfo) {
 	}
 	save_and_next(ls) // skip the closing delimiter
 	// Trim the two delimiter bytes we kept at the ends.
-	seminfo.ts = luaX_newstring(ls, ls.buff.buffer[1:], ls.buff.n - 2)
+	seminfo.ts = lex_newstring(ls, ls.buff.buffer[1:], ls.buff.n - 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -819,7 +819,7 @@ llex :: proc(ls: ^LexState, seminfo: ^SemInfo) -> int {
 						break
 					}
 				}
-				ts := luaS_newlstr(ls.L, ls.buff.buffer, ls.buff.n)
+				ts := string_newlstr(ls.L, ls.buff.buffer, ls.buff.n)
 				// A short string with a nonzero `extra` is a reserved word (see
 				// luaX_init); recover its token from that index.
 				if ts.tt == VSHRSTR && ts.extra > 0 {
@@ -844,7 +844,7 @@ llex :: proc(ls: ^LexState, seminfo: ^SemInfo) -> int {
 // Advance to the next token, honoring any buffered look-ahead. Reference
 // `luaX_next`. `lastline` remembers where the just-consumed token was, which the
 // parser uses for line-accurate error messages.
-luaX_next :: proc(ls: ^LexState) {
+lex_next :: proc(ls: ^LexState) {
 	ls.lastline = ls.linenumber
 	if ls.lookahead.token != TK_EOS { // is there a look-ahead token?
 		ls.t = ls.lookahead // use it
@@ -856,7 +856,7 @@ luaX_next :: proc(ls: ^LexState) {
 
 // Peek one token ahead without consuming the current one -- reference
 // `luaX_lookahead`. Only one token of look-ahead is ever needed (asserted).
-luaX_lookahead :: proc(ls: ^LexState) -> int {
+lex_lookahead :: proc(ls: ^LexState) -> int {
 	assert(ls.lookahead.token == TK_EOS)
 	ls.lookahead.token = llex(ls, &ls.lookahead.seminfo)
 	return ls.lookahead.token

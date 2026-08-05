@@ -137,7 +137,7 @@ UpVal :: struct {
 	tt:        u8,
 	marked:    u8,
 	open:      bool, // true while the captured slot is still on a stack
-	thread:    ^Lua_State, // (open only) the thread whose stack holds the slot
+	thread:    ^State, // (open only) the thread whose stack holds the slot
 	stk_index: int, // (open only) index of that slot
 	value:     TValue, // (closed only) the upvalue's own storage
 	// Open upvalues are threaded on their thread's `openupval` list, kept sorted
@@ -245,8 +245,8 @@ set_c_closure :: #force_inline proc "contextless" (o: ^TValue, cl: ^CClosure) {
 // memory error, since it holds the unwinding context). The captured slots are
 // nil-initialized so a GC that runs before the caller fills them never scans
 // garbage. `f` is left nil for the caller to set.
-luaF_newCclosure :: proc(L: ^Lua_State, nupvals: int) -> ^CClosure {
-	o := luaC_newobj(L, VCCL, size_cclosure(nupvals))
+func_newCclosure :: proc(L: ^State, nupvals: int) -> ^CClosure {
+	o := gc_newobj(L, VCCL, size_cclosure(nupvals))
 	if o == nil {
 		return nil
 	}
@@ -266,8 +266,8 @@ luaF_newCclosure :: proc(L: ^Lua_State, nupvals: int) -> ^CClosure {
 // Lua's `luaF_newLclosure`. The prototype and each upvalue pointer start nil; the
 // caller wires them up (via `luaF_initupvals` for fresh closed upvalues, or by
 // sharing open ones found with `luaF_findupval`). Returns nil on OOM.
-luaF_newLclosure :: proc(L: ^Lua_State, nupvals: int) -> ^LClosure {
-	o := luaC_newobj(L, VLCL, size_lclosure(nupvals))
+func_newLclosure :: proc(L: ^State, nupvals: int) -> ^LClosure {
+	o := gc_newobj(L, VLCL, size_lclosure(nupvals))
 	if o == nil {
 		return nil
 	}
@@ -287,9 +287,9 @@ luaF_newLclosure :: proc(L: ^Lua_State, nupvals: int) -> ^LClosure {
 // open upvalue to share (e.g. the main chunk's `_ENV`). Each new upvalue is
 // barriered into the closure so the collector's invariant holds. Returns an error
 // status if any upvalue allocation fails.
-luaF_initupvals :: proc(L: ^Lua_State, cl: ^LClosure) -> Thread_Status {
+func_initupvals :: proc(L: ^State, cl: ^LClosure) -> Thread_Status {
 	for i in 0 ..< int(cl.nupvalues) {
-		o := luaC_newobj(L, VUPVAL, size_of(UpVal))
+		o := gc_newobj(L, VUPVAL, size_of(UpVal))
 		if o == nil {
 			return throw(L, .Err_Mem)
 		}
@@ -301,7 +301,7 @@ luaF_initupvals :: proc(L: ^Lua_State, cl: ^LClosure) -> Thread_Status {
 		uv.open_prev = nil
 		set_nil(&uv.value) // ...holding nil
 		cl.upvals[i] = uv
-		luaC_barrier(L, obj2gco(cl), obj2gco(uv))
+		gc_barrier(L, obj2gco(cl), obj2gco(uv))
 	}
 	return .Ok
 }
@@ -314,8 +314,8 @@ luaF_initupvals :: proc(L: ^Lua_State, cl: ^LClosure) -> Thread_Status {
 // it into `L`'s open-upvalue list right where `prev` points -- reference Lua's
 // (static) `newupval`. The list is kept sorted by descending stack index, which is
 // why the caller hands us the exact insertion link. Returns nil on OOM.
-newupval :: proc(L: ^Lua_State, level: int, prev: ^^UpVal) -> ^UpVal {
-	o := luaC_newobj(L, VUPVAL, size_of(UpVal))
+newupval :: proc(L: ^State, level: int, prev: ^^UpVal) -> ^UpVal {
+	o := gc_newobj(L, VUPVAL, size_of(UpVal))
 	if o == nil {
 		return nil
 	}
@@ -346,7 +346,7 @@ newupval :: proc(L: ^Lua_State, level: int, prev: ^^UpVal) -> ^UpVal {
 // closures that capture the same local must observe each other's writes, so they
 // must point at the *same* `UpVal`. The list is sorted by descending index, so we
 // walk until we reach (or pass) the target slot.
-luaF_findupval :: proc(L: ^Lua_State, level: int) -> ^UpVal {
+func_findupval :: proc(L: ^State, level: int) -> ^UpVal {
 	pp := &L.openupval
 	for {
 		p := pp^
@@ -377,7 +377,7 @@ unlink_upval :: proc(uv: ^UpVal) {
 // upvalue's own storage and flips it to closed, so the value survives the slot
 // leaving the stack. Because open upvalues are sorted with the highest index at
 // the head, we can keep closing from the head until we drop below `level`.
-luaF_closeupval :: proc(L: ^Lua_State, level: int) {
+func_closeupval :: proc(L: ^State, level: int) {
 	for {
 		uv := L.openupval
 		if uv == nil || uv.stk_index < level {
@@ -392,7 +392,7 @@ luaF_closeupval :: proc(L: ^Lua_State, level: int) {
 		if !is_white(obj2gco(uv)) {
 			set2black(obj2gco(uv))
 			if is_collectable(&uv.value) {
-				luaC_barrier(L, obj2gco(uv), uv.value.value_.gc)
+				gc_barrier(L, obj2gco(uv), uv.value.value_.gc)
 			}
 		}
 	}
@@ -419,10 +419,10 @@ MAXDELTA :: 0xffff
 // Invoke the `__close` metamethod of the value at `obj` (with the error object at
 // `err`, or none if `err < 0`) -- reference Lua's `callclosemethod`. Assumes
 // EXTRA_STACK headroom for the pushed function + arguments.
-callclosemethod :: proc(L: ^Lua_State, obj: int, err: int, yy: bool) {
+callclosemethod :: proc(L: ^State, obj: int, err: int, yy: bool) {
 	top := L.top
 	func := top
-	tm := luaT_gettmbyobj(L, stack_value(L, obj), TM_CLOSE)
+	tm := tm_gettmbyobj(L, stack_value(L, obj), TM_CLOSE)
 	set_obj(stack_value(L, top), tm) // the metamethod to call...
 	top += 1
 	set_obj(stack_value(L, top), stack_value(L, obj)) // ...with the value as self
@@ -433,9 +433,9 @@ callclosemethod :: proc(L: ^Lua_State, obj: int, err: int, yy: bool) {
 	}
 	L.top = top
 	if yy {
-		luaD_call(L, func, 0)
+		do_call(L, func, 0)
 	} else {
-		luaD_callnoyield(L, func, 0)
+		do_callnoyield(L, func, 0)
 	}
 }
 
@@ -443,15 +443,15 @@ callclosemethod :: proc(L: ^Lua_State, obj: int, err: int, yy: bool) {
 // descriptive error if not -- reference Lua's `checkclosemth`. The offending
 // variable is named via the debug layer (`findlocal`), exactly as reference names
 // it through `luaG_findlocal`; when no name can be recovered we fall back to "?".
-checkclosemth :: proc(L: ^Lua_State, level: int) {
-	tm := luaT_gettmbyobj(L, stack_value(L, level), TM_CLOSE)
+checkclosemth :: proc(L: ^State, level: int) {
+	tm := tm_gettmbyobj(L, stack_value(L, level), TM_CLOSE)
 	if is_nil(tm) {
 		idx := level - L.frames[L.ci].func // the variable's register index
 		vname := "?"
 		if name, _, ok := findlocal(L, L.ci, idx); ok && name != "" {
 			vname = name
 		}
-		luaG_runerror(L, "variable '%s' got a non-closable value", vname)
+		debug_runerror(L, "variable '%s' got a non-closable value", vname)
 	}
 }
 
@@ -459,7 +459,7 @@ checkclosemth :: proc(L: ^Lua_State, level: int) {
 // Lua's `prepcallclosemth`. On a normal close there is no error object; on an error
 // close the in-flight error object is materialized just above the variable and
 // passed as the metamethod's second argument.
-prepcallclosemth :: proc(L: ^Lua_State, level: int, status: int, yy: bool) {
+prepcallclosemth :: proc(L: ^State, level: int, status: int, yy: bool) {
 	errobj := -1
 	switch status {
 	case int(Thread_Status.Ok):
@@ -478,8 +478,8 @@ prepcallclosemth :: proc(L: ^Lua_State, level: int, status: int, yy: bool) {
 // `luaF_newtbcupval`. A `false`/`nil` value is skipped (it needs no closing);
 // otherwise the value must have a `__close` metamethod. Dummy nodes bridge gaps
 // wider than a single delta can express.
-luaF_newtbcupval :: proc(L: ^Lua_State, level: int) {
-	assert(level > L.tbclist, "luaF_newtbcupval: level must be above the current tbc top")
+func_newtbcupval :: proc(L: ^State, level: int) {
+	assert(level > L.tbclist, "func_newtbcupval: level must be above the current tbc top")
 	if is_falsy(stack_value(L, level)) {
 		return // nil/false variables never need closing
 	}
@@ -494,7 +494,7 @@ luaF_newtbcupval :: proc(L: ^Lua_State, level: int) {
 
 // Drop the head of the tbc list (and any dummy nodes behind it) -- reference Lua's
 // `poptbclist`.
-poptbclist :: proc(L: ^Lua_State) {
+poptbclist :: proc(L: ^State) {
 	tbc := L.tbclist
 	tbc -= int(L.stack[tbc].tbclist.delta)
 	for tbc > 0 && L.stack[tbc].tbclist.delta == 0 {
@@ -508,8 +508,8 @@ poptbclist :: proc(L: ^Lua_State) {
 // controls whether (and what) error object the closing methods receive. Because our
 // slots are index-addressed, `level` survives any stack reallocation a closing call
 // triggers, so we simply return it unchanged.
-luaF_close :: proc(L: ^Lua_State, level: int, status: int, yy: bool) -> int {
-	luaF_closeupval(L, level) // ordinary upvalues first
+func_close :: proc(L: ^State, level: int, status: int, yy: bool) -> int {
+	func_closeupval(L, level) // ordinary upvalues first
 	for L.tbclist >= level && L.tbclist > 0 {
 		tbc := L.tbclist
 		poptbclist(L)
@@ -525,8 +525,8 @@ luaF_close :: proc(L: ^Lua_State, level: int, status: int, yy: bool) -> int {
 // Allocate an empty prototype with every array nil and every count zero --
 // reference Lua's `luaF_newproto`. The parser (Phase 4) grows the arrays as it
 // emits code. Returns nil on OOM.
-luaF_newproto :: proc(L: ^Lua_State) -> ^Proto {
-	o := luaC_newobj(L, VPROTO, size_of(Proto))
+func_newproto :: proc(L: ^State) -> ^Proto {
+	o := gc_newobj(L, VPROTO, size_of(Proto))
 	if o == nil {
 		return nil
 	}
@@ -558,7 +558,7 @@ luaF_newproto :: proc(L: ^Lua_State) -> ^Proto {
 // Total heap footprint of a prototype and its arrays -- reference Lua's
 // `luaF_protosize`. Used by the GC for accounting. Code and line info are skipped
 // when the prototype lives in fixed memory (they weren't heap-allocated).
-luaF_protosize :: proc(p: ^Proto) -> uint {
+func_protosize :: proc(p: ^Proto) -> uint {
 	sz :=
 		size_of(Proto) +
 		uint(p.sizep) * size_of(^Proto) +
@@ -576,7 +576,7 @@ luaF_protosize :: proc(p: ^Proto) -> uint {
 // Free a prototype and all of its arrays -- reference Lua's `luaF_freeproto`.
 // Every array is returned through the state allocator so byte accounting unwinds
 // exactly. Fixed-memory code/line arrays are left alone (they weren't ours).
-luaF_freeproto :: proc(L: ^Lua_State, f: ^Proto) {
+func_freeproto :: proc(L: ^State, f: ^Proto) {
 	if (f.flag & PF_FIXED) == 0 {
 		state_free(L, f.code, uint(f.sizecode) * size_of(Instruction))
 		state_free(L, f.lineinfo, uint(f.sizelineinfo) * size_of(i8))
@@ -592,7 +592,7 @@ luaF_freeproto :: proc(L: ^Lua_State, f: ^Proto) {
 // Look up the name of the `local_number`-th local variable live at instruction
 // `pc` -- reference Lua's `luaF_getlocalname`. Returns nil if there is no such
 // active local. Used by the debug library and error messages.
-luaF_getlocalname :: proc(f: ^Proto, local_number: int, pc: int) -> ^TString {
+func_getlocalname :: proc(f: ^Proto, local_number: int, pc: int) -> ^TString {
 	n := local_number
 	for i in 0 ..< f.sizelocvars {
 		if f.locvars[i].startpc > pc {
@@ -618,8 +618,8 @@ luaF_getlocalname :: proc(f: ^Proto, local_number: int, pc: int) -> ^TString {
 // Phase 5 onward; we implement it fully now so the GC is correct the moment
 // coroutines exist. Any still-open upvalues are closed first: they may be
 // reachable and must not be left pointing into a stack we're about to release.
-free_thread :: proc(L: ^Lua_State, th: ^Lua_State) {
-	luaF_closeupval(th, 0) // close every open upvalue on this thread
+free_thread :: proc(L: ^State, th: ^State) {
+	func_closeupval(th, 0) // close every open upvalue on this thread
 	if th.stack != nil {
 		state_free(L, th.stack, uint(th.stack_size + EXTRA_STACK) * size_of(StackValue))
 		th.stack = nil
@@ -630,6 +630,6 @@ free_thread :: proc(L: ^Lua_State, th: ^Lua_State) {
 	}
 	// A coroutine's `Lua_State` is embedded in an `LX` block whose extra space
 	// sits *ahead* of the thread struct; free from that true base.
-	base := rawptr(uintptr(th) - LUA_EXTRASPACE)
+	base := rawptr(uintptr(th) - EXTRASPACE)
 	state_free(L, base, size_of(LX))
 }

@@ -16,27 +16,27 @@ import aux "luao:stdlib"
 // A state with the ENTIRE standard library opened (base, package, coroutine,
 // debug, io, math, os, string, table, utf8) -- i.e. luaL_openlibs, the real entry
 // point host programs use.
-pkg_state :: proc() -> ^lua.Lua_State {
+pkg_state :: proc() -> ^lua.State {
 	L := lua.new_state(lua.default_allocator())
-	aux.luaL_openlibs(L)
+	aux.aux_openlibs(L)
 	return L
 }
 
-pkg_run :: proc(L: ^lua.Lua_State, src: string) -> lua.Thread_Status {
-	if st := aux.luaL_loadstring(L, src); st != .Ok {
+pkg_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
+	if st := aux.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.lua_pcall(L, 0, lua.LUA_MULTRET, 0)
+	return lua.api_pcall(L, 0, lua.MULTRET, 0)
 }
 
-pkg_eval :: proc(t: ^testing.T, L: ^lua.Lua_State, src: string) -> string {
+pkg_eval :: proc(t: ^testing.T, L: ^lua.State, src: string) -> string {
 	st := pkg_run(L, src)
 	if st != .Ok {
-		msg, _ := lua.lua_tolstring(L, -1)
+		msg, _ := lua.api_tolstring(L, -1)
 		testing.expectf(t, false, "chunk failed: %s", msg)
 		return ""
 	}
-	s, _ := lua.lua_tolstring(L, -1)
+	s, _ := lua.api_tolstring(L, -1)
 	return s
 }
 
@@ -63,7 +63,7 @@ pkg_openlibs_installs_everything :: proc(t: ^testing.T) {
 		"end\n" +
 		"assert(package.loaded.string == string)\n" +
 		"return 'ok'"
-	testing.expect(t, pkg_eval(t, L, src) == "ok", "luaL_openlibs installs all libraries")
+	testing.expect(t, pkg_eval(t, L, src) == "ok", "aux_openlibs installs all libraries")
 }
 
 @(test)
@@ -137,7 +137,7 @@ pkg_loadlib_unsupported :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 	src :=
 		// dlopen-less build: loadlib fails with the reference DLMSG and 'absent'
-		"local ok, msg, where = package.loadlib('whatever.dll', 'luaopen_x')\n" +
+		"local ok, msg, where = package.loadlib('whatever.dll', 'open_x')\n" +
 		"assert(ok == nil)\n" +
 		"assert(type(msg) == 'string' and msg:find('dynamic libraries', 1, true))\n" +
 		"assert(where == 'absent')\n" +

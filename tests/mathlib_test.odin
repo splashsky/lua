@@ -9,40 +9,40 @@ import "core:testing"
 import lua "luao:lua"
 import aux "luao:stdlib"
 
-math_state :: proc() -> ^lua.Lua_State {
+math_state :: proc() -> ^lua.State {
 	L := lua.new_state(lua.default_allocator())
 	// base gives us assert/pcall for expressive chunks.
-	lua.lua_pushcfunction(L, aux.luaopen_base)
-	lua.lua_call(L, 0, 0)
+	lua.api_pushcfunction(L, aux.open_base)
+	lua.api_call(L, 0, 0)
 	// install math as a global table
-	lua.lua_pushcfunction(L, aux.luaopen_math)
-	lua.lua_call(L, 0, 1)
-	lua.lua_setglobal(L, "math")
+	lua.api_pushcfunction(L, aux.open_math)
+	lua.api_call(L, 0, 1)
+	lua.api_setglobal(L, "math")
 	return L
 }
 
-math_run :: proc(L: ^lua.Lua_State, src: string) -> lua.Thread_Status {
-	if st := aux.luaL_loadstring(L, src); st != .Ok {
+math_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
+	if st := aux.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.lua_pcall(L, 0, lua.LUA_MULTRET, 0)
+	return lua.api_pcall(L, 0, lua.MULTRET, 0)
 }
 
 // Convenience: run a chunk that returns one integer and fetch it.
-math_int :: proc(L: ^lua.Lua_State, src: string) -> (lua.Integer, bool) {
+math_int :: proc(L: ^lua.State, src: string) -> (lua.Integer, bool) {
 	if math_run(L, src) != .Ok {
 		return 0, false
 	}
-	defer lua.lua_settop(L, 0)
-	return lua.lua_tointegerx(L, -1)
+	defer lua.api_settop(L, 0)
+	return lua.api_tointegerx(L, -1)
 }
 
-math_num :: proc(L: ^lua.Lua_State, src: string) -> (lua.Number, bool) {
+math_num :: proc(L: ^lua.State, src: string) -> (lua.Number, bool) {
 	if math_run(L, src) != .Ok {
 		return 0, false
 	}
-	defer lua.lua_settop(L, 0)
-	return lua.lua_tonumberx(L, -1)
+	defer lua.api_settop(L, 0)
+	return lua.api_tonumberx(L, -1)
 }
 
 @(test)
@@ -58,15 +58,15 @@ math_rounding_and_type :: proc(t: ^testing.T) {
 	testing.expect(t, ok && n == 5, "floor(5)==5 as integer")
 
 	testing.expect(t, math_run(L, "return math.type(3)") == .Ok)
-	s, _ := lua.lua_tolstring(L, -1)
+	s, _ := lua.api_tolstring(L, -1)
 	testing.expect(t, s == "integer", "type(3)=='integer'")
-	lua.lua_settop(L, 0)
+	lua.api_settop(L, 0)
 	testing.expect(t, math_run(L, "return math.type(3.0)") == .Ok)
-	s, _ = lua.lua_tolstring(L, -1)
+	s, _ = lua.api_tolstring(L, -1)
 	testing.expect(t, s == "float", "type(3.0)=='float'")
-	lua.lua_settop(L, 0)
+	lua.api_settop(L, 0)
 	testing.expect(t, math_run(L, "return math.type('x')") == .Ok)
-	testing.expect(t, lua.lua_isnil(L, -1), "type of non-number is nil")
+	testing.expect(t, lua.api_isnil(L, -1), "type of non-number is nil")
 }
 
 @(test)
@@ -99,8 +99,8 @@ math_toint_sqrt_consts :: proc(t: ^testing.T) {
 	n, ok := math_int(L, "return math.tointeger(3.0)")
 	testing.expect(t, ok && n == 3, "tointeger(3.0)==3")
 	testing.expect(t, math_run(L, "return math.tointeger(3.5)") == .Ok)
-	testing.expect(t, lua.lua_isnil(L, -1), "tointeger(3.5)==nil")
-	lua.lua_settop(L, 0)
+	testing.expect(t, lua.api_isnil(L, -1), "tointeger(3.5)==nil")
+	lua.api_settop(L, 0)
 
 	f, okf := math_num(L, "return math.sqrt(16)")
 	testing.expect(t, okf && f == 4.0, "sqrt(16)==4")
@@ -116,7 +116,7 @@ math_toint_sqrt_consts :: proc(t: ^testing.T) {
 	testing.expect(t, okf && f > 3.14159 && f < 3.14160, "pi ~ 3.14159")
 	// huge is +inf: bigger than any finite float.
 	testing.expect(t, math_run(L, "return math.huge > 1e308") == .Ok)
-	testing.expect(t, lua.lua_toboolean(L, -1), "huge > 1e308")
+	testing.expect(t, lua.api_toboolean(L, -1), "huge > 1e308")
 }
 
 @(test)
@@ -132,7 +132,7 @@ math_random_reproducible :: proc(t: ^testing.T) {
 		"return (a == b) and 1 or 0",
 	)
 	testing.expect(t, st == .Ok)
-	n, _ := lua.lua_tointegerx(L, -1)
+	n, _ := lua.api_tointegerx(L, -1)
 	testing.expect(t, n == 1, "same seed reproduces the same draw")
 }
 

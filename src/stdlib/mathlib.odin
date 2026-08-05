@@ -23,8 +23,8 @@ import lua "luao:lua"
 
 // Narrow alias so the ported bodies read like their C originals.
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
-	return (^lua.Lua_State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
+	return (^lua.State)(Lp)
 }
 
 // PI to reference precision (extra digits are harmless; the compiler rounds to
@@ -41,14 +41,14 @@ PI :: 3.141592653589793238462643383279502884
 math_abs :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.lua_isinteger(L, 1) {
-		n := lua.lua_tointeger(L, 1)
+	if lua.api_isinteger(L, 1) {
+		n := lua.api_tointeger(L, 1)
 		if n < 0 {
 			n = lua.Integer(0 - lua.Unsigned(n)) // avoid UB on mininteger
 		}
-		lua.lua_pushinteger(L, n)
+		lua.api_pushinteger(L, n)
 	} else {
-		lua.lua_pushnumber(L, lua.Number(math.abs(f64(luaL_checknumber(L, 1)))))
+		lua.api_pushnumber(L, lua.Number(math.abs(f64(aux_checknumber(L, 1)))))
 	}
 	return 1
 }
@@ -56,35 +56,35 @@ math_abs :: proc "c" (Lp: rawptr) -> i32 {
 math_sin :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.num_sin(luaL_checknumber(L, 1)))
+	lua.api_pushnumber(L, lua.num_sin(aux_checknumber(L, 1)))
 	return 1
 }
 
 math_cos :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.num_cos(luaL_checknumber(L, 1)))
+	lua.api_pushnumber(L, lua.num_cos(aux_checknumber(L, 1)))
 	return 1
 }
 
 math_tan :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.num_tan(luaL_checknumber(L, 1)))
+	lua.api_pushnumber(L, lua.num_tan(aux_checknumber(L, 1)))
 	return 1
 }
 
 math_asin :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(math.asin(f64(luaL_checknumber(L, 1)))))
+	lua.api_pushnumber(L, lua.Number(math.asin(f64(aux_checknumber(L, 1)))))
 	return 1
 }
 
 math_acos :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(math.acos(f64(luaL_checknumber(L, 1)))))
+	lua.api_pushnumber(L, lua.Number(math.acos(f64(aux_checknumber(L, 1)))))
 	return 1
 }
 
@@ -93,23 +93,23 @@ math_acos :: proc "c" (Lp: rawptr) -> i32 {
 math_atan :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	y := luaL_checknumber(L, 1)
-	x := luaL_optnumber(L, 2, 1)
-	lua.lua_pushnumber(L, lua.Number(math.atan2(f64(y), f64(x))))
+	y := aux_checknumber(L, 1)
+	x := aux_optnumber(L, 2, 1)
+	lua.api_pushnumber(L, lua.Number(math.atan2(f64(y), f64(x))))
 	return 1
 }
 
 math_exp :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.num_exp(luaL_checknumber(L, 1)))
+	lua.api_pushnumber(L, lua.num_exp(aux_checknumber(L, 1)))
 	return 1
 }
 
 math_sqrt :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(math.sqrt(f64(luaL_checknumber(L, 1)))))
+	lua.api_pushnumber(L, lua.Number(math.sqrt(f64(aux_checknumber(L, 1)))))
 	return 1
 }
 
@@ -118,12 +118,12 @@ math_sqrt :: proc "c" (Lp: rawptr) -> i32 {
 math_log :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	x := f64(luaL_checknumber(L, 1))
+	x := f64(aux_checknumber(L, 1))
 	res: f64
-	if lua.lua_isnoneornil(L, 2) {
+	if lua.api_isnoneornil(L, 2) {
 		res = math.ln(x)
 	} else {
-		base := f64(luaL_checknumber(L, 2))
+		base := f64(aux_checknumber(L, 2))
 		if base == 2.0 {
 			res = math.log2(x)
 		} else if base == 10.0 {
@@ -132,7 +132,7 @@ math_log :: proc "c" (Lp: rawptr) -> i32 {
 			res = math.ln(x) / math.ln(base)
 		}
 	}
-	lua.lua_pushnumber(L, lua.Number(res))
+	lua.api_pushnumber(L, lua.Number(res))
 	return 1
 }
 
@@ -141,14 +141,14 @@ math_log :: proc "c" (Lp: rawptr) -> i32 {
 math_deg :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, luaL_checknumber(L, 1) * (180.0 / PI))
+	lua.api_pushnumber(L, aux_checknumber(L, 1) * (180.0 / PI))
 	return 1
 }
 
 math_rad :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, luaL_checknumber(L, 1) * (PI / 180.0))
+	lua.api_pushnumber(L, aux_checknumber(L, 1) * (PI / 180.0))
 	return 1
 }
 
@@ -156,10 +156,10 @@ math_rad :: proc "c" (Lp: rawptr) -> i32 {
 math_frexp :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	x := f64(luaL_checknumber(L, 1))
+	x := f64(aux_checknumber(L, 1))
 	m, ep := math.frexp(x)
-	lua.lua_pushnumber(L, lua.Number(m))
-	lua.lua_pushinteger(L, lua.Integer(ep))
+	lua.api_pushnumber(L, lua.Number(m))
+	lua.api_pushinteger(L, lua.Integer(ep))
 	return 2
 }
 
@@ -168,9 +168,9 @@ math_frexp :: proc "c" (Lp: rawptr) -> i32 {
 math_ldexp :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	x := f64(luaL_checknumber(L, 1))
-	ep := int(i32(luaL_checkinteger(L, 2)))
-	lua.lua_pushnumber(L, lua.Number(math.ldexp(x, ep)))
+	x := f64(aux_checknumber(L, 1))
+	ep := int(i32(aux_checkinteger(L, 2)))
+	lua.api_pushnumber(L, lua.Number(math.ldexp(x, ep)))
 	return 1
 }
 
@@ -181,11 +181,11 @@ math_ldexp :: proc "c" (Lp: rawptr) -> i32 {
 // Push `d` as an integer if it fits exactly in `lua.Integer`, else as a float --
 // reference `pushnumint`.
 @(private = "file")
-pushnumint :: proc(L: ^lua.Lua_State, d: lua.Number) {
+pushnumint :: proc(L: ^lua.State, d: lua.Number) {
 	if n, ok := lua.number_to_integer_range(d); ok {
-		lua.lua_pushinteger(L, n)
+		lua.api_pushinteger(L, n)
 	} else {
-		lua.lua_pushnumber(L, d)
+		lua.api_pushnumber(L, d)
 	}
 }
 
@@ -193,12 +193,12 @@ pushnumint :: proc(L: ^lua.Lua_State, d: lua.Number) {
 math_toint :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	n, valid := lua.lua_tointegerx(L, 1)
+	n, valid := lua.api_tointegerx(L, 1)
 	if valid {
-		lua.lua_pushinteger(L, n)
+		lua.api_pushinteger(L, n)
 	} else {
-		luaL_checkany(L, 1)
-		luaL_pushfail(L)
+		aux_checkany(L, 1)
+		aux_pushfail(L)
 	}
 	return 1
 }
@@ -207,10 +207,10 @@ math_toint :: proc "c" (Lp: rawptr) -> i32 {
 math_floor :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.lua_isinteger(L, 1) {
-		lua.lua_settop(L, 1)
+	if lua.api_isinteger(L, 1) {
+		lua.api_settop(L, 1)
 	} else {
-		d := math.floor(f64(luaL_checknumber(L, 1)))
+		d := math.floor(f64(aux_checknumber(L, 1)))
 		pushnumint(L, lua.Number(d))
 	}
 	return 1
@@ -220,10 +220,10 @@ math_floor :: proc "c" (Lp: rawptr) -> i32 {
 math_ceil :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.lua_isinteger(L, 1) {
-		lua.lua_settop(L, 1)
+	if lua.api_isinteger(L, 1) {
+		lua.api_settop(L, 1)
 	} else {
-		d := math.ceil(f64(luaL_checknumber(L, 1)))
+		d := math.ceil(f64(aux_checknumber(L, 1)))
 		pushnumint(L, lua.Number(d))
 	}
 	return 1
@@ -234,18 +234,18 @@ math_ceil :: proc "c" (Lp: rawptr) -> i32 {
 math_fmod :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.lua_isinteger(L, 1) && lua.lua_isinteger(L, 2) {
-		d := lua.lua_tointeger(L, 2)
+	if lua.api_isinteger(L, 1) && lua.api_isinteger(L, 2) {
+		d := lua.api_tointeger(L, 2)
 		if lua.Unsigned(d) + 1 <= 1 { // d is -1 or 0
-			luaL_argcheck(L, d != 0, 2, "zero")
-			lua.lua_pushinteger(L, 0) // avoid overflow of mininteger / -1
+			aux_argcheck(L, d != 0, 2, "zero")
+			lua.api_pushinteger(L, 0) // avoid overflow of mininteger / -1
 		} else {
-			lua.lua_pushinteger(L, lua.lua_tointeger(L, 1) % d)
+			lua.api_pushinteger(L, lua.api_tointeger(L, 1) % d)
 		}
 	} else {
-		a := f64(luaL_checknumber(L, 1))
-		b := f64(luaL_checknumber(L, 2))
-		lua.lua_pushnumber(L, lua.Number(lua.num_fmod(a, b)))
+		a := f64(aux_checknumber(L, 1))
+		b := f64(aux_checknumber(L, 2))
+		lua.api_pushnumber(L, lua.Number(lua.num_fmod(a, b)))
 	}
 	return 1
 }
@@ -255,14 +255,14 @@ math_fmod :: proc "c" (Lp: rawptr) -> i32 {
 math_modf :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.lua_isinteger(L, 1) {
-		lua.lua_settop(L, 1) // number is its own integer part
-		lua.lua_pushnumber(L, 0) // no fractional part
+	if lua.api_isinteger(L, 1) {
+		lua.api_settop(L, 1) // number is its own integer part
+		lua.api_pushnumber(L, 0) // no fractional part
 	} else {
-		n := f64(luaL_checknumber(L, 1))
+		n := f64(aux_checknumber(L, 1))
 		ip := n < 0 ? math.ceil(n) : math.floor(n)
 		pushnumint(L, lua.Number(ip))
-		lua.lua_pushnumber(L, lua.Number(n == ip ? 0.0 : n - ip))
+		lua.api_pushnumber(L, lua.Number(n == ip ? 0.0 : n - ip))
 	}
 	return 2
 }
@@ -271,9 +271,9 @@ math_modf :: proc "c" (Lp: rawptr) -> i32 {
 math_ult :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	a := luaL_checkinteger(L, 1)
-	b := luaL_checkinteger(L, 2)
-	lua.lua_pushboolean(L, lua.Unsigned(a) < lua.Unsigned(b))
+	a := aux_checkinteger(L, 1)
+	b := aux_checkinteger(L, 2)
+	lua.api_pushboolean(L, lua.Unsigned(a) < lua.Unsigned(b))
 	return 1
 }
 
@@ -282,30 +282,30 @@ math_ult :: proc "c" (Lp: rawptr) -> i32 {
 math_min :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	n := lua.lua_gettop(L)
-	luaL_argcheck(L, n >= 1, 1, "value expected")
+	n := lua.api_gettop(L)
+	aux_argcheck(L, n >= 1, 1, "value expected")
 	imin := 1
 	for i := 2; i <= n; i += 1 {
-		if lua.lua_compare(L, i, imin, lua.LUA_OPLT) {
+		if lua.api_compare(L, i, imin, lua.OPLT) {
 			imin = i
 		}
 	}
-	lua.lua_pushvalue(L, imin)
+	lua.api_pushvalue(L, imin)
 	return 1
 }
 
 math_max :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	n := lua.lua_gettop(L)
-	luaL_argcheck(L, n >= 1, 1, "value expected")
+	n := lua.api_gettop(L)
+	aux_argcheck(L, n >= 1, 1, "value expected")
 	imax := 1
 	for i := 2; i <= n; i += 1 {
-		if lua.lua_compare(L, imax, i, lua.LUA_OPLT) {
+		if lua.api_compare(L, imax, i, lua.OPLT) {
 			imax = i
 		}
 	}
-	lua.lua_pushvalue(L, imax)
+	lua.api_pushvalue(L, imax)
 	return 1
 }
 
@@ -313,11 +313,11 @@ math_max :: proc "c" (Lp: rawptr) -> i32 {
 math_type :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.lua_type(L, 1) == lua.LUA_TNUMBER {
-		lua.lua_pushstring(L, lua.lua_isinteger(L, 1) ? "integer" : "float")
+	if lua.api_type(L, 1) == lua.TNUMBER {
+		lua.api_pushstring(L, lua.api_isinteger(L, 1) ? "integer" : "float")
 	} else {
-		luaL_checkany(L, 1)
-		luaL_pushfail(L)
+		aux_checkany(L, 1)
+		aux_pushfail(L)
 	}
 	return 1
 }
@@ -391,29 +391,29 @@ project :: proc "contextless" (ran0: u64, n: u64, st: ^Rand_State) -> u64 {
 math_random :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	st := (^Rand_State)(lua.lua_touserdata(L, lua.lua_upvalueindex(1)))
+	st := (^Rand_State)(lua.api_touserdata(L, lua.upvalueindex(1)))
 	rv := nextrand(&st.s)
 	low, up: lua.Integer
-	switch lua.lua_gettop(L) {
+	switch lua.api_gettop(L) {
 	case 0:
-		lua.lua_pushnumber(L, I2d(rv)) // float in [0, 1)
+		lua.api_pushnumber(L, I2d(rv)) // float in [0, 1)
 		return 1
 	case 1:
 		low = 1
-		up = luaL_checkinteger(L, 1)
+		up = aux_checkinteger(L, 1)
 		if up == 0 { // random(0): a full-width random integer
-			lua.lua_pushinteger(L, lua.Integer(rv))
+			lua.api_pushinteger(L, lua.Integer(rv))
 			return 1
 		}
 	case 2:
-		low = luaL_checkinteger(L, 1)
-		up = luaL_checkinteger(L, 2)
+		low = aux_checkinteger(L, 1)
+		up = aux_checkinteger(L, 2)
 	case:
-		luaL_error(L, "wrong number of arguments")
+		aux_error(L, "wrong number of arguments")
 	}
-	luaL_argcheck(L, low <= up, 1, "interval is empty")
+	aux_argcheck(L, low <= up, 1, "interval is empty")
 	p := project(rv, lua.Unsigned(up) - lua.Unsigned(low), st)
-	lua.lua_pushinteger(L, lua.Integer(p + lua.Unsigned(low)))
+	lua.api_pushinteger(L, lua.Integer(p + lua.Unsigned(low)))
 	return 1
 }
 
@@ -421,7 +421,7 @@ math_random :: proc "c" (Lp: rawptr) -> i32 {
 // `setseed`. state[1] is forced non-zero to avoid the all-zero fixed point, and
 // 16 discard steps spread the seed through all four words.
 @(private = "file")
-setseed :: proc(L: ^lua.Lua_State, st: ^[4]u64, n1: u64, n2: u64) {
+setseed :: proc(L: ^lua.State, st: ^[4]u64, n1: u64, n2: u64) {
 	st[0] = n1
 	st[1] = 0xff // avoid a zero state
 	st[2] = n2
@@ -429,8 +429,8 @@ setseed :: proc(L: ^lua.Lua_State, st: ^[4]u64, n1: u64, n2: u64) {
 	for i in 0 ..< 16 {
 		nextrand(st)
 	}
-	lua.lua_pushinteger(L, lua.Integer(n1))
-	lua.lua_pushinteger(L, lua.Integer(n2))
+	lua.api_pushinteger(L, lua.Integer(n1))
+	lua.api_pushinteger(L, lua.Integer(n2))
 }
 
 // `math.randomseed([n [, n2]])` -- reference `math_randomseed`. No argument means
@@ -438,14 +438,14 @@ setseed :: proc(L: ^lua.Lua_State, st: ^[4]u64, n1: u64, n2: u64) {
 math_randomseed :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	st := (^Rand_State)(lua.lua_touserdata(L, lua.lua_upvalueindex(1)))
+	st := (^Rand_State)(lua.api_touserdata(L, lua.upvalueindex(1)))
 	n1, n2: u64
-	if lua.lua_isnone(L, 1) {
-		n1 = u64(luaL_makeseed(L))
+	if lua.api_isnone(L, 1) {
+		n1 = u64(aux_makeseed(L))
 		n2 = nextrand(&st.s)
 	} else {
-		n1 = lua.Unsigned(luaL_checkinteger(L, 1))
-		n2 = lua.Unsigned(luaL_optinteger(L, 2, 0))
+		n1 = lua.Unsigned(aux_checkinteger(L, 1))
+		n2 = lua.Unsigned(aux_optinteger(L, 2, 0))
 	}
 	setseed(L, &st.s, n1, n2)
 	return 2 // return the two seed halves
@@ -458,11 +458,11 @@ randfuncs := []Reg{{"random", math_random}, {"randomseed", math_randomseed}}
 // reference `setrandfunc`. The userdata is created first, seeded, then handed to
 // both functions as upvalue #1 via `luaL_setfuncs(..., 1)`.
 @(private = "file")
-setrandfunc :: proc(L: ^lua.Lua_State) {
-	st := (^Rand_State)(lua.lua_newuserdatauv(L, size_of(Rand_State), 0))
-	setseed(L, &st.s, u64(luaL_makeseed(L)), 0)
-	lua.lua_pop(L, 2) // drop the two pushed seed halves
-	luaL_setfuncs(L, randfuncs, 1)
+setrandfunc :: proc(L: ^lua.State) {
+	st := (^Rand_State)(lua.api_newuserdatauv(L, size_of(Rand_State), 0))
+	setseed(L, &st.s, u64(aux_makeseed(L)), 0)
+	lua.api_pop(L, 2) // drop the two pushed seed halves
+	aux_setfuncs(L, randfuncs, 1)
 }
 
 // --------------------------------------------------------------------------------
@@ -501,18 +501,18 @@ mathlib := []Reg {
 }
 
 // `luaopen_math` -- build the table, set the constants, wire the RNG.
-luaopen_math :: proc "c" (Lp: rawptr) -> i32 {
+open_math :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	luaL_newlib(L, mathlib)
-	lua.lua_pushnumber(L, PI)
-	lua.lua_setfield(L, -2, "pi")
-	lua.lua_pushnumber(L, math.inf_f64(1))
-	lua.lua_setfield(L, -2, "huge")
-	lua.lua_pushinteger(L, lua.MAX_INTEGER)
-	lua.lua_setfield(L, -2, "maxinteger")
-	lua.lua_pushinteger(L, lua.MIN_INTEGER)
-	lua.lua_setfield(L, -2, "mininteger")
+	aux_newlib(L, mathlib)
+	lua.api_pushnumber(L, PI)
+	lua.api_setfield(L, -2, "pi")
+	lua.api_pushnumber(L, math.inf_f64(1))
+	lua.api_setfield(L, -2, "huge")
+	lua.api_pushinteger(L, lua.MAX_INTEGER)
+	lua.api_setfield(L, -2, "maxinteger")
+	lua.api_pushinteger(L, lua.MIN_INTEGER)
+	lua.api_setfield(L, -2, "mininteger")
 	setrandfunc(L)
 	return 1
 }

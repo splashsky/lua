@@ -133,15 +133,15 @@ ttypename :: #force_inline proc "contextless" (t: int) -> string {
 // metamethod lookup never has to worry about its key name being collected, and the
 // names cost exactly one allocation each, ever. Returns an error status if any
 // name allocation fails.
-luaT_init :: proc(L: ^Lua_State) -> Thread_Status {
+tm_init :: proc(L: ^State) -> Thread_Status {
 	g := L.g
 	for i in 0 ..< TM_N {
-		ts := luaS_new(L, tm_event_names[i])
+		ts := string_new(L, tm_event_names[i])
 		if ts == nil {
 			return throw(L, .Err_Mem)
 		}
 		g.tmname[i] = ts
-		luaC_fix(L, obj2gco(ts)) // never collect these names
+		gc_fix(L, obj2gco(ts)) // never collect these names
 	}
 	return .Ok
 }
@@ -151,8 +151,8 @@ luaT_init :: proc(L: ^Lua_State) -> Thread_Status {
 // table's `flags` so future fast-path checks skip straight past. Only valid for
 // the fast events (id <= `TM_EQ`); the caller guarantees that. Returns nil when
 // the metamethod is absent (an "empty"/nil raw slot counts as absent).
-luaT_gettm :: proc "contextless" (events: ^Table, event: int, ename: ^TString) -> ^TValue {
-	tm := luaH_Hgetshortstr(events, ename)
+tm_gettm :: proc "contextless" (events: ^Table, event: int, ename: ^TString) -> ^TValue {
+	tm := table_Hgetshortstr(events, ename)
 	assert_contextless(event <= TM_EQ)
 	if is_nil(tm) { // no such metamethod
 		events.flags |= Byte(u32(1) << u32(event)) // remember its absence
@@ -168,7 +168,7 @@ luaT_gettm :: proc "contextless" (events: ^Table, event: int, ename: ^TString) -
 // than a null pointer, so callers can always dereference the result. Note this
 // uses a *raw* lookup (no `__index` chaining) -- metamethods are always fetched
 // raw.
-luaT_gettmbyobj :: proc "contextless" (L: ^Lua_State, o: ^TValue, event: int) -> ^TValue {
+tm_gettmbyobj :: proc "contextless" (L: ^State, o: ^TValue, event: int) -> ^TValue {
 	g := L.g
 	mt: ^Table
 	switch no_variant(o.tt_) {
@@ -180,7 +180,7 @@ luaT_gettmbyobj :: proc "contextless" (L: ^Lua_State, o: ^TValue, event: int) ->
 		mt = g.mt[no_variant(o.tt_)]
 	}
 	if mt != nil {
-		return luaH_Hgetshortstr(mt, g.tmname[event])
+		return table_Hgetshortstr(mt, g.tmname[event])
 	}
 	return &g.nilvalue
 }
@@ -190,7 +190,7 @@ luaT_gettmbyobj :: proc "contextless" (L: ^Lua_State, o: ^TValue, event: int) ->
 // metatable reports that custom name; everything else falls back to the standard
 // type name. This is what makes "attempt to index a Point value" possible for a
 // tagged userdata/table.
-luaT_objtypename :: proc(L: ^Lua_State, o: ^TValue) -> string {
+tm_objtypename :: proc(L: ^State, o: ^TValue) -> string {
 	mt: ^Table
 	if base_type(o) == TTABLE {
 		mt = (^Table)(o.value_.gc).metatable
@@ -198,7 +198,7 @@ luaT_objtypename :: proc(L: ^Lua_State, o: ^TValue) -> string {
 		mt = udata_value(o).metatable
 	}
 	if mt != nil {
-		name := luaH_Hgetshortstr(mt, luaS_new(L, "__name"))
+		name := table_Hgetshortstr(mt, string_new(L, "__name"))
 		if base_type(name) == TSTRING {
 			return string(str_slice(str_value(name)))
 		}
@@ -220,7 +220,7 @@ luaT_objtypename :: proc(L: ^Lua_State, o: ^TValue) -> string {
 // Call a metamethod `f` with three arguments and no wanted result -- reference
 // Lua's `luaT_callTM`. Used by `__newindex` and the finalizer/close paths, where
 // the metamethod's return value is discarded.
-luaT_callTM :: proc(L: ^Lua_State, f: ^TValue, p1: ^TValue, p2: ^TValue, p3: ^TValue) {
+tm_callTM :: proc(L: ^State, f: ^TValue, p1: ^TValue, p2: ^TValue, p3: ^TValue) {
 	func := L.top
 	set_obj(stack_value(L, func), f)
 	set_obj(stack_value(L, func + 1), p1)
@@ -230,9 +230,9 @@ luaT_callTM :: proc(L: ^Lua_State, f: ^TValue, p1: ^TValue, p2: ^TValue, p3: ^TV
 	// A metamethod may yield only when it is called from Lua code; from a C
 	// frame we must forbid the yield (reference gates on `isLuacode(L->ci)`).
 	if is_lua_code(&L.frames[L.ci]) {
-		luaD_call(L, func, 0)
+		do_call(L, func, 0)
 	} else {
-		luaD_callnoyield(L, func, 0)
+		do_callnoyield(L, func, 0)
 	}
 }
 
@@ -240,7 +240,7 @@ luaT_callTM :: proc(L: ^Lua_State, f: ^TValue, p1: ^TValue, p2: ^TValue, p3: ^TV
 // result at stack index `res` -- reference Lua's `luaT_callTMres`. Since `res` is
 // an index it survives any stack reallocation the call triggers (the payoff of
 // the index model over reference Lua's savestack/restorestack dance).
-luaT_callTMres :: proc(L: ^Lua_State, f: ^TValue, p1: ^TValue, p2: ^TValue, res: int) {
+tm_callTMres :: proc(L: ^State, f: ^TValue, p1: ^TValue, p2: ^TValue, res: int) {
 	func := L.top
 	set_obj(stack_value(L, func), f)
 	set_obj(stack_value(L, func + 1), p1)
@@ -249,9 +249,9 @@ luaT_callTMres :: proc(L: ^Lua_State, f: ^TValue, p1: ^TValue, p2: ^TValue, res:
 	// A metamethod may yield only when it is called from Lua code; from a C
 	// frame we must forbid the yield (reference gates on `isLuacode(L->ci)`).
 	if is_lua_code(&L.frames[L.ci]) {
-		luaD_call(L, func, 1)
+		do_call(L, func, 1)
 	} else {
-		luaD_callnoyield(L, func, 1)
+		do_callnoyield(L, func, 1)
 	}
 	L.top -= 1 // pop the single result...
 	set_obj(stack_value(L, res), stack_value(L, L.top)) // ...into its place
@@ -260,15 +260,15 @@ luaT_callTMres :: proc(L: ^Lua_State, f: ^TValue, p1: ^TValue, p2: ^TValue, res:
 // Try a binary metamethod for `event`, looking on `p1` first then `p2` --
 // reference Lua's `callbinTM`. Returns true and writes `res` if a metamethod was
 // found and called; false (leaving `res` untouched) if neither operand offers one.
-callbinTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, res: int, event: int) -> bool {
-	tm := luaT_gettmbyobj(L, p1, event)
+callbinTM :: proc(L: ^State, p1: ^TValue, p2: ^TValue, res: int, event: int) -> bool {
+	tm := tm_gettmbyobj(L, p1, event)
 	if is_nil(tm) {
-		tm = luaT_gettmbyobj(L, p2, event)
+		tm = tm_gettmbyobj(L, p2, event)
 	}
 	if is_nil(tm) {
 		return false
 	}
-	luaT_callTMres(L, tm, p1, p2, res)
+	tm_callTMres(L, tm, p1, p2, res)
 	return true
 }
 
@@ -276,17 +276,17 @@ callbinTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, res: int, event: int)
 // reference Lua's `luaT_trybinTM`. The error wording depends on the event: the
 // bitwise operators complain about integer representation when both operands are
 // numbers, otherwise about the operand types.
-luaT_trybinTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, res: int, event: int) {
+tm_trybinTM :: proc(L: ^State, p1: ^TValue, p2: ^TValue, res: int, event: int) {
 	if !callbinTM(L, p1, p2, res, event) {
 		switch event {
 		case TM_BAND, TM_BOR, TM_BXOR, TM_SHL, TM_SHR, TM_BNOT:
 			if is_number(p1) && is_number(p2) {
-				luaG_tointerror(L, p1, p2)
+				debug_tointerror(L, p1, p2)
 			} else {
-				luaG_opinterror(L, p1, p2, "perform bitwise operation on")
+				debug_opinterror(L, p1, p2, "perform bitwise operation on")
 			}
 		case:
-			luaG_opinterror(L, p1, p2, "perform arithmetic on")
+			debug_opinterror(L, p1, p2, "perform arithmetic on")
 		}
 	}
 }
@@ -294,29 +294,29 @@ luaT_trybinTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, res: int, event: 
 // A binary metamethod for a commutative-in-lookup operation, honoring the `flip`
 // flag that records whether the code generator swapped the operands (so a `K`/`I`
 // constant could ride in the second slot) -- reference Lua's `luaT_trybinassocTM`.
-luaT_trybinassocTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, flip: bool, res: int, event: int) {
+tm_trybinassocTM :: proc(L: ^State, p1: ^TValue, p2: ^TValue, flip: bool, res: int, event: int) {
 	if flip {
-		luaT_trybinTM(L, p2, p1, res, event)
+		tm_trybinTM(L, p2, p1, res, event)
 	} else {
-		luaT_trybinTM(L, p1, p2, res, event)
+		tm_trybinTM(L, p1, p2, res, event)
 	}
 }
 
 // Like `trybinassocTM` but with an immediate integer second operand -- reference
 // Lua's `luaT_trybiniTM`. The immediate is wrapped in a throwaway TValue.
-luaT_trybiniTM :: proc(L: ^Lua_State, p1: ^TValue, i2: Integer, flip: bool, res: int, event: int) {
+tm_trybiniTM :: proc(L: ^State, p1: ^TValue, i2: Integer, flip: bool, res: int, event: int) {
 	aux: TValue
 	set_int(&aux, i2)
-	luaT_trybinassocTM(L, p1, &aux, flip, res, event)
+	tm_trybinassocTM(L, p1, &aux, flip, res, event)
 }
 
 // The concatenation metamethod for the top two stack values -- reference Lua's
 // `luaT_tryconcatTM`. `luaV_concat` calls this when it hits a pair it can't fold
 // natively; the result lands where the left operand was (`top - 2`).
-luaT_tryconcatTM :: proc(L: ^Lua_State) {
+tm_tryconcatTM :: proc(L: ^State) {
 	top := L.top
 	if !callbinTM(L, stack_value(L, top - 2), stack_value(L, top - 1), top - 2, TM_CONCAT) {
-		luaG_concaterror(L, stack_value(L, top - 2), stack_value(L, top - 1))
+		debug_concaterror(L, stack_value(L, top - 2), stack_value(L, top - 1))
 	}
 }
 
@@ -326,7 +326,7 @@ luaT_tryconcatTM :: proc(L: ^Lua_State) {
 // order error *inside* this routine (it never returns a "not found" sentinel);
 // we do the same so every caller (`lessthanothers`, `callorderiTM`) inherits the
 // error without having to test for it. The scratch result rides `L.top`.
-luaT_callorderTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, event: int) -> int {
+tm_callorderTM :: proc(L: ^State, p1: ^TValue, p2: ^TValue, event: int) -> int {
 	if callbinTM(L, p1, p2, L.top, event) {
 		// The metamethod's result is truthy unless it is nil or false
 		// (reference `!l_isfalse`); a truthy non-boolean must count as "yes".
@@ -335,14 +335,14 @@ luaT_callorderTM :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, event: int) ->
 		}
 		return 0
 	}
-	luaG_ordererror(L, p1, p2) // no metamethod: raise "attempt to compare ..."
+	debug_ordererror(L, p1, p2) // no metamethod: raise "attempt to compare ..."
 	return 0 // unreachable (luaG_ordererror diverges); keeps the type checker happy
 }
 
 // An ordering metamethod with one immediate numeric operand -- reference Lua's
 // `luaT_callorderiTM`. `flip` records operand-swap; `isfloat` chooses the aux
 // value's numeric kind.
-luaT_callorderiTM :: proc(L: ^Lua_State, p1: ^TValue, v2: int, flip: bool, isfloat: bool, event: int) -> int {
+tm_callorderiTM :: proc(L: ^State, p1: ^TValue, v2: int, flip: bool, isfloat: bool, event: int) -> int {
 	aux: TValue
 	if isfloat {
 		set_float(&aux, Number(v2))
@@ -355,7 +355,7 @@ luaT_callorderiTM :: proc(L: ^Lua_State, p1: ^TValue, v2: int, flip: bool, isflo
 		pb = p1
 		pa = &aux
 	}
-	return luaT_callorderTM(L, pa, pb, event)
+	return tm_callorderTM(L, pa, pb, event)
 }
 
 // ---------------------------------------------------------------------------
@@ -372,29 +372,29 @@ luaT_callorderiTM :: proc(L: ^Lua_State, p1: ^TValue, v2: int, flip: bool, isflo
 // on top of the stack -- reference Lua's `createvarargtab`. It carries an `n`
 // field so `select('#', ...)`-style queries are O(1).
 @(private = "file")
-createvarargtab :: proc(L: ^Lua_State, f: int, n: int) {
-	t := luaH_new(L)
+createvarargtab :: proc(L: ^State, f: int, n: int) {
+	t := table_new(L)
 	set_table(stack_value(L, L.top), t)
 	L.top += 1
-	luaH_resize(L, t, u32(n), 1)
+	table_resize(L, t, u32(n), 1)
 	key: TValue
-	set_string(&key, luaS_new(L, "n"))
+	set_string(&key, string_new(L, "n"))
 	value: TValue
 	set_int(&value, Integer(n))
 	// No need to anchor the key: the resize just ran, so the following set
 	// cannot trigger a collection.
-	luaH_set(L, t, &key, &value) // t.n = n
+	table_set(L, t, &key, &value) // t.n = n
 	for i in 0 ..< n {
-		luaH_setint(L, t, Integer(i + 1), stack_value(L, f + i))
+		table_setint(L, t, Integer(i + 1), stack_value(L, f + i))
 	}
-	luaC_checkGC(L) // the vararg table just allocated; pace the collector
+	gc_checkGC(L) // the vararg table just allocated; pace the collector
 }
 
 // Move fixed parameters above a copy of the function so the extra (vararg)
 // arguments sit hidden below the frame -- reference Lua's `buildhiddenargs`.
 // After this the frame's `func` points *past* the hidden arguments.
 @(private = "file")
-buildhiddenargs :: proc(L: ^Lua_State, ci_idx: int, p: ^Proto, totalargs: int, nfixparams: int, nextra: int) {
+buildhiddenargs :: proc(L: ^State, ci_idx: int, p: ^Proto, totalargs: int, nfixparams: int, nextra: int) {
 	ci := &L.frames[ci_idx]
 	ci.u.l.nextraargs = nextra
 	check_stack_p(L, int(p.maxstacksize) + 1)
@@ -417,7 +417,7 @@ buildhiddenargs :: proc(L: ^Lua_State, ci_idx: int, p: ^Proto, totalargs: int, n
 // Reshape the incoming arguments for a vararg function's frame -- reference Lua's
 // `luaT_adjustvarargs`. Either materializes a vararg table (PF_VATAB) or hides the
 // extras below the frame (PF_VAHID).
-luaT_adjustvarargs :: proc(L: ^Lua_State, ci_idx: int, p: ^Proto) {
+tm_adjustvarargs :: proc(L: ^State, ci_idx: int, p: ^Proto) {
 	ci := &L.frames[ci_idx]
 	totalargs := L.top - ci.func - 1
 	nfixparams := int(p.numparams)
@@ -437,7 +437,7 @@ luaT_adjustvarargs :: proc(L: ^Lua_State, ci_idx: int, p: ^Proto) {
 // Resolve `...[rc]` -- reference Lua's `luaT_getvararg` (the GETVARG opcode). An
 // integer key selects the k-th hidden extra argument; the string key "n" reports
 // the count; anything else yields nil. Only reachable in the PF_VAHID model.
-luaT_getvararg :: proc(L: ^Lua_State, ci_idx: int, ra: int, rc: ^TValue) {
+tm_getvararg :: proc(L: ^State, ci_idx: int, ra: int, rc: ^TValue) {
 	ci := &L.frames[ci_idx]
 	nextra := ci.u.l.nextraargs
 	if n, ok := to_integer_no_string(rc, .Eq); ok { // integral index?
@@ -460,13 +460,13 @@ luaT_getvararg :: proc(L: ^Lua_State, ci_idx: int, ra: int, rc: ^TValue) {
 // With a vararg table we read (and validate) its `n` field; otherwise the count
 // was stashed on the call frame.
 @(private = "file")
-getnumargs :: proc(L: ^Lua_State, ci_idx: int, h: ^Table) -> int {
+getnumargs :: proc(L: ^State, ci_idx: int, h: ^Table) -> int {
 	if h == nil {
 		return L.frames[ci_idx].u.l.nextraargs
 	}
-	res := luaH_Hgetshortstr(h, luaS_new(L, "n"))
+	res := table_Hgetshortstr(h, string_new(L, "n"))
 	if type_tag(res) != VNUMINT || u64(int_value(res)) > u64(MAX_INT / 2) {
-		luaG_runerror(L, "vararg table has no proper 'n'")
+		debug_runerror(L, "vararg table has no proper 'n'")
 	}
 	return int(int_value(res))
 }
@@ -474,7 +474,7 @@ getnumargs :: proc(L: ^Lua_State, ci_idx: int, h: ^Table) -> int {
 // Copy `wanted` vararg values (all of them if `wanted < 0`) to stack index
 // `where` -- reference Lua's `luaT_getvarargs` (the VARARG opcode). `vatab` is the
 // vararg table's register, or -1 for the hidden-argument model.
-luaT_getvarargs :: proc(L: ^Lua_State, ci_idx: int, dst_at: int, wanted_in: int, vatab: int) {
+tm_getvarargs :: proc(L: ^State, ci_idx: int, dst_at: int, wanted_in: int, vatab: int) {
 	wanted := wanted_in
 	h: ^Table
 	if vatab >= 0 {
@@ -498,7 +498,7 @@ luaT_getvarargs :: proc(L: ^Lua_State, ci_idx: int, dst_at: int, wanted_in: int,
 		}
 	} else { // table model: index the vararg table
 		for ; i < touse; i += 1 {
-			tag := luaH_getint(h, Integer(i + 1), stack_value(L, dst_at + i))
+			tag := table_getint(h, Integer(i + 1), stack_value(L, dst_at + i))
 			if tag_is_empty(tag) {
 				set_nil(stack_value(L, dst_at + i))
 			}

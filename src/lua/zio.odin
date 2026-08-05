@@ -20,7 +20,7 @@ EOZ :: -1
 // input and writes its length through `size`. Returning a zero length (or nil)
 // signals end of input. The block must stay valid until the next reader call.
 // The calling convention is C because embedders written in C provide these.
-Reader :: #type proc "c" (L: ^Lua_State, data: rawptr, size: ^uint) -> [^]u8
+Reader :: #type proc "c" (L: ^State, data: rawptr, size: ^uint) -> [^]u8
 
 // `Zio` is one buffered input stream -- reference Lua's `struct Zio`. It remembers
 // how many bytes remain in the current block (`n`), where we are within it (`p`),
@@ -35,12 +35,12 @@ Zio :: struct {
 	p:      [^]u8, // current position within that block
 	reader: Reader, // supplies the next block on demand
 	data:   rawptr, // opaque state handed back to the reader
-	L:      ^Lua_State, // owning thread (passed to the reader)
+	L:      ^State, // owning thread (passed to the reader)
 }
 
 // Prepare a stream to read through `reader`/`data`. It starts empty (`n == 0`), so
 // the very first byte request triggers a fill. Reference Lua's `luaZ_init`.
-zio_init :: proc(L: ^Lua_State, z: ^Zio, reader: Reader, data: rawptr) {
+zio_init :: proc(L: ^State, z: ^Zio, reader: Reader, data: rawptr) {
 	z.L = L
 	z.reader = reader
 	z.data = data
@@ -130,7 +130,7 @@ mbuffer_init :: proc "contextless" (b: ^Mbuffer) {
 
 // Resize the buffer to exactly `size` bytes, routing through the state allocator.
 // A size of zero frees it. Reference `luaZ_resizebuffer`.
-mbuffer_resize :: proc(L: ^Lua_State, b: ^Mbuffer, size: uint) {
+mbuffer_resize :: proc(L: ^State, b: ^Mbuffer, size: uint) {
 	newblock := state_realloc(L, b.buffer, b.buffsize, size)
 	if newblock == nil && size > 0 {
 		// Out of memory while growing the token buffer: raise through the active
@@ -143,7 +143,7 @@ mbuffer_resize :: proc(L: ^Lua_State, b: ^Mbuffer, size: uint) {
 }
 
 // Release the buffer's memory. Reference `luaZ_freebuffer`.
-mbuffer_free :: proc(L: ^Lua_State, b: ^Mbuffer) {
+mbuffer_free :: proc(L: ^State, b: ^Mbuffer) {
 	mbuffer_resize(L, b, 0)
 }
 

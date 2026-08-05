@@ -147,7 +147,7 @@ is_lua_code :: #force_inline proc "contextless" (ci: ^Call_Info) -> bool {
 
 // The Lua closure a frame is executing -- reference Lua's `ci_func`. Only valid
 // for Lua frames.
-ci_func :: #force_inline proc "contextless" (L: ^Lua_State, ci: ^Call_Info) -> ^LClosure {
+ci_func :: #force_inline proc "contextless" (L: ^State, ci: ^Call_Info) -> ^LClosure {
 	return (^LClosure)(stack_value(L, ci.func).value_.gc)
 }
 
@@ -163,21 +163,21 @@ ci_func :: #force_inline proc "contextless" (L: ^Lua_State, ci: ^Call_Info) -> ^
 nyci :: u32(0x10000) | u32(1)
 
 // The real number of nested C calls -- reference `getCcalls`.
-get_ccalls :: #force_inline proc "contextless" (L: ^Lua_State) -> u32 {
+get_ccalls :: #force_inline proc "contextless" (L: ^State) -> u32 {
 	return L.n_ccalls & 0xffff
 }
 
 // Whether this thread may yield: true iff there are no non-yieldable calls on its
 // stack -- reference `yieldable`.
-yieldable :: #force_inline proc "contextless" (L: ^Lua_State) -> bool {
+yieldable :: #force_inline proc "contextless" (L: ^State) -> bool {
 	return (L.n_ccalls & 0xffff0000) == 0
 }
 
 // Enter / leave a non-yieldable region -- reference `incnny`/`decnny`.
-incnny :: #force_inline proc "contextless" (L: ^Lua_State) {
+incnny :: #force_inline proc "contextless" (L: ^State) {
 	L.n_ccalls += 0x10000
 }
-decnny :: #force_inline proc "contextless" (L: ^Lua_State) {
+decnny :: #force_inline proc "contextless" (L: ^State) {
 	L.n_ccalls -= 0x10000
 }
 
@@ -199,7 +199,7 @@ String_Table :: struct {
 // Called as an absolute last resort when an error reaches a thread with no
 // protected boundary at all. It uses the C calling convention because embedders
 // written in C must be able to supply one.
-Panic_Proc :: #type proc "c" (L: ^Lua_State) -> i32
+Panic_Proc :: #type proc "c" (L: ^State) -> i32
 
 // A warning handler -- reference Lua's `lua_WarnFunction`. The collector routes
 // finalizer errors here; with no handler installed (the default), warnings are
@@ -221,7 +221,7 @@ Warn_Proc :: #type proc "c" (ud: rawptr, msg: cstring, tocont: i32)
 // padding available to the thread's own small fields. Lua_State happens not to
 // shrink because the following status and pointer alignment preserve its size,
 // but keeping the representation consistent prevents a future layout regression.
-Lua_State :: struct {
+State :: struct {
 	next:            ^GCObject,
 	tt:              u8,
 	marked:          u8,
@@ -253,7 +253,7 @@ Lua_State :: struct {
 	n_ccalls:        u32, // nested non-yieldable calls (overflow guard)
 	errfunc:         int, // stack index of the current message handler
 	oldpc:           int, // last program counter (for hooks/line info)
-	errorJmp:        ^Lua_Longjmp, // innermost active protected boundary (nil if none)
+	errorJmp:        ^Longjmp, // innermost active protected boundary (nil if none)
 
 	// debug hooks (Phase 5) --------------------------------------------
 	hook:            Hook_Proc, // the installed hook, if any
@@ -264,16 +264,16 @@ Lua_State :: struct {
 	transfer_first:  int, // offset of the first transferred value
 	transfer_n:      int, // number of transferred values
 
-	twups:           ^Lua_State, // link in the list of threads with open upvalues
+	twups:           ^State, // link in the list of threads with open upvalues
 	gclist:          ^GCObject, // GC gray-list thread (a thread has children to scan)
 }
 
 // The GC-punning promise: a `^Lua_State` must be reinterpretable as a
 // `^GCObject`, which is only sound when these fields have the common offsets.
-#assert(offset_of(Lua_State, next) == 0)
-#assert(offset_of(Lua_State, tt) == 8)
-#assert(offset_of(Lua_State, marked) == 9)
-#assert(size_of(Lua_State) == 192)
+#assert(offset_of(State, next) == 0)
+#assert(offset_of(State, tt) == 8)
+#assert(offset_of(State, marked) == 9)
+#assert(size_of(State) == 192)
 
 // ---------------------------------------------------------------------------
 // The shared global state
@@ -282,17 +282,17 @@ Lua_State :: struct {
 // The embedder's opaque "extra space", `sizeof(void*)` bytes reference Lua places
 // in *front* of every `lua_State` (`LUA_EXTRASPACE` in luaconf.h). Embedders use
 // it to hang per-thread data off a state without a separate allocation.
-LUA_EXTRASPACE :: size_of(rawptr)
+EXTRASPACE :: size_of(rawptr)
 
 // `LX` wraps a thread with that extra space ahead of it, exactly like reference
 // Lua's `LX`. Keeping the layout means `&lx.l` is the public `Lua_State*` and the
 // extra space is reachable at a fixed negative offset from it.
 LX :: struct {
-	extra: [LUA_EXTRASPACE]u8,
-	l:     Lua_State,
+	extra: [EXTRASPACE]u8,
+	l:     State,
 }
 
-#assert(offset_of(LX, l) == LUA_EXTRASPACE)
+#assert(offset_of(LX, l) == EXTRASPACE)
 
 // `Global_State` is the state shared by every thread in one Lua universe --
 // reference Lua's `global_State`. It holds the allocator, the GC's accounting and
@@ -321,7 +321,7 @@ Global_State :: struct {
 	gcemergency:  bool, // true during an emergency (out-of-memory) collection
 	gcstopem:     u8, // nonzero: no emergency collections (mid-step / building)
 	currentwhite: u8, // current "white" GC color (see gc.odin)
-	gcparams:     [LUA_GCPN]u8, // float-coded GC tuning parameters
+	gcparams:     [GCPN]u8, // float-coded GC tuning parameters
 
 	// The object lists the collector threads its work through ----------
 	allgc:     ^GCObject, // every collectable object not on another list
@@ -342,7 +342,7 @@ Global_State :: struct {
 	finobjsur:  ^GCObject, // survival cursor within `finobj`
 	finobjold1: ^GCObject, // old1 cursor within `finobj`
 	finobjrold: ^GCObject, // reallyold cursor within `finobj`
-	twups:      ^Lua_State, // list of threads with open upvalues
+	twups:      ^State, // list of threads with open upvalues
 
 	strt:     String_Table, // interned short strings
 	strcache: [STRCACHE_N][STRCACHE_M]^TString, // address-keyed string cache
@@ -413,7 +413,7 @@ completestate :: proc "contextless" (g: ^Global_State) -> bool {
 // A typed view of stack slot `i` as a plain `TValue`. Reference Lua's `s2v`.
 // Slots are `StackValue` overlays; the interpreter almost always wants the value
 // half. Kept tiny and inlined because it's on every hot path.
-stack_value :: #force_inline proc "contextless" (L: ^Lua_State, i: int) -> ^TValue {
+stack_value :: #force_inline proc "contextless" (L: ^State, i: int) -> ^TValue {
 	return &L.stack[i].val
 }
 
@@ -431,7 +431,7 @@ INITIAL_FRAMES :: 8
 // `preinit_thread`. Deliberately touches no memory so it is safe to run before
 // any fallible step: if a later allocation fails, teardown sees well-defined
 // nil/zero fields rather than garbage.
-preinit_thread :: proc(L: ^Lua_State, g: ^Global_State) {
+preinit_thread :: proc(L: ^State, g: ^Global_State) {
 	L.g = g
 	L.stack = nil
 	L.stack_size = 0
@@ -465,7 +465,7 @@ preinit_thread :: proc(L: ^Lua_State, g: ^Global_State) {
 // capacity and hands back the next slot. Because callers address frames by index,
 // a reallocation here invalidates nothing (Decision 4). Raises `Err_Mem` through
 // the active boundary on allocation failure.
-next_ci :: proc(L: ^Lua_State) -> int {
+next_ci :: proc(L: ^State) -> int {
 	next := L.ci + 1
 	if next >= L.frames_capacity {
 		// Grow the frame array. The 1.5x policy mirrors our other growable
@@ -492,13 +492,13 @@ next_ci :: proc(L: ^Lua_State) -> int {
 // per-frame invariants -- reference Lua's `resetCI`. The base frame is a C/Odin
 // frame (`CIST_C`) whose "function" slot is stack index 0 (left nil) and whose
 // usable top reaches `1 + LUA_MINSTACK`, guaranteeing a minimum working area.
-reset_ci :: proc(L: ^Lua_State) {
+reset_ci :: proc(L: ^State) {
 	L.ci = 0
 	L.nci = 1
 	base := &L.frames[0]
 	base.func = 0
 	set_nil(stack_value(L, 0)) // the base frame's function entry
-	base.top = 0 + 1 + LUA_MINSTACK
+	base.top = 0 + 1 + MINSTACK
 	base.callstatus = CIST_C
 	base.u.c.k = nil // no continuation on the host frame
 	base.u.c.old_errfunc = 0
@@ -521,7 +521,7 @@ reset_ci :: proc(L: ^Lua_State) {
 // running thread spawns a coroutine). On failure we raise `Err_Mem` through `L`'s
 // boundary; the half-done state is safe to tear down because everything not yet
 // allocated is still nil (see `preinit_thread`).
-stack_init :: proc(L1: ^Lua_State, L: ^Lua_State) -> Thread_Status {
+stack_init :: proc(L1: ^State, L: ^State) -> Thread_Status {
 	// The value stack: BASIC_STACK_SIZE usable slots plus the EXTRA_STACK
 	// reserve, every slot erased to nil so nothing ever scans garbage.
 	total := BASIC_STACK_SIZE + EXTRA_STACK
@@ -553,43 +553,43 @@ stack_init :: proc(L1: ^Lua_State, L: ^Lua_State) -> Thread_Status {
 // plain table the implementation uses for a few well-known slots: slot 1 is
 // reserved (a `false` placeholder), slot 2 is the globals table, slot 3 is the
 // main thread. `LUA_RIDX_LAST` is the highest predefined slot.
-LUA_RIDX_GLOBALS :: 2
-LUA_RIDX_MAINTHREAD :: 3
-LUA_RIDX_LAST :: 3
+RIDX_GLOBALS :: 2
+RIDX_MAINTHREAD :: 3
+RIDX_LAST :: 3
 
 // Build the registry table and populate its predefined slots -- reference Lua's
 // `init_registry`. The registry is where the implementation (and later the C-API)
 // stashes globally reachable values: the globals table, the main thread, and
 // user-held references. Any allocation here can fail, so we thread the status out.
-init_registry :: proc(L: ^Lua_State) -> Thread_Status {
+init_registry :: proc(L: ^State) -> Thread_Status {
 	g := L.g
-	registry := luaH_new(L)
+	registry := table_new(L)
 	if registry == nil {
 		return throw(L, .Err_Mem)
 	}
 	set_gc(&g.registry, obj2gco(registry))
-	if luaH_resize(L, registry, LUA_RIDX_LAST, 0) != .Ok {
+	if table_resize(L, registry, RIDX_LAST, 0) != .Ok {
 		return .Err_Mem
 	}
 
 	aux: TValue
 	// registry[1] = false (a reserved placeholder slot).
 	set_bool(&aux, false)
-	if luaH_setint(L, registry, 1, &aux) != .Ok {
+	if table_setint(L, registry, 1, &aux) != .Ok {
 		return .Err_Mem
 	}
 	// registry[LUA_RIDX_MAINTHREAD] = the main thread.
 	set_gc(&aux, obj2gco(L))
-	if luaH_setint(L, registry, LUA_RIDX_MAINTHREAD, &aux) != .Ok {
+	if table_setint(L, registry, RIDX_MAINTHREAD, &aux) != .Ok {
 		return .Err_Mem
 	}
 	// registry[LUA_RIDX_GLOBALS] = a fresh table (the globals `_G`).
-	globals := luaH_new(L)
+	globals := table_new(L)
 	if globals == nil {
 		return throw(L, .Err_Mem)
 	}
 	set_gc(&aux, obj2gco(globals))
-	if luaH_setint(L, registry, LUA_RIDX_GLOBALS, &aux) != .Ok {
+	if table_setint(L, registry, RIDX_GLOBALS, &aux) != .Ok {
 		return .Err_Mem
 	}
 	return .Ok
@@ -600,7 +600,7 @@ init_registry :: proc(L: ^Lua_State) -> Thread_Status {
 // `f_luaopen`. It brings up the stack, the registry, the string subsystem, and the
 // metamethod-name table (in that dependency order), re-enables the collector, and
 // finally nils the sentinel to announce the state is complete.
-f_luaopen :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
+f_luaopen :: proc(L: ^State, ud: rawptr) -> Thread_Status {
 	g := L.g
 	if status := stack_init(L, L); status != .Ok {
 		return status
@@ -608,13 +608,13 @@ f_luaopen :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
 	if status := init_registry(L); status != .Ok {
 		return status
 	}
-	if status := luaS_init(L); status != .Ok { // interns memerrmsg, fills cache
+	if status := string_init(L); status != .Ok { // interns memerrmsg, fills cache
 		return status
 	}
-	if status := luaT_init(L); status != .Ok { // interns metamethod names
+	if status := tm_init(L); status != .Ok { // interns metamethod names
 		return status
 	}
-	luaX_init(L) // intern reserved-word strings and mark them reserved
+	lex_init(L) // intern reserved-word strings and mark them reserved
 	g.gcstp = 0 // construction done: allow the collector to run
 	set_nil(&g.nilvalue) // state is now fully built
 	return .Ok
@@ -626,7 +626,7 @@ f_luaopen :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
 // that a failure midway through construction leaves `close_state` looking at
 // well-defined fields rather than uninitialized memory (a hazard the review
 // flagged explicitly).
-new_state :: proc(alloc: Allocator) -> ^Lua_State {
+new_state :: proc(alloc: Allocator) -> ^State {
 	block := raw_alloc(alloc, size_of(Global_State), uint(TTHREAD))
 	if block == nil {
 		return nil
@@ -642,7 +642,7 @@ new_state :: proc(alloc: Allocator) -> ^Lua_State {
 	// Establish the GC color scheme before any object is born: the current white
 	// is WHITE0, and the main thread is painted that white like any other object.
 	g.currentwhite = 1 << WHITE0BIT
-	L.marked = luaC_white(g)
+	L.marked = gc_white(g)
 
 	g.allgc = obj2gco(L) // the main thread is (so far) the only object
 	L.next = nil
@@ -675,12 +675,12 @@ new_state :: proc(alloc: Allocator) -> ^Lua_State {
 	g.gcstate = GCSpause
 	g.gc_majorminor = 0
 	// Install the reference default GC parameters (float-coded percentages).
-	g.gcparams[LUA_GCPPAUSE] = luaO_codeparam(LUAI_GCPAUSE)
-	g.gcparams[LUA_GCPSTEPMUL] = luaO_codeparam(LUAI_GCMUL)
-	g.gcparams[LUA_GCPSTEPSIZE] = luaO_codeparam(LUAI_GCSTEPSIZE_PCT)
-	g.gcparams[LUA_GCPMINORMUL] = luaO_codeparam(LUAI_GENMINORMUL)
-	g.gcparams[LUA_GCPMINORMAJOR] = luaO_codeparam(LUAI_MINORMAJOR)
-	g.gcparams[LUA_GCPMAJORMINOR] = luaO_codeparam(LUAI_MAJORMINOR)
+	g.gcparams[GCPPAUSE] = object_codeparam(GCPAUSE)
+	g.gcparams[GCPSTEPMUL] = object_codeparam(GCMUL)
+	g.gcparams[GCPSTEPSIZE] = object_codeparam(GCSTEPSIZE_PCT)
+	g.gcparams[GCPMINORMUL] = object_codeparam(GENMINORMUL)
+	g.gcparams[GCPMINORMAJOR] = object_codeparam(MINORMAJOR)
+	g.gcparams[GCPMAJORMINOR] = object_codeparam(MAJORMINOR)
 	// Stop the collector for the whole of construction: no automatic or emergency
 	// collection may run until `f_luaopen` finishes and clears this.
 	g.gcstp = GCSTPGC
@@ -715,7 +715,7 @@ new_state :: proc(alloc: Allocator) -> ^Lua_State {
 //
 // Object collection, upvalue closing, and finalizer runs (the `completestate`
 // branch in reference Lua) are Phase-3/Phase-7 work: there are no GC objects yet.
-close_state :: proc(L: ^Lua_State) {
+close_state :: proc(L: ^State) {
 	g := L.g
 
 	// If the state got fully built, tear down the object graph first: close the
@@ -724,8 +724,8 @@ close_state :: proc(L: ^Lua_State) {
 	// state also has whatever objects f_luaopen managed to allocate before failing
 	// on its `allgc` list, so we free unconditionally -- luaC_freeallobjects
 	// handles both cases and leaves only the main-thread struct behind.
-	luaF_closeupval(L, 0) // close any open upvalues on the main thread
-	luaC_freeallobjects(L)
+	func_closeupval(L, 0) // close any open upvalues on the main thread
+	gc_freeallobjects(L)
 
 	if L.frames != nil {
 		state_free(L, L.frames, uint(L.frames_capacity) * size_of(Call_Info))
@@ -755,9 +755,9 @@ close_state :: proc(L: ^Lua_State) {
 // `free_thread` can recover the true base to release it. The new thread inherits
 // the parent's hook configuration. Allocation failures raise `Err_Mem` through
 // `L`'s protected boundary. Returns the new thread, or never returns on OOM.
-luaE_newthread :: proc(L: ^Lua_State) -> ^Lua_State {
+state_newthread :: proc(L: ^State) -> ^State {
 	g := L.g
-	luaC_checkGC(L) // a new thread is a good pacing point (reference lua_newthread)
+	gc_checkGC(L) // a new thread is a good pacing point (reference lua_newthread)
 
 	// Allocate the LX block and register its inner Lua_State as a GC object. We
 	// mirror luaC_newobj by hand because the collectable header lives at offset
@@ -769,7 +769,7 @@ luaE_newthread :: proc(L: ^Lua_State) -> ^Lua_State {
 	lx := (^LX)(block)
 	L1 := &lx.l
 	L1.tt = VTHREAD
-	L1.marked = luaC_white(g)
+	L1.marked = gc_white(g)
 	L1.next = g.allgc
 	g.allgc = obj2gco(L1)
 

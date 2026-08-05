@@ -39,7 +39,7 @@ STEP2MINOR :: -1 // shifted to (or stayed in) minor generational collections
 // Apply a float-coded GC parameter to `x` (computing roughly `param% * x`).
 // Reference Lua's `applygcparam`.
 apply_gc_param :: #force_inline proc "contextless" (g: ^Global_State, idx: int, x: L_Mem) -> L_Mem {
-	return luaO_applyparam(g.gcparams[idx], x)
+	return object_applyparam(g.gcparams[idx], x)
 }
 
 // ---------------------------------------------------------------------------
@@ -50,25 +50,25 @@ apply_gc_param :: #force_inline proc "contextless" (g: ^Global_State, idx: int, 
 // cycle begins: the threshold is roughly `marked * pause / 100`. Reference Lua's
 // `setpause`.
 setpause :: proc(g: ^Global_State) {
-	threshold := apply_gc_param(g, LUA_GCPPAUSE, g.gc_marked)
+	threshold := apply_gc_param(g, GCPPAUSE, g.gc_marked)
 	debt := threshold - gettotalbytes(g)
 	if debt < 0 {
 		debt = 0
 	}
-	luaE_setdebt(g, debt)
+	state_setdebt(g, debt)
 }
 
 // Set the debt for the next *minor* collection: it fires once total bytes grow
 // `minormul%` past the base established by the last major collection. Reference
 // Lua's `setminordebt`.
 setminordebt :: proc(g: ^Global_State) {
-	luaE_setdebt(g, apply_gc_param(g, LUA_GCPMINORMUL, g.gc_majorminor))
+	state_setdebt(g, apply_gc_param(g, GCPMINORMUL, g.gc_majorminor))
 }
 
 // Is there enough headroom (Lua stack + C-call depth) to safely run a finalizer?
 // Reference Lua's `luaD_checkminstack`.
-luaD_checkminstack :: proc(L: ^Lua_State) -> bool {
-	return L.stack_size < MAXSTACK - BASIC_STACK_SIZE && int(get_ccalls(L)) < LUAI_MAXCCALLS - 2
+do_checkminstack :: proc(L: ^State) -> bool {
+	return L.stack_size < MAXSTACK - BASIC_STACK_SIZE && int(get_ccalls(L)) < MAXCCALLS - 2
 }
 
 // ---------------------------------------------------------------------------
@@ -153,10 +153,10 @@ clearbyvalues :: proc(g: ^Global_State, l: ^GCObject, f: ^GCObject) {
 
 // Shrink the string table if it has become sparse (never during an emergency
 // collection, which must not allocate). Reference Lua's `checkSizes`.
-checkSizes :: proc(L: ^Lua_State, g: ^Global_State) {
+checkSizes :: proc(L: ^State, g: ^Global_State) {
 	if !g.gcemergency {
 		if g.strt.nuse < g.strt.size / 4 {
-			luaS_resize(L, g.strt.size / 2)
+			string_resize(L, g.strt.size / 2)
 		}
 	}
 }
@@ -165,10 +165,10 @@ checkSizes :: proc(L: ^Lua_State, g: ^Global_State) {
 // wearing the stale "other" white) and repainting every survivor the fresh current
 // white with a NEW age (ready for the next cycle). Returns where to continue, or
 // nil at end of list. Reference Lua's `sweeplist`.
-sweeplist :: proc(L: ^Lua_State, p: ^^GCObject, countin: L_Mem) -> ^^GCObject {
+sweeplist :: proc(L: ^State, p: ^^GCObject, countin: L_Mem) -> ^^GCObject {
 	g := L.g
 	ow := other_white(g)
-	white := luaC_white(g) // the fresh current white
+	white := gc_white(g) // the fresh current white
 	pp := p
 	n := countin
 	for pp^ != nil && n > 0 {
@@ -189,7 +189,7 @@ sweeplist :: proc(L: ^Lua_State, p: ^^GCObject, countin: L_Mem) -> ^^GCObject {
 // Sweep a list until a live object (or the end). Used by `entersweep` so the sweep
 // cursor points *inside* the list, letting objects created after "now" be skipped
 // by the real sweep. Reference Lua's `sweeptolive`.
-sweeptolive :: proc(L: ^Lua_State, p: ^^GCObject) -> ^^GCObject {
+sweeptolive :: proc(L: ^State, p: ^^GCObject) -> ^^GCObject {
 	old := p
 	pp := p
 	for {
@@ -203,7 +203,7 @@ sweeptolive :: proc(L: ^Lua_State, p: ^^GCObject) -> ^^GCObject {
 
 // Enter the first sweep phase, positioning the sweep cursor inside `allgc`.
 // Reference Lua's `entersweep`.
-entersweep :: proc(L: ^Lua_State) {
+entersweep :: proc(L: ^State) {
 	g := L.g
 	g.gcstate = GCSswpallgc
 	g.sweepgc = sweeptolive(L, &g.allgc)
@@ -212,7 +212,7 @@ entersweep :: proc(L: ^Lua_State) {
 // Do one sweep step: advance the cursor if a list is in progress, otherwise move
 // to the next state and point the cursor at the next list. `fast` sweeps the whole
 // list in one go. Reference Lua's `sweepstep`.
-sweepstep :: proc(L: ^Lua_State, g: ^Global_State, nextstate: u8, nextlist: ^^GCObject, fast: bool) {
+sweepstep :: proc(L: ^State, g: ^Global_State, nextstate: u8, nextlist: ^^GCObject, fast: bool) {
 	if g.sweepgc != nil {
 		g.sweepgc = sweeplist(L, g.sweepgc, fast ? MAX_LMEM : GCSWEEPMAX)
 	} else {
@@ -223,7 +223,7 @@ sweepstep :: proc(L: ^Lua_State, g: ^Global_State, nextstate: u8, nextlist: ^^GC
 
 // Delete every object in list `p` up to (but not including) `limit`. Reference
 // Lua's `deletelist`.
-deletelist :: proc(L: ^Lua_State, p: ^GCObject, limit: ^GCObject) {
+deletelist :: proc(L: ^State, p: ^GCObject, limit: ^GCObject) {
 	o := p
 	for o != limit {
 		next := o.next
@@ -254,8 +254,8 @@ udata2finalize :: proc(g: ^Global_State) -> ^GCObject {
 
 // The protected body run for one finalizer: call the finalizer with its one
 // argument. Reference Lua's `dothecall`.
-dothecall :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
-	luaD_callnoyield(L, L.top - 2, 0)
+dothecall :: proc(L: ^State, ud: rawptr) -> Thread_Status {
+	do_callnoyield(L, L.top - 2, 0)
 	return .Ok
 }
 
@@ -263,11 +263,11 @@ dothecall :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
 // runs inside a protected call, and any error it raises is turned into a warning
 // (never propagated) -- reference Lua's `GCTM`. The `CIST_FIN` flag marks the
 // frame so `error`/traceback can tell it apart.
-GCTM :: proc(L: ^Lua_State) {
+GCTM :: proc(L: ^State) {
 	g := L.g
 	v: TValue
 	set_gc(&v, udata2finalize(g))
-	tm := luaT_gettmbyobj(L, &v, TM_GC)
+	tm := tm_gettmbyobj(L, &v, TM_GC)
 	if !is_nil(tm) { // is there actually a finalizer?
 		oldah := L.allowhook
 		oldgcstp := g.gcstp
@@ -278,19 +278,19 @@ GCTM :: proc(L: ^Lua_State) {
 		set_obj(&L.stack[L.top].val, &v) // ...and its argument
 		L.top += 1
 		L.frames[L.ci].callstatus |= CIST_FIN // running a finalizer
-		status := luaD_pcall(L, dothecall, nil, L.top - 2, 0)
+		status := do_pcall(L, dothecall, nil, L.top - 2, 0)
 		L.frames[L.ci].callstatus &~= CIST_FIN
 		L.allowhook = oldah // restore hooks
 		g.gcstp = oldgcstp // restore GC-stopped state
 		if status != .Ok { // error while running __gc?
-			luaE_warnerror(L, "__gc")
+			state_warnerror(L, "__gc")
 			L.top -= 1 // pop the error object
 		}
 	}
 }
 
 // Run every pending finalizer. Reference Lua's `callallpendingfinalizers`.
-callallpendingfinalizers :: proc(L: ^Lua_State) {
+callallpendingfinalizers :: proc(L: ^State) {
 	g := L.g
 	for g.tobefnz != nil {
 		GCTM(L)
@@ -351,12 +351,12 @@ correctpointers :: proc(g: ^Global_State, o: ^GCObject) {
 // collector will run its finalizer instead of immediately reclaiming it. Called
 // when a finalizer is first established on an object's metatable. Reference Lua's
 // `luaC_checkfinalizer`.
-luaC_checkfinalizer :: proc(L: ^Lua_State, o: ^GCObject, mt: ^Table) {
+gc_checkfinalizer :: proc(L: ^State, o: ^GCObject, mt: ^Table) {
 	g := L.g
 	// gfasttm(g, mt, TM_GC): honor the fast-absence cache.
 	has_gc := false
 	if mt != nil && (mt.flags & Byte(u32(1) << u32(TM_GC))) == 0 {
-		has_gc = !is_nil_or_absent(luaT_gettm(mt, TM_GC, g.tmname[TM_GC]))
+		has_gc = !is_nil_or_absent(tm_gettm(mt, TM_GC, g.tmname[TM_GC]))
 	}
 	if tofinalize(o) || !has_gc || (g.gcstp & GCSTPCLS) != 0 {
 		return // already flagged, no finalizer, or the state is closing
@@ -397,7 +397,7 @@ is_nil_or_absent :: #force_inline proc "contextless" (tm: ^TValue) -> bool {
 // finally flips the current white so the coming sweep can tell survivors from the
 // dead. The exact ordering here matters for correctness and matches reference
 // Lua's `atomic` step for step.
-atomic :: proc(L: ^Lua_State) {
+atomic :: proc(L: ^State) {
 	g := L.g
 	grayagain := g.grayagain // save the original grayagain list
 	g.grayagain = nil
@@ -426,7 +426,7 @@ atomic :: proc(L: ^Lua_State) {
 	clearbykeys(g, g.allweak) // remove dead keys from all-weak tables
 	clearbyvalues(g, g.weak, origweak) // clear values from resurrected tables
 	clearbyvalues(g, g.allweak, origall)
-	luaS_clearcache(g) // drop any about-to-die entries from the string cache
+	string_clearcache(g) // drop any about-to-die entries from the string cache
 	g.currentwhite = other_white(g) // flip: survivors become "old" white
 }
 
@@ -437,7 +437,7 @@ atomic :: proc(L: ^Lua_State) {
 // Sweep a list to enter generational mode: free the dead, turn every survivor OLD.
 // Surviving threads go on grayagain, open upvalues stay gray, everything else goes
 // black. Reference Lua's `sweep2old`.
-sweep2old :: proc(L: ^Lua_State, p: ^^GCObject) {
+sweep2old :: proc(L: ^State, p: ^^GCObject) {
 	g := L.g
 	pp := p
 	for pp^ != nil {
@@ -463,9 +463,9 @@ sweep2old :: proc(L: ^Lua_State, p: ^^GCObject) {
 // survivors (new objects go back to white/survival; older ones keep their color).
 // Accumulates the bytes that just became OLD1 into `paddedold`. Reference Lua's
 // `sweepgen`.
-sweepgen :: proc(L: ^Lua_State, g: ^Global_State, p: ^^GCObject, limit: ^GCObject, pfirstold1: ^^GCObject, paddedold: ^L_Mem) -> ^^GCObject {
+sweepgen :: proc(L: ^State, g: ^Global_State, p: ^^GCObject, limit: ^GCObject, pfirstold1: ^^GCObject, paddedold: ^L_Mem) -> ^^GCObject {
 	addedold: L_Mem = 0
-	white := luaC_white(g)
+	white := gc_white(g)
 	pp := p
 	for pp^ != limit {
 		curr := pp^
@@ -551,11 +551,11 @@ markold :: proc(g: ^Global_State, from: ^GCObject, to: ^GCObject) {
 // Wrap up a minor cycle: correct gray lists, shrink structures, return to the
 // propagate state, and run any pending finalizers. Reference Lua's
 // `finishgencycle`.
-finishgencycle :: proc(L: ^Lua_State, g: ^Global_State) {
+finishgencycle :: proc(L: ^State, g: ^Global_State) {
 	correctgraylists(g)
 	checkSizes(L, g)
 	g.gcstate = GCSpropagate // skip the restart
-	if !g.gcemergency && luaD_checkminstack(L) {
+	if !g.gcemergency && do_checkminstack(L) {
 		callallpendingfinalizers(L)
 	}
 }
@@ -563,7 +563,7 @@ finishgencycle :: proc(L: ^Lua_State, g: ^Global_State) {
 // Shift from minor collections to incremental (major) collections: clear the
 // generational cursors and continue as a fresh incremental cycle. Reference Lua's
 // `minor2inc`.
-minor2inc :: proc(L: ^Lua_State, g: ^Global_State, kind: u8) {
+minor2inc :: proc(L: ^State, g: ^Global_State, kind: u8) {
 	g.gc_majorminor = g.gc_marked // live-byte base
 	g.gckind = kind
 	g.reallyold = nil
@@ -573,13 +573,13 @@ minor2inc :: proc(L: ^Lua_State, g: ^Global_State, kind: u8) {
 	g.finobjold1 = nil
 	g.finobjsur = nil
 	entersweep(L) // continue as an incremental cycle
-	luaE_setdebt(g, apply_gc_param(g, LUA_GCPSTEPSIZE, 100))
+	state_setdebt(g, apply_gc_param(g, GCPSTEPSIZE, 100))
 }
 
 // Decide whether the accumulated old bytes justify shifting to major mode.
 // Reference Lua's `checkminormajor`.
 checkminormajor :: proc(g: ^Global_State) -> bool {
-	limit := apply_gc_param(g, LUA_GCPMINORMAJOR, g.gc_majorminor)
+	limit := apply_gc_param(g, GCPMINORMAJOR, g.gc_majorminor)
 	if limit == 0 {
 		return false // 'minormajor' 0 disables major collections
 	}
@@ -589,7 +589,7 @@ checkminormajor :: proc(g: ^Global_State) -> bool {
 // Perform one young (minor) collection: mark OLD1 roots, run the atomic step, then
 // sweep the nursery and survival lists, advancing the generational cursors.
 // Finally decide whether to shift to major mode. Reference Lua's `youngcollection`.
-youngcollection :: proc(L: ^Lua_State, g: ^Global_State) {
+youngcollection :: proc(L: ^State, g: ^Global_State) {
 	addedold1: L_Mem = 0
 	marked := g.gc_marked // preserve across the atomic step (which loses it)
 	dummy: ^GCObject = nil
@@ -630,7 +630,7 @@ youngcollection :: proc(L: ^Lua_State, g: ^Global_State) {
 // Turn a completed atomic cycle into generational mode: clear gray lists, sweep
 // everything OLD, and set up the generational cursors. Reference Lua's
 // `atomic2gen`.
-atomic2gen :: proc(L: ^Lua_State, g: ^Global_State) {
+atomic2gen :: proc(L: ^State, g: ^Global_State) {
 	cleargraylists(g)
 	g.gcstate = GCSswpallgc
 	sweep2old(L, &g.allgc)
@@ -655,9 +655,9 @@ atomic2gen :: proc(L: ^Lua_State, g: ^Global_State) {
 // Enter generational mode: run a full incremental cycle to the end of its atomic
 // phase (so all weak tables are cleared and marks are exact), then convert to
 // generational. Reference Lua's `entergen`.
-entergen :: proc(L: ^Lua_State, g: ^Global_State) {
-	luaC_runtilstate(L, GCSpause, true) // finish any current cycle
-	luaC_runtilstate(L, GCSpropagate, true) // start a fresh one
+entergen :: proc(L: ^State, g: ^Global_State) {
+	gc_runtilstate(L, GCSpause, true) // finish any current cycle
+	gc_runtilstate(L, GCSpropagate, true) // start a fresh one
 	atomic(L)
 	atomic2gen(L, g)
 	setminordebt(g)
@@ -665,7 +665,7 @@ entergen :: proc(L: ^Lua_State, g: ^Global_State) {
 
 // Change the collector mode to `newmode` (KGC_INC or KGC_GENMINOR). Reference
 // Lua's `luaC_changemode`.
-luaC_changemode :: proc(L: ^Lua_State, newmode: int) {
+gc_changemode :: proc(L: ^State, newmode: int) {
 	g := L.g
 	if g.gckind == KGC_GENMAJOR {
 		g.gckind = KGC_INC // already incremental, just rename
@@ -681,7 +681,7 @@ luaC_changemode :: proc(L: ^Lua_State, newmode: int) {
 
 // A full collection while in generational mode: drop to incremental, do a full
 // incremental collection, then re-enter generational. Reference Lua's `fullgen`.
-fullgen :: proc(L: ^Lua_State, g: ^Global_State) {
+fullgen :: proc(L: ^State, g: ^Global_State) {
 	minor2inc(L, g, KGC_INC)
 	entergen(L, g)
 }
@@ -689,11 +689,11 @@ fullgen :: proc(L: ^Lua_State, g: ^Global_State) {
 // After a major atomic step, decide whether the collector should return to minor
 // collections (it does if too little was collected). Reference Lua's
 // `checkmajorminor`.
-checkmajorminor :: proc(L: ^Lua_State, g: ^Global_State) -> bool {
+checkmajorminor :: proc(L: ^State, g: ^Global_State) -> bool {
 	if g.gckind == KGC_GENMAJOR {
 		numbytes := gettotalbytes(g)
 		addedbytes := numbytes - g.gc_majorminor
-		limit := apply_gc_param(g, LUA_GCPMAJORMINOR, addedbytes)
+		limit := apply_gc_param(g, GCPMAJORMINOR, addedbytes)
 		tobecollected := numbytes - g.gc_marked
 		if tobecollected > limit {
 			atomic2gen(L, g) // back to generational mode
@@ -713,7 +713,7 @@ checkmajorminor :: proc(L: ^Lua_State, g: ^Global_State) -> bool {
 // the STEP2*/ATOMICSTEP sentinels). `fast` finishes each state as fast as possible
 // (used by full collections and to skip propagation). Reference Lua's
 // `singlestep`.
-singlestep :: proc(L: ^Lua_State, fast: bool) -> L_Mem {
+singlestep :: proc(L: ^State, fast: bool) -> L_Mem {
 	g := L.g
 	g.gcstopem = 1 // no emergency collections while collecting
 	stepresult: L_Mem
@@ -751,7 +751,7 @@ singlestep :: proc(L: ^Lua_State, fast: bool) -> L_Mem {
 		g.gcstate = GCScallfin
 		stepresult = GCSWEEPMAX
 	case GCScallfin:
-		if g.tobefnz != nil && !g.gcemergency && luaD_checkminstack(L) {
+		if g.tobefnz != nil && !g.gcemergency && do_checkminstack(L) {
 			g.gcstopem = 0 // collections are ok during finalizers
 			GCTM(L) // run one finalizer
 			return CWUFIN
@@ -769,7 +769,7 @@ singlestep :: proc(L: ^Lua_State, fast: bool) -> L_Mem {
 
 // Advance the collector until it reaches `state`. Reference Lua's
 // `luaC_runtilstate`. `fast` is used only for full collections and setup.
-luaC_runtilstate :: proc(L: ^Lua_State, state: u8, fast: bool) {
+gc_runtilstate :: proc(L: ^State, state: u8, fast: bool) {
 	g := L.g
 	for state != g.gcstate {
 		singlestep(L, fast)
@@ -780,9 +780,9 @@ luaC_runtilstate :: proc(L: ^Lua_State, state: u8, fast: bool) {
 // work, then run single steps until that much work is done or the cycle ends.
 // Finally, set the debt controlling when the next step runs. Reference Lua's
 // `incstep`.
-incstep :: proc(L: ^Lua_State, g: ^Global_State) {
-	stepsize := apply_gc_param(g, LUA_GCPSTEPSIZE, 100)
-	work2do := apply_gc_param(g, LUA_GCPSTEPMUL, stepsize / size_of(rawptr))
+incstep :: proc(L: ^State, g: ^Global_State) {
+	stepsize := apply_gc_param(g, GCPSTEPSIZE, 100)
+	work2do := apply_gc_param(g, GCPSTEPMUL, stepsize / size_of(rawptr))
 	fast := work2do == 0 // special case: do a full collection
 	for {
 		stres := singlestep(L, fast)
@@ -800,18 +800,18 @@ incstep :: proc(L: ^Lua_State, g: ^Global_State) {
 	if g.gcstate == GCSpause {
 		setpause(g) // pause until the next cycle
 	} else {
-		luaE_setdebt(g, stepsize)
+		state_setdebt(g, stepsize)
 	}
 }
 
 // Perform a GC step if the collector is running; if it was stopped by the user,
 // push the debt out so we are not called on every check. Reference Lua's
 // `luaC_step`.
-luaC_step :: proc(L: ^Lua_State) {
+gc_step :: proc(L: ^State) {
 	g := L.g
 	if !gcrunning(g) {
 		if (g.gcstp & GCSTPUSR) != 0 { // stopped by the user?
-			luaE_setdebt(g, 20000)
+			state_setdebt(g, 20000)
 		}
 	} else {
 		switch g.gckind {
@@ -826,9 +826,9 @@ luaC_step :: proc(L: ^Lua_State) {
 
 // The pacing check wired at safe points across the interpreter: if the debt has
 // run out, take a GC step. Reference Lua's `luaC_checkGC` / `luaC_condGC`.
-luaC_checkGC :: proc(L: ^Lua_State) {
+gc_checkGC :: proc(L: ^State) {
 	if L.g.gc_debt <= 0 {
-		luaC_step(L)
+		gc_step(L)
 	}
 }
 
@@ -840,20 +840,20 @@ luaC_checkGC :: proc(L: ^Lua_State) {
 // may be black objects, so we first sweep everything back to white (nothing is
 // collected, since white has not changed), then run a clean cycle to completion.
 // Reference Lua's `fullinc`.
-fullinc :: proc(L: ^Lua_State, g: ^Global_State) {
+fullinc :: proc(L: ^State, g: ^Global_State) {
 	if keepinvariant(g) { // black objects around?
 		entersweep(L) // sweep them back to white
 	}
-	luaC_runtilstate(L, GCSpause, true) // finish any pending sweep
-	luaC_runtilstate(L, GCScallfin, true) // run up to finalizers
-	luaC_runtilstate(L, GCSpause, true) // finish the collection
+	gc_runtilstate(L, GCSpause, true) // finish any pending sweep
+	gc_runtilstate(L, GCScallfin, true) // run up to finalizers
+	gc_runtilstate(L, GCSpause, true) // finish the collection
 	setpause(g)
 }
 
 // Perform a full GC cycle. `isemergency` set a flag that suppresses operations
 // which could reenter the interpreter unexpectedly (running finalizers, shrinking
 // structures). Reference Lua's `luaC_fullgc`.
-luaC_fullgc :: proc(L: ^Lua_State, isemergency: bool) {
+gc_fullgc :: proc(L: ^State, isemergency: bool) {
 	g := L.g
 	g.gcemergency = isemergency
 	switch g.gckind {
@@ -872,8 +872,8 @@ luaC_fullgc :: proc(L: ^Lua_State, isemergency: bool) {
 // A convenience alias kept for the Phase-3 tests, which drive a deterministic full
 // collection directly. The real work is the incremental collector above; a "full"
 // collection just runs it to completion. `emergency` is threaded through faithfully.
-gc_full :: proc(L: ^Lua_State, emergency: bool) {
-	luaC_fullgc(L, emergency)
+gc_full :: proc(L: ^State, emergency: bool) {
+	gc_fullgc(L, emergency)
 }
 
 // ---------------------------------------------------------------------------
@@ -886,7 +886,7 @@ gc_full :: proc(L: ^Lua_State, emergency: bool) {
 // nothing (reference Lua is silent without a callback). The error object the
 // finalizer left on the stack top is included, matching reference phrasing
 // "error in <where> (<msg>)".
-luaE_warnerror :: proc(L: ^Lua_State, whence: cstring) {
+state_warnerror :: proc(L: ^State, whence: cstring) {
 	g := L.g
 	if g.warnf == nil {
 		return

@@ -115,11 +115,11 @@ strisshr :: #force_inline proc "contextless" (ts: ^TString) -> bool {
 // Raise a *semantic* error (a well-formed token that means something illegal,
 // e.g. assigning to a <const>). Reference `luaK_semerror`: it drops the "near
 // <token>" suffix (the token itself is fine) and reports at the last used line.
-luaK_semerror :: proc(ls: ^LexState, fmt: string, args: ..any) {
-	msg := string(str_slice(luaO_pushfstring(ls.L, fmt, ..args)))
+code_semerror :: proc(ls: ^LexState, fmt: string, args: ..any) {
+	msg := string(str_slice(object_pushfstring(ls.L, fmt, ..args)))
 	ls.t.token = 0 // remove "near <token>" from final message
 	ls.linenumber = ls.lastline // back to line of last used token
-	luaX_syntaxerror(ls, msg)
+	lex_syntaxerror(ls, msg)
 }
 
 // If 'e' is a numeric constant, copy it into 'v' and return true. Reference
@@ -151,7 +151,7 @@ const2val :: #force_inline proc "contextless" (fs: ^FuncState, e: ^Expdesc) -> ^
 // If 'e' is a compile-time constant, materialize it into 'v' and return true.
 // Reference `luaK_exp2const`. Unlike `tonumeral` this also handles nil, booleans,
 // strings, and named <const>s.
-luaK_exp2const :: proc "contextless" (fs: ^FuncState, e: ^Expdesc, v: ^TValue) -> bool {
+code_exp2const :: proc "contextless" (fs: ^FuncState, e: ^Expdesc, v: ^TValue) -> bool {
 	if hasjumps(e) {
 		return false
 	}
@@ -200,7 +200,7 @@ previousinstruction :: proc "contextless" (fs: ^FuncState) -> ^Instruction {
 // Emit `OP_LOADNIL` for `R[from] .. R[from+n-1]`, merging with an immediately
 // preceding LOADNIL when their ranges touch (so `local a; local b` is one op).
 // Reference `luaK_nil`.
-luaK_nil :: proc(fs: ^FuncState, from: int, n: int) {
+code_nil :: proc(fs: ^FuncState, from: int, n: int) {
 	from := from
 	l := from + n - 1 // last register to set nil
 	previous := previousinstruction(fs)
@@ -217,7 +217,7 @@ luaK_nil :: proc(fs: ^FuncState, from: int, n: int) {
 		}
 		// else fall through and emit a fresh instruction
 	}
-	luaK_codeABC(fs, .LOADNIL, from, n - 1, 0)
+	code_codeABC(fs, .LOADNIL, from, n - 1, 0)
 }
 
 // Destination of the jump at 'pc', or NO_JUMP if it ends a list. Reference
@@ -237,14 +237,14 @@ fixjump :: proc(fs: ^FuncState, pc: int, dest: int) {
 	jmp := &fs.f.code[pc]
 	offset := dest - (pc + 1)
 	if !(-OFFSET_sJ <= offset && offset <= MAXARG_sJ - OFFSET_sJ) {
-		luaX_syntaxerror(fs.ls, "control structure too long")
+		lex_syntaxerror(fs.ls, "control structure too long")
 	}
 	setarg_sJ(jmp, offset)
 }
 
 // Concatenate jump list 'l2' onto the end of the list rooted at 'l1'. Reference
 // `luaK_concat`.
-luaK_concat :: proc(fs: ^FuncState, l1: ^int, l2: int) {
+code_concat :: proc(fs: ^FuncState, l1: ^int, l2: int) {
 	if l2 == NO_JUMP {
 		return // nothing to concatenate
 	}
@@ -265,13 +265,13 @@ luaK_concat :: proc(fs: ^FuncState, l1: ^int, l2: int) {
 
 // Emit an unconditional jump and return its position (to be fixed later).
 // Reference `luaK_jump`.
-luaK_jump :: proc(fs: ^FuncState) -> int {
+code_jump :: proc(fs: ^FuncState) -> int {
 	return codesJ(fs, .JMP, NO_JUMP, 0)
 }
 
 // Emit a `return` of 'nret' values starting at register 'first'. Reference
 // `luaK_ret`.
-luaK_ret :: proc(fs: ^FuncState, first: int, nret: int) {
+code_ret :: proc(fs: ^FuncState, first: int, nret: int) {
 	op: Op_Code
 	switch nret {
 	case 0:
@@ -281,21 +281,21 @@ luaK_ret :: proc(fs: ^FuncState, first: int, nret: int) {
 	case:
 		op = .RETURN
 	}
-	luaY_checklimit(fs, nret + 1, MAXARG_B, "returns")
-	luaK_codeABC(fs, op, first, nret + 1, 0)
+	parse_checklimit(fs, nret + 1, MAXARG_B, "returns")
+	code_codeABC(fs, op, first, nret + 1, 0)
 }
 
 // Emit a test/comparison opcode followed by a jump; return the jump position.
 // Reference `condjump`.
 @(private = "file")
 condjump :: proc(fs: ^FuncState, op: Op_Code, A, B, C, k: int) -> int {
-	luaK_codeABCk(fs, op, A, B, C, k)
-	return luaK_jump(fs)
+	code_codeABCk(fs, op, A, B, C, k)
+	return code_jump(fs)
 }
 
 // Return the current pc and mark it as a jump target so the previous instruction
 // won't be peephole-merged across this boundary. Reference `luaK_getlabel`.
-luaK_getlabel :: proc(fs: ^FuncState) -> int {
+code_getlabel :: proc(fs: ^FuncState) -> int {
 	fs.lasttarget = fs.pc
 	return fs.pc
 }
@@ -365,14 +365,14 @@ patchlistaux :: proc(fs: ^FuncState, list: int, vtarget: int, reg: int, dtarget:
 
 // Point every jump in 'list' at already-generated address 'target'. Reference
 // `luaK_patchlist`.
-luaK_patchlist :: proc(fs: ^FuncState, list: int, target: int) {
+code_patchlist :: proc(fs: ^FuncState, list: int, target: int) {
 	patchlistaux(fs, list, target, NO_REG, target)
 }
 
 // Point every jump in 'list' at the current pc. Reference `luaK_patchtohere`.
-luaK_patchtohere :: proc(fs: ^FuncState, list: int) {
-	hr := luaK_getlabel(fs) // mark "here" as a jump target
-	luaK_patchlist(fs, list, hr)
+code_patchtohere :: proc(fs: ^FuncState, list: int) {
+	hr := code_getlabel(fs) // mark "here" as a jump target
+	code_patchlist(fs, list, hr)
 }
 
 // Save the line for the just-emitted instruction, using a relative delta when it
@@ -430,7 +430,7 @@ removelastinstruction :: proc(fs: ^FuncState) {
 
 // Append instruction 'i', growing the code array and recording line info. Returns
 // the new instruction's index. Reference `luaK_code`.
-luaK_code :: proc(fs: ^FuncState, i: Instruction) -> int {
+code_code :: proc(fs: ^FuncState, i: Instruction) -> int {
 	f := fs.f
 	grow_vector(fs.ls.L, &f.code, fs.pc, &f.sizecode, MAX_INT, "opcodes")
 	f.code[fs.pc] = i
@@ -441,24 +441,24 @@ luaK_code :: proc(fs: ^FuncState, i: Instruction) -> int {
 
 // Emit an iABC-format instruction (with explicit 'k' bit). Reference
 // `luaK_codeABCk`.
-luaK_codeABCk :: proc(fs: ^FuncState, o: Op_Code, A, B, C, k: int) -> int {
-	return luaK_code(fs, create_ABCk(o, A, B, C, k))
+code_codeABCk :: proc(fs: ^FuncState, o: Op_Code, A, B, C, k: int) -> int {
+	return code_code(fs, create_ABCk(o, A, B, C, k))
 }
 
 // The `luaK_codeABC` convenience wrapper (k = 0). Reference macro.
-luaK_codeABC :: #force_inline proc(fs: ^FuncState, o: Op_Code, A, B, C: int) -> int {
-	return luaK_codeABCk(fs, o, A, B, C, 0)
+code_codeABC :: #force_inline proc(fs: ^FuncState, o: Op_Code, A, B, C: int) -> int {
+	return code_codeABCk(fs, o, A, B, C, 0)
 }
 
 // Emit an ivABC-format instruction (wide B/C, for table ops). Reference
 // `luaK_codevABCk`.
-luaK_codevABCk :: proc(fs: ^FuncState, o: Op_Code, A, B, C, k: int) -> int {
-	return luaK_code(fs, create_vABCk(o, A, B, C, k))
+code_codevABCk :: proc(fs: ^FuncState, o: Op_Code, A, B, C, k: int) -> int {
+	return code_code(fs, create_vABCk(o, A, B, C, k))
 }
 
 // Emit an iABx-format instruction. Reference `luaK_codeABx`.
-luaK_codeABx :: proc(fs: ^FuncState, o: Op_Code, A, Bc: int) -> int {
-	return luaK_code(fs, create_ABx(o, A, Bc))
+code_codeABx :: proc(fs: ^FuncState, o: Op_Code, A, Bc: int) -> int {
+	return code_code(fs, create_ABx(o, A, Bc))
 }
 
 // Emit an iAsBx-format instruction (signed Bx, biased on the wire). Reference
@@ -466,30 +466,30 @@ luaK_codeABx :: proc(fs: ^FuncState, o: Op_Code, A, Bc: int) -> int {
 @(private = "file")
 codeAsBx :: proc(fs: ^FuncState, o: Op_Code, A, Bc: int) -> int {
 	b := Bc + OFFSET_sBx
-	return luaK_code(fs, create_ABx(o, A, b))
+	return code_code(fs, create_ABx(o, A, b))
 }
 
 // Emit an isJ-format instruction (signed jump). Reference `codesJ`.
 @(private = "file")
 codesJ :: proc(fs: ^FuncState, o: Op_Code, sj, k: int) -> int {
 	j := sj + OFFSET_sJ
-	return luaK_code(fs, create_sJ(o, j, k))
+	return code_code(fs, create_sJ(o, j, k))
 }
 
 // Emit an `OP_EXTRAARG` carrying the wide argument 'A'. Reference `codeextraarg`.
 @(private = "file")
 codeextraarg :: proc(fs: ^FuncState, A: int) -> int {
-	return luaK_code(fs, create_Ax(.EXTRAARG, A))
+	return code_code(fs, create_Ax(.EXTRAARG, A))
 }
 
 // Load constant 'k' into 'reg', using LOADK when the index fits in Bx or
 // LOADKX + EXTRAARG otherwise. Reference `luaK_codek`.
 @(private = "file")
-luaK_codek :: proc(fs: ^FuncState, reg: int, k: int) -> int {
+code_codek :: proc(fs: ^FuncState, reg: int, k: int) -> int {
 	if k <= MAXARG_Bx {
-		return luaK_codeABx(fs, .LOADK, reg, k)
+		return code_codeABx(fs, .LOADK, reg, k)
 	}
-	p := luaK_codeABx(fs, .LOADKX, reg, 0)
+	p := code_codeABx(fs, .LOADKX, reg, 0)
 	codeextraarg(fs, k)
 	return p
 }
@@ -500,17 +500,17 @@ luaK_codek :: proc(fs: ^FuncState, reg: int, k: int) -> int {
 
 // Ensure 'n' more registers are within the function's stack limit, tracking the
 // high-water mark in `maxstacksize`. Reference `luaK_checkstack`.
-luaK_checkstack :: proc(fs: ^FuncState, n: int) {
+code_checkstack :: proc(fs: ^FuncState, n: int) {
 	newstack := fs.freereg + n
 	if newstack > int(fs.f.maxstacksize) {
-		luaY_checklimit(fs, newstack, MAX_FSTACK, "registers")
+		parse_checklimit(fs, newstack, MAX_FSTACK, "registers")
 		fs.f.maxstacksize = u8(newstack)
 	}
 }
 
 // Reserve 'n' registers on the register stack. Reference `luaK_reserveregs`.
-luaK_reserveregs :: proc(fs: ^FuncState, n: int) {
-	luaK_checkstack(fs, n)
+code_reserveregs :: proc(fs: ^FuncState, n: int) {
+	code_checkstack(fs, n)
 	fs.freereg += n
 }
 
@@ -518,7 +518,7 @@ luaK_reserveregs :: proc(fs: ^FuncState, n: int) {
 // variable's register). Reference `freereg`.
 @(private = "file")
 freereg :: proc(fs: ^FuncState, reg: int) {
-	if reg >= luaY_nvarstack(fs) {
+	if reg >= parse_nvarstack(fs) {
 		fs.freereg -= 1
 	}
 }
@@ -568,7 +568,7 @@ addk :: proc(fs: ^FuncState, f: ^Proto, v: ^TValue) -> int {
 	set_obj(&f.k[k], v)
 	fs.nk += 1
 	if is_collectable(v) { 	// keep the GC's black/white invariant across the store
-		luaC_barrier(L, obj2gco(f), v.value_.gc)
+		gc_barrier(L, obj2gco(f), v.value_.gc)
 	}
 	return k
 }
@@ -580,14 +580,14 @@ addk :: proc(fs: ^FuncState, f: ^Proto, v: ^TValue) -> int {
 k2proto :: proc(fs: ^FuncState, key: ^TValue, v: ^TValue) -> int {
 	val: TValue
 	f := fs.f
-	luaH_get(fs.kcache, key, &val) // query scanner table
+	table_get(fs.kcache, key, &val) // query scanner table
 	if !is_nil(&val) { 	// cache hit: an integer index is stored there
 		return int(int_value(&val))
 	}
 	// miss: create the constant and remember its index for reuse.
 	k := addk(fs, f, v)
 	set_int(&val, Integer(k))
-	luaH_set(fs.ls.L, fs.kcache, key, &val)
+	table_set(fs.ls.L, fs.kcache, key, &val)
 	return k
 }
 
@@ -601,7 +601,7 @@ stringK :: proc(fs: ^FuncState, s: ^TString) -> int {
 
 // Add an integer constant, keyed by the integer itself. Reference `luaK_intK`.
 @(private = "file")
-luaK_intK :: proc(fs: ^FuncState, n: Integer) -> int {
+code_intK :: proc(fs: ^FuncState, n: Integer) -> int {
 	o: TValue
 	set_int(&o, n)
 	return k2proto(fs, &o, &o)
@@ -610,7 +610,7 @@ luaK_intK :: proc(fs: ^FuncState, n: Integer) -> int {
 // Add a float constant. Integral-valued floats need a perturbed key so they don't
 // collide with the equal integer in the cache. Reference `luaK_numberK`.
 @(private = "file")
-luaK_numberK :: proc(fs: ^FuncState, r: Number) -> int {
+code_numberK :: proc(fs: ^FuncState, r: Number) -> int {
 	o, kv: TValue
 	set_float(&o, r)
 	if r == 0 { 	// zero is special (and -0.0): key on the FuncState, never collides
@@ -676,35 +676,35 @@ fitsBx :: proc "contextless" (i: Integer) -> bool {
 
 // Load integer 'i' into 'reg', as an immediate LOADI when it fits or via the
 // constant pool otherwise. Reference `luaK_int`.
-luaK_int :: proc(fs: ^FuncState, reg: int, i: Integer) {
+code_int :: proc(fs: ^FuncState, reg: int, i: Integer) {
 	if fitsBx(i) {
 		codeAsBx(fs, .LOADI, reg, int(i))
 	} else {
-		luaK_codek(fs, reg, luaK_intK(fs, i))
+		code_codek(fs, reg, code_intK(fs, i))
 	}
 }
 
 // Load float 'f' into 'reg', as an immediate LOADF when it is an integral value
 // in range or via the constant pool otherwise. Reference `luaK_float`.
 @(private = "file")
-luaK_float :: proc(fs: ^FuncState, reg: int, f: Number) {
+code_float :: proc(fs: ^FuncState, reg: int, f: Number) {
 	fi, isint := float_to_integer(f, .Eq)
 	if isint && fitsBx(fi) {
 		codeAsBx(fs, .LOADF, reg, int(fi))
 	} else {
-		luaK_codek(fs, reg, luaK_numberK(fs, f))
+		code_codek(fs, reg, code_numberK(fs, f))
 	}
 }
 
 // Emit the "check global not nil" guard after loading a global into a register.
 // Reference `luaK_codecheckglobal`.
-luaK_codecheckglobal :: proc(fs: ^FuncState, var: ^Expdesc, k: int, line: int) {
+code_codecheckglobal :: proc(fs: ^FuncState, var: ^Expdesc, k: int, line: int) {
 	k := k
-	luaK_exp2anyreg(fs, var)
-	luaK_fixline(fs, line)
+	code_exp2anyreg(fs, var)
+	code_fixline(fs, line)
 	k = (k >= MAXARG_Bx) ? 0 : k + 1
-	luaK_codeABx(fs, .ERRNNIL, var.u.info, k)
-	luaK_fixline(fs, line)
+	code_codeABx(fs, .ERRNNIL, var.u.info, k)
+	code_fixline(fs, line)
 	freeexp(fs, var)
 }
 
@@ -737,15 +737,15 @@ const2exp :: proc "contextless" (v: ^TValue, e: ^Expdesc) {
 
 // Fix a multi-result expression (call or vararg) to yield exactly 'nresults'.
 // Reference `luaK_setreturns`.
-luaK_setreturns :: proc(fs: ^FuncState, e: ^Expdesc, nresults: int) {
+code_setreturns :: proc(fs: ^FuncState, e: ^Expdesc, nresults: int) {
 	pc := getinstruction(fs, e)
-	luaY_checklimit(fs, nresults + 1, MAXARG_C, "multiple results")
+	parse_checklimit(fs, nresults + 1, MAXARG_C, "multiple results")
 	if e.k == .VCALL {
 		setarg_C(pc, nresults + 1)
 	} else { 	// VVARARG
 		setarg_C(pc, nresults + 1)
 		setarg_A(pc, fs.freereg)
-		luaK_reserveregs(fs, 1)
+		code_reserveregs(fs, 1)
 	}
 }
 
@@ -761,7 +761,7 @@ str2K :: proc(fs: ^FuncState, e: ^Expdesc) -> int {
 // Fix a multi-result expression to a single result. Calls become VNONRELOC (their
 // result is fixed in the call's base register); varargs become VRELOC. Reference
 // `luaK_setoneret`.
-luaK_setoneret :: proc(fs: ^FuncState, e: ^Expdesc) {
+code_setoneret :: proc(fs: ^FuncState, e: ^Expdesc) {
 	if e.k == .VCALL { 	// open function call -> already returns 1 value
 		e.k = .VNONRELOC
 		e.u.info = getarg_A(getinstruction(fs, e)^)
@@ -773,48 +773,48 @@ luaK_setoneret :: proc(fs: ^FuncState, e: ^Expdesc) {
 
 // Reinterpret a vararg *parameter* as a regular local variable (forcing the
 // function to keep a real vararg table). Reference `luaK_vapar2local`.
-luaK_vapar2local :: proc(fs: ^FuncState, var: ^Expdesc) {
+code_vapar2local :: proc(fs: ^FuncState, var: ^Expdesc) {
 	needvatab(fs.f)
 	var.k = .VLOCAL
 }
 
 // Ensure 'e' is not a variable (nor a <const>): resolve locals/upvalues/indexed
 // accesses into concrete register loads. Reference `luaK_dischargevars`.
-luaK_dischargevars :: proc(fs: ^FuncState, e: ^Expdesc) {
+code_dischargevars :: proc(fs: ^FuncState, e: ^Expdesc) {
 	#partial switch e.k {
 	case .VCONST:
 		const2exp(const2val(fs, e), e)
 	case .VVARGVAR:
-		luaK_vapar2local(fs, e) // becomes VLOCAL, then fall through
+		code_vapar2local(fs, e) // becomes VLOCAL, then fall through
 		fallthrough
 	case .VLOCAL: // already in a register
 		temp := e.u.var.ridx
 		e.u.info = int(temp) // (copy first; the union members overlap)
 		e.k = .VNONRELOC
 	case .VUPVAL:
-		e.u.info = luaK_codeABC(fs, .GETUPVAL, 0, e.u.info, 0)
+		e.u.info = code_codeABC(fs, .GETUPVAL, 0, e.u.info, 0)
 		e.k = .VRELOC
 	case .VINDEXUP:
-		e.u.info = luaK_codeABC(fs, .GETTABUP, 0, int(e.u.ind.t), int(e.u.ind.idx))
+		e.u.info = code_codeABC(fs, .GETTABUP, 0, int(e.u.ind.t), int(e.u.ind.idx))
 		e.k = .VRELOC
 	case .VINDEXI:
 		freereg(fs, int(e.u.ind.t))
-		e.u.info = luaK_codeABC(fs, .GETI, 0, int(e.u.ind.t), int(e.u.ind.idx))
+		e.u.info = code_codeABC(fs, .GETI, 0, int(e.u.ind.t), int(e.u.ind.idx))
 		e.k = .VRELOC
 	case .VINDEXSTR:
 		freereg(fs, int(e.u.ind.t))
-		e.u.info = luaK_codeABC(fs, .GETFIELD, 0, int(e.u.ind.t), int(e.u.ind.idx))
+		e.u.info = code_codeABC(fs, .GETFIELD, 0, int(e.u.ind.t), int(e.u.ind.idx))
 		e.k = .VRELOC
 	case .VINDEXED:
 		freeregs(fs, int(e.u.ind.t), int(e.u.ind.idx))
-		e.u.info = luaK_codeABC(fs, .GETTABLE, 0, int(e.u.ind.t), int(e.u.ind.idx))
+		e.u.info = code_codeABC(fs, .GETTABLE, 0, int(e.u.ind.t), int(e.u.ind.idx))
 		e.k = .VRELOC
 	case .VVARGIND:
 		freeregs(fs, int(e.u.ind.t), int(e.u.ind.idx))
-		e.u.info = luaK_codeABC(fs, .GETVARG, 0, int(e.u.ind.t), int(e.u.ind.idx))
+		e.u.info = code_codeABC(fs, .GETVARG, 0, int(e.u.ind.t), int(e.u.ind.idx))
 		e.k = .VRELOC
 	case .VVARARG, .VCALL:
-		luaK_setoneret(fs, e)
+		code_setoneret(fs, e)
 	case:
 		// one value already available somewhere; nothing to do
 	}
@@ -824,29 +824,29 @@ luaK_dischargevars :: proc(fs: ^FuncState, e: ^Expdesc) {
 // `discharge2reg`.
 @(private = "file")
 discharge2reg :: proc(fs: ^FuncState, e: ^Expdesc, reg: int) {
-	luaK_dischargevars(fs, e)
+	code_dischargevars(fs, e)
 	#partial switch e.k {
 	case .VNIL:
-		luaK_nil(fs, reg, 1)
+		code_nil(fs, reg, 1)
 	case .VFALSE:
-		luaK_codeABC(fs, .LOADFALSE, reg, 0, 0)
+		code_codeABC(fs, .LOADFALSE, reg, 0, 0)
 	case .VTRUE:
-		luaK_codeABC(fs, .LOADTRUE, reg, 0, 0)
+		code_codeABC(fs, .LOADTRUE, reg, 0, 0)
 	case .VKSTR:
 		str2K(fs, e)
 		fallthrough
 	case .VK:
-		luaK_codek(fs, reg, e.u.info)
+		code_codek(fs, reg, e.u.info)
 	case .VKFLT:
-		luaK_float(fs, reg, e.u.nval)
+		code_float(fs, reg, e.u.nval)
 	case .VKINT:
-		luaK_int(fs, reg, e.u.ival)
+		code_int(fs, reg, e.u.ival)
 	case .VRELOC:
 		pc := getinstruction(fs, e)
 		setarg_A(pc, reg) // instruction will put its result in 'reg'
 	case .VNONRELOC:
 		if reg != e.u.info {
-			luaK_codeABC(fs, .MOVE, reg, e.u.info, 0)
+			code_codeABC(fs, .MOVE, reg, e.u.info, 0)
 		}
 	case:
 		// VJMP: nothing to place here
@@ -861,7 +861,7 @@ discharge2reg :: proc(fs: ^FuncState, e: ^Expdesc, reg: int) {
 @(private = "file")
 discharge2anyreg :: proc(fs: ^FuncState, e: ^Expdesc) {
 	if e.k != .VNONRELOC {
-		luaK_reserveregs(fs, 1)
+		code_reserveregs(fs, 1)
 		discharge2reg(fs, e, fs.freereg - 1)
 	}
 }
@@ -869,8 +869,8 @@ discharge2anyreg :: proc(fs: ^FuncState, e: ^Expdesc) {
 // Emit a boolean-load that may be a jump target. Reference `code_loadbool`.
 @(private = "file")
 code_loadbool :: proc(fs: ^FuncState, A: int, op: Op_Code) -> int {
-	luaK_getlabel(fs) // these may be jump targets
-	return luaK_codeABC(fs, op, A, 0, 0)
+	code_getlabel(fs) // these may be jump targets
+	return code_codeABC(fs, op, A, 0, 0)
 }
 
 // Does 'list' contain a test that does not produce a (correct) value? Reference
@@ -895,18 +895,18 @@ need_value :: proc(fs: ^FuncState, list: int) -> bool {
 exp2reg :: proc(fs: ^FuncState, e: ^Expdesc, reg: int) {
 	discharge2reg(fs, e, reg)
 	if e.k == .VJMP { 	// expression itself is a test?
-		luaK_concat(fs, &e.t, e.u.info) // add this jump to the "true" list
+		code_concat(fs, &e.t, e.u.info) // add this jump to the "true" list
 	}
 	if hasjumps(e) {
 		p_f := NO_JUMP // position of an eventual LOAD false
 		p_t := NO_JUMP // position of an eventual LOAD true
 		if need_value(fs, e.t) || need_value(fs, e.f) {
-			fj := (e.k == .VJMP) ? NO_JUMP : luaK_jump(fs)
+			fj := (e.k == .VJMP) ? NO_JUMP : code_jump(fs)
 			p_f = code_loadbool(fs, reg, .LFALSESKIP) // load false, skip next
 			p_t = code_loadbool(fs, reg, .LOADTRUE)
-			luaK_patchtohere(fs, fj) // jump around the booleans
+			code_patchtohere(fs, fj) // jump around the booleans
 		}
-		final := luaK_getlabel(fs) // position after the whole expression
+		final := code_getlabel(fs) // position after the whole expression
 		patchlistaux(fs, e.f, final, reg, p_f)
 		patchlistaux(fs, e.t, final, reg, p_t)
 	}
@@ -917,53 +917,53 @@ exp2reg :: proc(fs: ^FuncState, e: ^Expdesc, reg: int) {
 }
 
 // Land 'e' in the next available register. Reference `luaK_exp2nextreg`.
-luaK_exp2nextreg :: proc(fs: ^FuncState, e: ^Expdesc) {
-	luaK_dischargevars(fs, e)
+code_exp2nextreg :: proc(fs: ^FuncState, e: ^Expdesc) {
+	code_dischargevars(fs, e)
 	freeexp(fs, e)
-	luaK_reserveregs(fs, 1)
+	code_reserveregs(fs, 1)
 	exp2reg(fs, e, fs.freereg - 1)
 }
 
 // Land 'e' in some register and return it. Reuses an existing register when it can
 // (and it isn't a jump-carrying local). Reference `luaK_exp2anyreg`.
-luaK_exp2anyreg :: proc(fs: ^FuncState, e: ^Expdesc) -> int {
-	luaK_dischargevars(fs, e)
+code_exp2anyreg :: proc(fs: ^FuncState, e: ^Expdesc) -> int {
+	code_dischargevars(fs, e)
 	if e.k == .VNONRELOC {
 		if !hasjumps(e) {
 			return e.u.info // already in a register
 		}
-		if e.u.info >= luaY_nvarstack(fs) { 	// register is a temporary, not a local
+		if e.u.info >= parse_nvarstack(fs) { 	// register is a temporary, not a local
 			exp2reg(fs, e, e.u.info)
 			return e.u.info
 		}
 		// else: has jumps and lives in a local's register -> use a fresh one
 	}
-	luaK_exp2nextreg(fs, e)
+	code_exp2nextreg(fs, e)
 	return e.u.info
 }
 
 // Ensure 'e' is in a register, an upvalue, or is the vararg parameter. Reference
 // `luaK_exp2anyregup`.
-luaK_exp2anyregup :: proc(fs: ^FuncState, e: ^Expdesc) {
+code_exp2anyregup :: proc(fs: ^FuncState, e: ^Expdesc) {
 	if (e.k != .VUPVAL && e.k != .VVARGVAR) || hasjumps(e) {
-		luaK_exp2anyreg(fs, e)
+		code_exp2anyreg(fs, e)
 	}
 }
 
 // Ensure 'e' is either in a register or is a constant value. Reference
 // `luaK_exp2val`.
-luaK_exp2val :: proc(fs: ^FuncState, e: ^Expdesc) {
+code_exp2val :: proc(fs: ^FuncState, e: ^Expdesc) {
 	if e.k == .VJMP || hasjumps(e) {
-		luaK_exp2anyreg(fs, e)
+		code_exp2anyreg(fs, e)
 	} else {
-		luaK_dischargevars(fs, e)
+		code_dischargevars(fs, e)
 	}
 }
 
 // Try to make 'e' a K expression whose index fits an R/K operand. Reference
 // `luaK_exp2K`.
 @(private = "file")
-luaK_exp2K :: proc(fs: ^FuncState, e: ^Expdesc) -> bool {
+code_exp2K :: proc(fs: ^FuncState, e: ^Expdesc) -> bool {
 	if !hasjumps(e) {
 		info: int
 		#partial switch e.k {
@@ -974,9 +974,9 @@ luaK_exp2K :: proc(fs: ^FuncState, e: ^Expdesc) -> bool {
 		case .VNIL:
 			info = nilK(fs)
 		case .VKINT:
-			info = luaK_intK(fs, e.u.ival)
+			info = code_intK(fs, e.u.ival)
 		case .VKFLT:
-			info = luaK_numberK(fs, e.u.nval)
+			info = code_numberK(fs, e.u.nval)
 		case .VKSTR:
 			info = stringK(fs, e.u.strval)
 		case .VK:
@@ -997,10 +997,10 @@ luaK_exp2K :: proc(fs: ^FuncState, e: ^Expdesc) -> bool {
 // `exp2RK`.
 @(private = "file")
 exp2RK :: proc(fs: ^FuncState, e: ^Expdesc) -> bool {
-	if luaK_exp2K(fs, e) {
+	if code_exp2K(fs, e) {
 		return true
 	}
-	luaK_exp2anyreg(fs, e)
+	code_exp2anyreg(fs, e)
 	return false
 }
 
@@ -1009,20 +1009,20 @@ exp2RK :: proc(fs: ^FuncState, e: ^Expdesc) -> bool {
 @(private = "file")
 codeABRK :: proc(fs: ^FuncState, o: Op_Code, A, B: int, ec: ^Expdesc) {
 	k := exp2RK(fs, ec)
-	luaK_codeABCk(fs, o, A, B, ec.u.info, k ? 1 : 0)
+	code_codeABCk(fs, o, A, B, ec.u.info, k ? 1 : 0)
 }
 
 // Store the value of expression 'ex' into variable 'var'. Reference
 // `luaK_storevar`.
-luaK_storevar :: proc(fs: ^FuncState, var: ^Expdesc, ex: ^Expdesc) {
+code_storevar :: proc(fs: ^FuncState, var: ^Expdesc, ex: ^Expdesc) {
 	#partial switch var.k {
 	case .VLOCAL:
 		freeexp(fs, ex)
 		exp2reg(fs, ex, int(var.u.var.ridx)) // compute 'ex' into its home register
 		return
 	case .VUPVAL:
-		e := luaK_exp2anyreg(fs, ex)
-		luaK_codeABC(fs, .SETUPVAL, e, var.u.info, 0)
+		e := code_exp2anyreg(fs, ex)
+		code_codeABC(fs, .SETUPVAL, e, var.u.info, 0)
 	case .VINDEXUP:
 		codeABRK(fs, .SETTABUP, int(var.u.ind.t), int(var.u.ind.idx), ex)
 	case .VINDEXI:
@@ -1070,9 +1070,9 @@ jumponcond :: proc(fs: ^FuncState, e: ^Expdesc, cond: bool) -> int {
 
 // Emit code that continues when 'e' is true and jumps otherwise. Reference
 // `luaK_goiftrue`.
-luaK_goiftrue :: proc(fs: ^FuncState, e: ^Expdesc) {
+code_goiftrue :: proc(fs: ^FuncState, e: ^Expdesc) {
 	pc: int
-	luaK_dischargevars(fs, e)
+	code_dischargevars(fs, e)
 	#partial switch e.k {
 	case .VJMP:
 		negatecondition(fs, e) // jump when it is false
@@ -1082,17 +1082,17 @@ luaK_goiftrue :: proc(fs: ^FuncState, e: ^Expdesc) {
 	case:
 		pc = jumponcond(fs, e, false) // jump when false
 	}
-	luaK_concat(fs, &e.f, pc) // add new jump to the "false" list
-	luaK_patchtohere(fs, e.t) // "true" list falls through to here
+	code_concat(fs, &e.f, pc) // add new jump to the "false" list
+	code_patchtohere(fs, e.t) // "true" list falls through to here
 	e.t = NO_JUMP
 }
 
 // Emit code that continues when 'e' is false and jumps otherwise. Reference
 // `luaK_goiffalse`.
 @(private = "file")
-luaK_goiffalse :: proc(fs: ^FuncState, e: ^Expdesc) {
+code_goiffalse :: proc(fs: ^FuncState, e: ^Expdesc) {
 	pc: int
-	luaK_dischargevars(fs, e)
+	code_dischargevars(fs, e)
 	#partial switch e.k {
 	case .VJMP:
 		pc = e.u.info // already jumps if true
@@ -1101,8 +1101,8 @@ luaK_goiffalse :: proc(fs: ^FuncState, e: ^Expdesc) {
 	case:
 		pc = jumponcond(fs, e, true) // jump if true
 	}
-	luaK_concat(fs, &e.t, pc) // add new jump to the "true" list
-	luaK_patchtohere(fs, e.f) // "false" list falls through to here
+	code_concat(fs, &e.t, pc) // add new jump to the "true" list
+	code_patchtohere(fs, e.f) // "false" list falls through to here
 	e.f = NO_JUMP
 }
 
@@ -1119,7 +1119,7 @@ codenot :: proc(fs: ^FuncState, e: ^Expdesc) {
 	case .VRELOC, .VNONRELOC:
 		discharge2anyreg(fs, e)
 		freeexp(fs, e)
-		e.u.info = luaK_codeABC(fs, .NOT, 0, e.u.info, 0)
+		e.u.info = code_codeABC(fs, .NOT, 0, e.u.info, 0)
 		e.k = .VRELOC
 	case:
 		// cannot happen
@@ -1191,20 +1191,20 @@ isSCnumber :: proc(e: ^Expdesc, pi: ^int, isfloat: ^int) -> bool {
 
 // Emit SELF (or a MOVE+GETTABLE equivalent) turning 'e' into `e.key(e, ...)`.
 // Reference `luaK_self`.
-luaK_self :: proc(fs: ^FuncState, e: ^Expdesc, key: ^Expdesc) {
-	luaK_exp2anyreg(fs, e)
+code_self :: proc(fs: ^FuncState, e: ^Expdesc, key: ^Expdesc) {
+	code_exp2anyreg(fs, e)
 	ereg := e.u.info // register holding the receiver
 	freeexp(fs, e)
 	base := fs.freereg
 	e.u.info = base
 	e.k = .VNONRELOC // self expression has a fixed register
-	luaK_reserveregs(fs, 2) // method + self produced by OP_SELF
-	if strisshr(key.u.strval) && luaK_exp2K(fs, key) {
-		luaK_codeABCk(fs, .SELF, base, ereg, key.u.info, 0)
+	code_reserveregs(fs, 2) // method + self produced by OP_SELF
+	if strisshr(key.u.strval) && code_exp2K(fs, key) {
+		code_codeABCk(fs, .SELF, base, ereg, key.u.info, 0)
 	} else { 	// method name not a short K string: fall back to move+gettable
-		luaK_exp2anyreg(fs, key)
-		luaK_codeABC(fs, .MOVE, base + 1, ereg, 0)
-		luaK_codeABC(fs, .GETTABLE, base, ereg, key.u.info)
+		code_exp2anyreg(fs, key)
+		code_codeABC(fs, .MOVE, base + 1, ereg, 0)
+		code_codeABC(fs, .GETTABLE, base, ereg, key.u.info)
 	}
 	freeexp(fs, key)
 }
@@ -1218,20 +1218,20 @@ fillidxk :: proc "contextless" (t: ^Expdesc, idx: int, k: Expkind) {
 
 // Build expression `t[k]`. 't' must already be in a register or upvalue.
 // Reference `luaK_indexed`.
-luaK_indexed :: proc(fs: ^FuncState, t: ^Expdesc, k: ^Expdesc) {
+code_indexed :: proc(fs: ^FuncState, t: ^Expdesc, k: ^Expdesc) {
 	keystr := -1
 	if k.k == .VKSTR {
 		keystr = str2K(fs, k)
 	}
 	if t.k == .VUPVAL && !isKstr(fs, k) { 	// upvalue indexed by non-Kstr?
-		luaK_exp2anyreg(fs, t) // must put it in a register first
+		code_exp2anyreg(fs, t) // must put it in a register first
 	}
 	if t.k == .VUPVAL {
 		temp := u8(t.u.info) // upvalue index (copy first; union overlaps)
 		t.u.ind.t = temp
 		fillidxk(t, k.u.info, .VINDEXUP)
 	} else if t.k == .VVARGVAR { 	// indexing the vararg parameter?
-		kreg := luaK_exp2anyreg(fs, k)
+		kreg := code_exp2anyreg(fs, k)
 		vreg := u8(t.u.var.ridx) // register holding the vararg parameter
 		t.u.ind.t = vreg
 		fillidxk(t, kreg, .VVARGIND)
@@ -1242,7 +1242,7 @@ luaK_indexed :: proc(fs: ^FuncState, t: ^Expdesc, k: ^Expdesc) {
 		} else if isCint(k) {
 			fillidxk(t, int(k.u.ival), .VINDEXI)
 		} else {
-			fillidxk(t, luaK_exp2anyreg(fs, k), .VINDEXED)
+			fillidxk(t, code_exp2anyreg(fs, k), .VINDEXED)
 		}
 	}
 	t.u.ind.keystr = keystr
@@ -1321,11 +1321,11 @@ binopr2TM :: #force_inline proc "contextless" (opr: BinOpr) -> int {
 // `codeunexpval`.
 @(private = "file")
 codeunexpval :: proc(fs: ^FuncState, op: Op_Code, e: ^Expdesc, line: int) {
-	r := luaK_exp2anyreg(fs, e) // operates only on registers
+	r := code_exp2anyreg(fs, e) // operates only on registers
 	freeexp(fs, e)
-	e.u.info = luaK_codeABC(fs, op, 0, r, 0)
+	e.u.info = code_codeABC(fs, op, 0, r, 0)
 	e.k = .VRELOC
-	luaK_fixline(fs, line)
+	code_fixline(fs, line)
 }
 
 // Emit the instruction pair (op + metamethod trailer) for a value-producing
@@ -1341,21 +1341,21 @@ finishbinexpval :: proc(
 	mmop: Op_Code,
 	event: int,
 ) {
-	v1 := luaK_exp2anyreg(fs, e1)
-	pc := luaK_codeABCk(fs, op, 0, v1, v2, 0)
+	v1 := code_exp2anyreg(fs, e1)
+	pc := code_codeABCk(fs, op, 0, v1, v2, 0)
 	freeexps(fs, e1, e2)
 	e1.u.info = pc
 	e1.k = .VRELOC
-	luaK_fixline(fs, line)
-	luaK_codeABCk(fs, mmop, v1, v2, event, flip) // metamethod fallback
-	luaK_fixline(fs, line)
+	code_fixline(fs, line)
+	code_codeABCk(fs, mmop, v1, v2, event, flip) // metamethod fallback
+	code_fixline(fs, line)
 }
 
 // Binary op over two registers. Reference `codebinexpval`.
 @(private = "file")
 codebinexpval :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc, line: int) {
 	op := binopr2op(opr, .OPR_ADD, .ADD)
-	v2 := luaK_exp2anyreg(fs, e2) // ensure 'e2' is in a register
+	v2 := code_exp2anyreg(fs, e2) // ensure 'e2' is in a register
 	finishbinexpval(fs, e1, e2, op, v2, 0, line, .MMBIN, binopr2TM(opr))
 }
 
@@ -1413,7 +1413,7 @@ codebinNoK :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc, flip: int, lin
 // Arithmetic op; prefer a K 2nd operand when it fits. Reference `codearith`.
 @(private = "file")
 codearith :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc, flip: int, line: int) {
-	if tonumeral(e2, nil) && luaK_exp2K(fs, e2) { 	// K operand?
+	if tonumeral(e2, nil) && code_exp2K(fs, e2) { 	// K operand?
 		codebinK(fs, opr, e1, e2, flip, line)
 	} else {
 		codebinNoK(fs, opr, e1, e2, flip, line)
@@ -1445,7 +1445,7 @@ codebitwise :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc, line: int) {
 		swapexps(e1, e2) // 'e2' becomes the constant operand
 		flip = 1
 	}
-	if e2.k == .VKINT && luaK_exp2K(fs, e2) {
+	if e2.k == .VKINT && code_exp2K(fs, e2) {
 		codebinK(fs, opr, e1, e2, flip, line)
 	} else {
 		codebinNoK(fs, opr, e1, e2, flip, line)
@@ -1460,17 +1460,17 @@ codeorder :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc) {
 	isfloat := 0
 	op: Op_Code
 	if isSCnumber(e2, &im, &isfloat) {
-		r1 = luaK_exp2anyreg(fs, e1)
+		r1 = code_exp2anyreg(fs, e1)
 		r2 = im
 		op = binopr2op(opr, .OPR_LT, .LTI)
 	} else if isSCnumber(e1, &im, &isfloat) {
 		// (A < B) becomes (B > A); (A <= B) becomes (B >= A)
-		r1 = luaK_exp2anyreg(fs, e2)
+		r1 = code_exp2anyreg(fs, e2)
 		r2 = im
 		op = binopr2op(opr, .OPR_LT, .GTI)
 	} else { 	// two registers
-		r1 = luaK_exp2anyreg(fs, e1)
-		r2 = luaK_exp2anyreg(fs, e2)
+		r1 = code_exp2anyreg(fs, e1)
+		r2 = code_exp2anyreg(fs, e2)
 		op = binopr2op(opr, .OPR_LT, .LT)
 	}
 	freeexps(fs, e1, e2)
@@ -1488,7 +1488,7 @@ codeeq :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc) {
 	if e1.k != .VNONRELOC {
 		swapexps(e1, e2)
 	}
-	r1 = luaK_exp2anyreg(fs, e1) // 1st expression must be in a register
+	r1 = code_exp2anyreg(fs, e1) // 1st expression must be in a register
 	if isSCnumber(e2, &im, &isfloat) {
 		op = .EQI
 		r2 = im
@@ -1497,7 +1497,7 @@ codeeq :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc) {
 		r2 = e2.u.info
 	} else {
 		op = .EQ
-		r2 = luaK_exp2anyreg(fs, e2)
+		r2 = code_exp2anyreg(fs, e2)
 	}
 	freeexps(fs, e1, e2)
 	e1.u.info = condjump(fs, op, r1, r2, isfloat, (opr == .OPR_EQ) ? 1 : 0)
@@ -1505,14 +1505,14 @@ codeeq :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc) {
 }
 
 // Apply prefix operator 'opr' to 'e'. Reference `luaK_prefix`.
-luaK_prefix :: proc(fs: ^FuncState, opr: UnOpr, e: ^Expdesc, line: int) {
+code_prefix :: proc(fs: ^FuncState, opr: UnOpr, e: ^Expdesc, line: int) {
 	// A fake 2nd operand (integer 0) so unary folding can reuse `constfolding`.
 	ef := Expdesc {
 		k = .VKINT,
 		t = NO_JUMP,
 		f = NO_JUMP,
 	}
-	luaK_dischargevars(fs, e)
+	code_dischargevars(fs, e)
 	#partial switch opr {
 	case .OPR_MINUS, .OPR_BNOT:
 		if constfolding(fs, int(opr) + int(Arith_Op.Unm), e, &ef) {
@@ -1530,20 +1530,20 @@ luaK_prefix :: proc(fs: ^FuncState, opr: UnOpr, e: ^Expdesc, line: int) {
 
 // Process the 1st operand of binary operator 'op' before the 2nd is read.
 // Reference `luaK_infix`.
-luaK_infix :: proc(fs: ^FuncState, op: BinOpr, v: ^Expdesc) {
-	luaK_dischargevars(fs, v)
+code_infix :: proc(fs: ^FuncState, op: BinOpr, v: ^Expdesc) {
+	code_dischargevars(fs, v)
 	#partial switch op {
 	case .OPR_AND:
-		luaK_goiftrue(fs, v) // go ahead only if 'v' is true
+		code_goiftrue(fs, v) // go ahead only if 'v' is true
 	case .OPR_OR:
-		luaK_goiffalse(fs, v) // go ahead only if 'v' is false
+		code_goiffalse(fs, v) // go ahead only if 'v' is false
 	case .OPR_CONCAT:
-		luaK_exp2nextreg(fs, v) // operand must be on the stack
+		code_exp2nextreg(fs, v) // operand must be on the stack
 	case .OPR_ADD, .OPR_SUB, .OPR_MUL, .OPR_DIV, .OPR_IDIV,
 	     .OPR_MOD, .OPR_POW, .OPR_BAND, .OPR_BOR, .OPR_BXOR,
 	     .OPR_SHL, .OPR_SHR:
 		if !tonumeral(v, nil) {
-			luaK_exp2anyreg(fs, v)
+			code_exp2anyreg(fs, v)
 		}
 		// else keep the numeral: it may fold or become an immediate/K operand
 	case .OPR_EQ, .OPR_NE:
@@ -1553,7 +1553,7 @@ luaK_infix :: proc(fs: ^FuncState, op: BinOpr, v: ^Expdesc) {
 	case .OPR_LT, .OPR_LE, .OPR_GT, .OPR_GE:
 		dummy, dummy2: int
 		if !isSCnumber(v, &dummy, &dummy2) {
-			luaK_exp2anyreg(fs, v)
+			code_exp2anyreg(fs, v)
 		}
 	case:
 		// cannot happen
@@ -1571,29 +1571,29 @@ codeconcat :: proc(fs: ^FuncState, e1, e2: ^Expdesc, line: int) {
 		setarg_A(ie2, e1.u.info) // correct the first element ('e1')
 		setarg_B(ie2, n + 1) // one more element to concatenate
 	} else { 	// 'e2' is not a concatenation: emit a fresh CONCAT of two
-		luaK_codeABC(fs, .CONCAT, e1.u.info, 2, 0)
+		code_codeABC(fs, .CONCAT, e1.u.info, 2, 0)
 		freeexp(fs, e2)
-		luaK_fixline(fs, line)
+		code_fixline(fs, line)
 	}
 }
 
 // Finalize a binary operation after its 2nd operand is parsed. Reference
 // `luaK_posfix`.
-luaK_posfix :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc, line: int) {
+code_posfix :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc, line: int) {
 	opr := opr
-	luaK_dischargevars(fs, e2)
+	code_dischargevars(fs, e2)
 	if foldbinop(opr) && constfolding(fs, int(opr) + int(Arith_Op.Add), e1, e2) {
 		return // handled by folding
 	}
 	#partial switch opr {
 	case .OPR_AND:
-		luaK_concat(fs, &e2.f, e1.f) // list closed by luaK_infix
+		code_concat(fs, &e2.f, e1.f) // list closed by luaK_infix
 		e1^ = e2^
 	case .OPR_OR:
-		luaK_concat(fs, &e2.t, e1.t) // list closed by luaK_infix
+		code_concat(fs, &e2.t, e1.t) // list closed by luaK_infix
 		e1^ = e2^
 	case .OPR_CONCAT:
-		luaK_exp2nextreg(fs, e2)
+		code_exp2nextreg(fs, e2)
 		codeconcat(fs, e1, e2, line)
 	case .OPR_ADD, .OPR_MUL:
 		codecommutative(fs, opr, e1, e2, line)
@@ -1641,14 +1641,14 @@ luaK_posfix :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc, line: int) {
 
 // Replace the line associated with the current position. Reference
 // `luaK_fixline`.
-luaK_fixline :: proc(fs: ^FuncState, line: int) {
+code_fixline :: proc(fs: ^FuncState, line: int) {
 	removelastlineinfo(fs)
 	savelineinfo(fs, fs.f, line)
 }
 
 // Patch a NEWTABLE (plus its EXTRAARG) with the array/hash sizes. Reference
 // `luaK_settablesize`.
-luaK_settablesize :: proc(fs: ^FuncState, pc: int, ra: int, asize: int, hsize: int) {
+code_settablesize :: proc(fs: ^FuncState, pc: int, ra: int, asize: int, hsize: int) {
 	hsize := hsize
 	inst := &fs.f.code[pc]
 	extra := asize / (MAXARG_vC + 1) // high bits of the array size
@@ -1661,18 +1661,18 @@ luaK_settablesize :: proc(fs: ^FuncState, pc: int, ra: int, asize: int, hsize: i
 
 // Emit a SETLIST storing 'tostore' values (or up to the stack top for
 // LUA_MULTRET) into the table in register 'base'. Reference `luaK_setlist`.
-luaK_setlist :: proc(fs: ^FuncState, base: int, nelems: int, tostore: int) {
+code_setlist :: proc(fs: ^FuncState, base: int, nelems: int, tostore: int) {
 	tostore := tostore
 	nelems := nelems
-	if tostore == LUA_MULTRET {
+	if tostore == MULTRET {
 		tostore = 0
 	}
 	if nelems <= MAXARG_vC {
-		luaK_codevABCk(fs, .SETLIST, base, tostore, nelems, 0)
+		code_codevABCk(fs, .SETLIST, base, tostore, nelems, 0)
 	} else {
 		extra := nelems / (MAXARG_vC + 1)
 		nelems %= (MAXARG_vC + 1)
-		luaK_codevABCk(fs, .SETLIST, base, tostore, nelems, 1)
+		code_codevABCk(fs, .SETLIST, base, tostore, nelems, 1)
 		codeextraarg(fs, extra)
 	}
 	fs.freereg = base + 1 // free the registers that held the list values
@@ -1696,7 +1696,7 @@ finaltarget :: proc(code: [^]Instruction, i: int) -> int {
 // Final peephole/cleanup pass over the finished code: fix returns/tailcalls for
 // closing and hidden-vararg needs, rewrite vararg indexing when a vararg table is
 // used, and collapse jumps-to-jumps. Reference `luaK_finish`.
-luaK_finish :: proc(fs: ^FuncState) {
+code_finish :: proc(fs: ^FuncState) {
 	p := fs.f
 	if (p.flag & PF_VATAB) != 0 { 	// uses a vararg table?
 		p.flag &= ~u8(PF_VAHID) // then it won't use hidden args

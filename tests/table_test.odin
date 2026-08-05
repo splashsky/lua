@@ -18,10 +18,10 @@ import "core:testing"
 import lua "luao:lua"
 
 // Store an integer value under integer key `k`.
-set_int_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, k: lua.Integer, v: lua.Integer) {
+set_int_key :: proc(L: ^lua.State, tbl: ^lua.Table, k: lua.Integer, v: lua.Integer) {
 	val: lua.TValue
 	lua.set_int(&val, v)
-	st := lua.luaH_setint(L, tbl, k, &val)
+	st := lua.table_setint(L, tbl, k, &val)
 	assert(st == .Ok)
 }
 
@@ -29,7 +29,7 @@ set_int_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, k: lua.Integer, v: lua.I
 // real (non-empty) value.
 get_int_key :: proc(tbl: ^lua.Table, k: lua.Integer) -> (lua.Integer, bool) {
 	res: lua.TValue
-	lua.luaH_getint(tbl, k, &res)
+	lua.table_getint(tbl, k, &res)
 	if lua.is_nil(&res) {
 		return 0, false
 	}
@@ -44,7 +44,7 @@ table_int_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	tbl := lua.luaH_new(L)
+	tbl := lua.table_new(L)
 	testing.expect(t, tbl != nil)
 
 	for i in lua.Integer(1) ..= 5 {
@@ -68,7 +68,7 @@ table_overwrite_replaces :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	tbl := lua.luaH_new(L)
+	tbl := lua.table_new(L)
 	set_int_key(L, tbl, 7, 111)
 	set_int_key(L, tbl, 7, 222)
 
@@ -84,17 +84,17 @@ table_string_key_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	tbl := lua.luaH_new(L)
-	key := lua.luaS_new(L, "answer")
+	tbl := lua.table_new(L)
+	key := lua.string_new(L, "answer")
 	val: lua.TValue
 	lua.set_int(&val, 42)
 	kv: lua.TValue
 	lua.set_gc(&kv, lua.obj2gco(key))
-	st := lua.luaH_set(L, tbl, &kv, &val)
+	st := lua.table_set(L, tbl, &kv, &val)
 	testing.expect(t, st == .Ok)
 
 	res: lua.TValue
-	lua.luaH_getstr(tbl, key, &res)
+	lua.table_getstr(tbl, key, &res)
 	testing.expect(t, lua.is_integer(&res), "string key must retrieve its value")
 	testing.expect_value(t, lua.int_value(&res), lua.Integer(42))
 }
@@ -107,11 +107,11 @@ table_length_border :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	tbl := lua.luaH_new(L)
+	tbl := lua.table_new(L)
 	for i in lua.Integer(1) ..= 10 {
 		set_int_key(L, tbl, i, i)
 	}
-	n := lua.luaH_getn(L, tbl)
+	n := lua.table_getn(L, tbl)
 	testing.expect_value(t, n, lua.Unsigned(10))
 }
 
@@ -124,7 +124,7 @@ table_next_visits_all :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	tbl := lua.luaH_new(L)
+	tbl := lua.table_new(L)
 	expected_sum := lua.Integer(0)
 	for i in lua.Integer(1) ..= 10 {
 		set_int_key(L, tbl, i, i)
@@ -137,7 +137,7 @@ table_next_visits_all :: proc(t: ^testing.T) {
 	out_val: lua.TValue
 	seen := 0
 	sum := lua.Integer(0)
-	for lua.luaH_next(L, tbl, &key, &out_key, &out_val) {
+	for lua.table_next(L, tbl, &key, &out_key, &out_val) {
 		seen += 1
 		testing.expect(t, lua.is_integer(&out_key), "keys were all integers")
 		sum += lua.int_value(&out_key)
@@ -157,7 +157,7 @@ table_bulk_insert_rehashes_losslessly :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	tbl := lua.luaH_new(L)
+	tbl := lua.table_new(L)
 	for i in lua.Integer(1) ..= 200 {
 		set_int_key(L, tbl, i, i * 3)
 	}
@@ -166,38 +166,38 @@ table_bulk_insert_rehashes_losslessly :: proc(t: ^testing.T) {
 		testing.expect(t, found, "every bulk key must survive rehashing")
 		testing.expect_value(t, v, i * 3)
 	}
-	testing.expect_value(t, lua.luaH_getn(L, tbl), lua.Unsigned(200))
+	testing.expect_value(t, lua.table_getn(L, tbl), lua.Unsigned(200))
 }
 
 // --- hash-part specific -----------------------------------------------------
 
 // Store integer value `v` under the string key `name`.
-set_str_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, name: string, v: lua.Integer) {
-	key := lua.luaS_new(L, name)
+set_str_key :: proc(L: ^lua.State, tbl: ^lua.Table, name: string, v: lua.Integer) {
+	key := lua.string_new(L, name)
 	kv: lua.TValue
 	lua.set_gc(&kv, lua.obj2gco(key))
 	val: lua.TValue
 	lua.set_int(&val, v)
-	st := lua.luaH_set(L, tbl, &kv, &val)
+	st := lua.table_set(L, tbl, &kv, &val)
 	assert(st == .Ok)
 }
 
 // Clear the string key `name` (Lua's `t[name] = nil`).
-clear_str_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, name: string) {
-	key := lua.luaS_new(L, name)
+clear_str_key :: proc(L: ^lua.State, tbl: ^lua.Table, name: string) {
+	key := lua.string_new(L, name)
 	kv: lua.TValue
 	lua.set_gc(&kv, lua.obj2gco(key))
 	val: lua.TValue
 	lua.set_nil(&val)
-	st := lua.luaH_set(L, tbl, &kv, &val)
+	st := lua.table_set(L, tbl, &kv, &val)
 	assert(st == .Ok)
 }
 
 // Read the string key `name`, returning (value, found).
-get_str_key :: proc(L: ^lua.Lua_State, tbl: ^lua.Table, name: string) -> (lua.Integer, bool) {
-	key := lua.luaS_new(L, name)
+get_str_key :: proc(L: ^lua.State, tbl: ^lua.Table, name: string) -> (lua.Integer, bool) {
+	key := lua.string_new(L, name)
 	res: lua.TValue
-	lua.luaH_getstr(tbl, key, &res)
+	lua.table_getstr(tbl, key, &res)
 	if lua.is_nil(&res) {
 		return 0, false
 	}
@@ -216,7 +216,7 @@ table_hash_bulk_insert_lossless :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	tbl := lua.luaH_new(L)
+	tbl := lua.table_new(L)
 	testing.expect(t, tbl != nil)
 
 	N :: 500
@@ -242,7 +242,7 @@ table_hash_bulk_insert_lossless :: proc(t: ^testing.T) {
 	out_key, out_val: lua.TValue
 	seen := 0
 	sum := lua.Integer(0)
-	for lua.luaH_next(L, tbl, &key, &out_key, &out_val) {
+	for lua.table_next(L, tbl, &key, &out_key, &out_val) {
 		seen += 1
 		sum += lua.int_value(&out_val)
 		lua.set_obj(&key, &out_key)
@@ -267,7 +267,7 @@ table_hash_delete_reinsert_stays_consistent :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	tbl := lua.luaH_new(L)
+	tbl := lua.table_new(L)
 	N :: 300
 	for i in 0 ..< N {
 		set_str_key(L, tbl, fmt.tprintf("k%d", i), lua.Integer(i))
@@ -314,7 +314,7 @@ table_hash_delete_reinsert_stays_consistent :: proc(t: ^testing.T) {
 	lua.set_nil(&key)
 	out_key, out_val: lua.TValue
 	seen := 0
-	for lua.luaH_next(L, tbl, &key, &out_key, &out_val) {
+	for lua.table_next(L, tbl, &key, &out_key, &out_val) {
 		seen += 1
 		lua.set_obj(&key, &out_key)
 	}

@@ -33,8 +33,8 @@ import aux "luao:stdlib"
 import stream "luao:stream"
 
 // Default program name and default output file. Reference PROGNAME / OUTPUT.
-LUAC_PROGNAME :: "luac"
-LUAC_OUTPUT :: "luac.out"
+COMPILER_PROGNAME :: "luac"
+COMPILER_OUTPUT :: "luac.out"
 
 // --------------------------------------------------------------------------------
 // Option state, mirroring the reference file-static flags.
@@ -43,9 +43,9 @@ LUAC_OUTPUT :: "luac.out"
 listing := 0 // list bytecodes? (-l once = brief, twice = full)
 dumping := true // dump bytecodes? (cleared by -p)
 stripping := false // strip debug information? (-s)
-output := LUAC_OUTPUT // output file name (-o)
+output := COMPILER_OUTPUT // output file name (-o)
 output_to_stdout := false // true when the output is '-' (stdout)
-progname := LUAC_PROGNAME // actual program name (argv[0])
+progname := COMPILER_PROGNAME // actual program name (argv[0])
 use_default_input := false // list the default output file when given no inputs
 
 // The input file list, captured in `main` and read back in `pmain`. Its storage
@@ -88,7 +88,7 @@ usage :: proc(message: string) -> ! {
 			"  --       stop handling options\n" +
 			"  -        stop handling options and process stdin\n",
 			progname,
-			LUAC_OUTPUT,
+			COMPILER_OUTPUT,
 		),
 	)
 	os.exit(1)
@@ -164,7 +164,7 @@ doargs :: proc(argv: []string) -> int {
 // to write.
 // --------------------------------------------------------------------------------
 
-luac_writer :: proc "c" (L: rawptr, p: rawptr, sz: uint, ud: rawptr) -> i32 {
+writer :: proc "c" (L: rawptr, p: rawptr, sz: uint, ud: rawptr) -> i32 {
 	context = runtime.default_context()
 	if sz == 0 {
 		return 0
@@ -181,24 +181,24 @@ luac_writer :: proc "c" (L: rawptr, p: rawptr, sz: uint, ud: rawptr) -> i32 {
 
 pmain :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	L := (^lua.Lua_State)(Lp)
-	argc := int(lua.lua_tointeger(L, 1))
-	argv := (^[]string)(lua.lua_touserdata(L, 2))^
-	if !lua.lua_checkstack(L, argc) {
+	L := (^lua.State)(Lp)
+	argc := int(lua.api_tointeger(L, 1))
+	argv := (^[]string)(lua.api_touserdata(L, 2))^
+	if !lua.api_checkstack(L, argc) {
 		fatal("too many input files")
 	}
 	for i in 0 ..< argc {
 		filename := argv[i] == "-" ? "" : argv[i] // '-' means stdin
-		if aux.luaL_loadfilex(L, filename) != .Ok {
-			msg, _ := lua.lua_tolstring(L, -1)
+		if aux.aux_loadfilex(L, filename) != .Ok {
+			msg, _ := lua.api_tolstring(L, -1)
 			fatal(msg)
 		}
 	}
 	// Fold the loaded chunks into a single function (see kernel luac_combine).
 	// The result is left on top of the stack, ready for `lua_dump`.
-	f := lua.luac_combine(L, argc)
+	f := lua.combine(L, argc)
 	if f == nil {
-		msg, _ := lua.lua_tolstring(L, -1)
+		msg, _ := lua.api_tolstring(L, -1)
 		fatal(msg)
 	}
 	if listing != 0 {
@@ -208,13 +208,13 @@ pmain :: proc "c" (Lp: rawptr) -> i32 {
 		if output_to_stdout {
 			// `lua_dump` walks the top-of-stack function and streams bytes to our
 			// writer; a stdout target needs no open/close.
-			lua.lua_dump(L, luac_writer, stream.stdout(), stripping)
+			lua.api_dump(L, writer, stream.stdout(), stripping)
 		} else {
 			D := stream.open(output, "wb")
 			if D == nil {
 				cannot("open")
 			}
-			lua.lua_dump(L, luac_writer, D, stripping)
+			lua.api_dump(L, writer, D, stripping)
 			if stream.ferror(D) {
 				cannot("write")
 			}
@@ -264,7 +264,7 @@ upvalname :: proc(f: ^lua.Proto, x: int) -> string {
 // The metamethod event name for index `c` -- reference eventname(c). The interned
 // TM_* names live in the global state; the VM stores them there at startup.
 @(private = "file")
-eventname :: proc(L: ^lua.Lua_State, c: int) -> string {
+eventname :: proc(L: ^lua.State, c: int) -> string {
 	return string(lua.str_slice(L.g.tmname[c]))
 }
 
@@ -354,7 +354,7 @@ print_constant :: proc(f: ^lua.Proto, i: int) {
 // Print the instruction stream, one opcode per line, with the same columns and
 // trailing comments as reference PrintCode.
 @(private = "file")
-print_code :: proc(L: ^lua.Lua_State, f: ^lua.Proto) {
+print_code :: proc(L: ^lua.State, f: ^lua.Proto) {
 	code := f.code
 	n := f.sizecode
 	for pc in 0 ..< n {
@@ -381,7 +381,7 @@ print_code :: proc(L: ^lua.Lua_State, f: ^lua.Proto) {
 		vc := vabc ? lua.getarg_vC(i) : 0
 		sbx := mode == .iAsBx ? lua.getarg_sBx(i) : 0
 		isk := lua.getarg_k(i)
-		line := lua.luaG_getfuncline(f, pc)
+		line := lua.debug_getfuncline(f, pc)
 		isk_s := isk != 0 ? "k" : ""
 
 		fmt.printf("\t%d\t", pc + 1)
@@ -629,7 +629,7 @@ print_header :: proc(f: ^lua.Proto) {
 	s := f.source != nil ? string(lua.str_slice(f.source)) : "=?"
 	if len(s) > 0 && (s[0] == '@' || s[0] == '=') {
 		s = s[1:] // skip the @file / =chunk marker
-	} else if len(s) > 0 && s[0] == u8(lua.LUA_SIGNATURE[0]) {
+	} else if len(s) > 0 && s[0] == u8(lua.SIGNATURE[0]) {
 		s = "(bstring)" // a binary chunk used as a source
 	} else {
 		s = "(string)" // an anonymous string chunk
@@ -699,7 +699,7 @@ print_debug :: proc(f: ^lua.Proto) {
 
 // The top-level lister -- reference PrintFunction. Prints this prototype, then (for
 // full listings) its debug tables, then recurses into every nested prototype.
-list_function :: proc(L: ^lua.Lua_State, f: ^lua.Proto, full: bool) {
+list_function :: proc(L: ^lua.State, f: ^lua.Proto, full: bool) {
 	print_header(f)
 	print_code(L, f)
 	if full {
@@ -717,7 +717,7 @@ list_function :: proc(L: ^lua.Lua_State, f: ^lua.Proto, full: bool) {
 main :: proc() {
 	argv := os.args
 	first := doargs(argv)
-	inputs := use_default_input ? []string{LUAC_OUTPUT} : argv[first:]
+	inputs := use_default_input ? []string{COMPILER_OUTPUT} : argv[first:]
 	if len(inputs) == 0 {
 		usage("no input files given")
 	}
@@ -727,11 +727,11 @@ main :: proc() {
 	if L == nil {
 		fatal("cannot create state: not enough memory")
 	}
-	lua.lua_pushcfunction(L, pmain)
-	lua.lua_pushinteger(L, lua.Integer(len(g_inputs)))
-	lua.lua_pushlightuserdata(L, &g_inputs)
-	if lua.lua_pcall(L, 2, 0, 0) != .Ok {
-		msg, _ := lua.lua_tolstring(L, -1)
+	lua.api_pushcfunction(L, pmain)
+	lua.api_pushinteger(L, lua.Integer(len(g_inputs)))
+	lua.api_pushlightuserdata(L, &g_inputs)
+	if lua.api_pcall(L, 2, 0, 0) != .Ok {
+		msg, _ := lua.api_tolstring(L, -1)
 		fatal(msg)
 	}
 	lua.close_state(L)

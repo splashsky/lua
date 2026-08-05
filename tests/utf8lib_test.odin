@@ -9,21 +9,21 @@ import "core:testing"
 import lua "luao:lua"
 import aux "luao:stdlib"
 
-utf8_state :: proc() -> ^lua.Lua_State {
+utf8_state :: proc() -> ^lua.State {
 	L := lua.new_state(lua.default_allocator())
-	lua.lua_pushcfunction(L, aux.luaopen_base)
-	lua.lua_call(L, 0, 0)
-	lua.lua_pushcfunction(L, aux.luaopen_utf8)
-	lua.lua_call(L, 0, 1)
-	lua.lua_setglobal(L, "utf8")
+	lua.api_pushcfunction(L, aux.open_base)
+	lua.api_call(L, 0, 0)
+	lua.api_pushcfunction(L, aux.open_utf8)
+	lua.api_call(L, 0, 1)
+	lua.api_setglobal(L, "utf8")
 	return L
 }
 
-utf8_run :: proc(L: ^lua.Lua_State, src: string) -> lua.Thread_Status {
-	if st := aux.luaL_loadstring(L, src); st != .Ok {
+utf8_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
+	if st := aux.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.lua_pcall(L, 0, lua.LUA_MULTRET, 0)
+	return lua.api_pcall(L, 0, lua.MULTRET, 0)
 }
 
 @(test)
@@ -108,6 +108,6 @@ utf8_charpattern_and_ascii :: proc(t: ^testing.T) {
 	testing.expect(t, st == .Ok)
 	// The pattern begins with '[' and, being a byte string with an embedded NUL,
 	// is 14 bytes long -- verify the observable shape without asserting internals.
-	s, _ := lua.lua_tolstring(L, -1)
+	s, _ := lua.api_tolstring(L, -1)
 	testing.expect(t, len(s) == 14 && s[0] == '[', "charpattern has the reference bytes")
 }

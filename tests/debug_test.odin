@@ -31,8 +31,8 @@ dbg_reset :: proc() {
 // that luaD_hook filled into the activation record it hands us.
 dbg_line_hook :: proc "c" (Lp: rawptr, arp: rawptr) {
 	context = runtime.default_context()
-	ar := (^lua.Lua_Debug)(arp)
-	if ar.event == lua.LUA_HOOKLINE && dbg_line_count < len(dbg_lines) {
+	ar := (^lua.Debug_Info)(arp)
+	if ar.event == lua.HOOKLINE && dbg_line_count < len(dbg_lines) {
 		dbg_lines[dbg_line_count] = ar.currentline
 		dbg_line_count += 1
 	}
@@ -50,9 +50,9 @@ test_debug_line_hook_fires :: proc(t: ^testing.T) {
 	src := "a = 1\nb = 2\nc = a + b\n"
 	testing.expect_value(t, api_load(L, src, &rd), lua.Thread_Status.Ok)
 
-	lua.lua_sethook(L, dbg_line_hook, lua.LUA_MASKLINE, 0)
-	testing.expect_value(t, lua.lua_pcall(L, 0, 0, 0), lua.Thread_Status.Ok)
-	lua.lua_sethook(L, nil, 0, 0) // uninstall
+	lua.api_sethook(L, dbg_line_hook, lua.MASKLINE, 0)
+	testing.expect_value(t, lua.api_pcall(L, 0, 0, 0), lua.Thread_Status.Ok)
+	lua.api_sethook(L, nil, 0, 0) // uninstall
 
 	// We should have seen at least the three assignment lines.
 	testing.expect(t, dbg_line_count >= 3)
@@ -76,11 +76,11 @@ test_debug_line_hook_fires :: proc(t: ^testing.T) {
 
 	// The observable hook state round-trips through the getters.
 	dbg_reset()
-	lua.lua_sethook(L, dbg_line_hook, lua.LUA_MASKLINE, 0)
-	testing.expect(t, lua.lua_gethook(L) != nil)
-	testing.expect_value(t, lua.lua_gethookmask(L), lua.LUA_MASKLINE)
-	lua.lua_sethook(L, nil, 0, 0)
-	testing.expect(t, lua.lua_gethook(L) == nil)
+	lua.api_sethook(L, dbg_line_hook, lua.MASKLINE, 0)
+	testing.expect(t, lua.api_gethook(L) != nil)
+	testing.expect_value(t, lua.api_gethookmask(L), lua.MASKLINE)
+	lua.api_sethook(L, nil, 0, 0)
+	testing.expect(t, lua.api_gethook(L) == nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -91,8 +91,8 @@ dbg_count_hits: int
 
 dbg_count_hook :: proc "c" (Lp: rawptr, arp: rawptr) {
 	context = runtime.default_context()
-	ar := (^lua.Lua_Debug)(arp)
-	if ar.event == lua.LUA_HOOKCOUNT {
+	ar := (^lua.Debug_Info)(arp)
+	if ar.event == lua.HOOKCOUNT {
 		dbg_count_hits += 1
 	}
 }
@@ -109,13 +109,13 @@ test_debug_count_hook_fires :: proc(t: ^testing.T) {
 	src := "local s = 0\nfor i = 1, 50 do s = s + i end\nreturn s"
 	testing.expect_value(t, api_load(L, src, &rd), lua.Thread_Status.Ok)
 
-	lua.lua_sethook(L, dbg_count_hook, lua.LUA_MASKCOUNT, 1)
-	testing.expect_value(t, lua.lua_pcall(L, 0, 1, 0), lua.Thread_Status.Ok)
-	lua.lua_sethook(L, nil, 0, 0)
+	lua.api_sethook(L, dbg_count_hook, lua.MASKCOUNT, 1)
+	testing.expect_value(t, lua.api_pcall(L, 0, 1, 0), lua.Thread_Status.Ok)
+	lua.api_sethook(L, nil, 0, 0)
 
 	testing.expect(t, dbg_count_hits > 0)
 	// The chunk still produced the right answer: 1+2+...+50 == 1275.
-	testing.expect_value(t, lua.lua_tointeger(L, -1), 1275)
+	testing.expect_value(t, lua.api_tointeger(L, -1), 1275)
 }
 
 // ---------------------------------------------------------------------------
@@ -131,9 +131,9 @@ test_debug_getinfo_function :: proc(t: ^testing.T) {
 	// Load a chunk (leaves the main function on the stack) and interrogate it.
 	testing.expect_value(t, api_load(L, "return 1", &rd), lua.Thread_Status.Ok)
 
-	ar: lua.Lua_Debug
+	ar: lua.Debug_Info
 	// ">" consumes the function on top of the stack, then fills the record.
-	ok := lua.lua_getinfo(L, ">Slu", &ar)
+	ok := lua.api_getinfo(L, ">Slu", &ar)
 	testing.expect(t, ok)
 	testing.expect_value(t, ar.what, "main") // the main chunk of a loaded file
 	testing.expect_value(t, ar.linedefined, 0) // main chunks define at line 0
@@ -158,10 +158,10 @@ dbg_stack_hook :: proc "c" (Lp: rawptr, arp: rawptr) {
 	if dbg_stack_ok {
 		return // only sample once
 	}
-	L := (^lua.Lua_State)(Lp)
-	frame: lua.Lua_Debug
-	if lua.lua_getstack(L, 0, &frame) {
-		if lua.lua_getinfo(L, "Sl", &frame) {
+	L := (^lua.State)(Lp)
+	frame: lua.Debug_Info
+	if lua.api_getstack(L, 0, &frame) {
+		if lua.api_getinfo(L, "Sl", &frame) {
 			dbg_stack_currentline = frame.currentline
 			dbg_stack_what = frame.what
 			dbg_stack_ok = true
@@ -179,9 +179,9 @@ test_debug_getstack_currentline :: proc(t: ^testing.T) {
 	rd: Src_Reader
 
 	testing.expect_value(t, api_load(L, "local x = 10\nreturn x", &rd), lua.Thread_Status.Ok)
-	lua.lua_sethook(L, dbg_stack_hook, lua.LUA_MASKLINE, 0)
-	testing.expect_value(t, lua.lua_pcall(L, 0, 1, 0), lua.Thread_Status.Ok)
-	lua.lua_sethook(L, nil, 0, 0)
+	lua.api_sethook(L, dbg_stack_hook, lua.MASKLINE, 0)
+	testing.expect_value(t, lua.api_pcall(L, 0, 1, 0), lua.Thread_Status.Ok)
+	lua.api_sethook(L, nil, 0, 0)
 
 	testing.expect(t, dbg_stack_ok)
 	testing.expect_value(t, dbg_stack_what, "main")

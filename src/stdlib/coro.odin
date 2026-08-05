@@ -14,16 +14,16 @@ import "base:runtime"
 import lua "luao:lua"
 
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
-	return (^lua.Lua_State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
+	return (^lua.State)(Lp)
 }
 
 // Fetch the thread argument at slot 1, raising the standard "thread expected"
 // argument error if it isn't one. Reference `getco`.
 @(private = "file")
-getco :: proc(L: ^lua.Lua_State) -> ^lua.Lua_State {
-	co := lua.lua_tothread(L, 1)
-	luaL_argexpected(L, co != nil, 1, "thread")
+getco :: proc(L: ^lua.State) -> ^lua.State {
+	co := lua.api_tothread(L, 1)
+	aux_argexpected(L, co != nil, 1, "thread")
 	return co
 }
 
@@ -31,23 +31,23 @@ getco :: proc(L: ^lua.Lua_State) -> ^lua.Lua_State {
 // number of results moved back onto `L`, or -1 to signal an error (with the error
 // object / message left on top of `L`). Reference `auxresume`.
 @(private = "file")
-auxresume :: proc(L: ^lua.Lua_State, co: ^lua.Lua_State, narg: int) -> int {
-	if !lua.lua_checkstack(co, narg) {
-		lua.lua_pushstring(L, "too many arguments to resume")
+auxresume :: proc(L: ^lua.State, co: ^lua.State, narg: int) -> int {
+	if !lua.api_checkstack(co, narg) {
+		lua.api_pushstring(L, "too many arguments to resume")
 		return -1 // error flag
 	}
-	lua.lua_xmove(L, co, narg)
-	status, nres := lua.lua_resume(co, L, narg)
+	lua.api_xmove(L, co, narg)
+	status, nres := lua.api_resume(co, L, narg)
 	if status == .Ok || status == .Yield {
-		if !lua.lua_checkstack(L, nres + 1) {
-			lua.lua_pop(co, nres) // remove results anyway
-			lua.lua_pushstring(L, "too many results to resume")
+		if !lua.api_checkstack(L, nres + 1) {
+			lua.api_pop(co, nres) // remove results anyway
+			lua.api_pushstring(L, "too many results to resume")
 			return -1 // error flag
 		}
-		lua.lua_xmove(co, L, nres) // move yielded values across
+		lua.api_xmove(co, L, nres) // move yielded values across
 		return nres
 	}
-	lua.lua_xmove(co, L, 1) // move the error message across
+	lua.api_xmove(co, L, 1) // move the error message across
 	return -1 // error flag
 }
 
@@ -57,16 +57,16 @@ co_resume :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	co := getco(L)
-	r := auxresume(L, co, lua.lua_gettop(L) - 1)
+	r := auxresume(L, co, lua.api_gettop(L) - 1)
 	if r < 0 {
 		// Prepend `false` so the caller sees `false, <error>`.
-		lua.lua_pushboolean(L, false)
-		lua.lua_insert(L, -2)
+		lua.api_pushboolean(L, false)
+		lua.api_insert(L, -2)
 		return 2
 	}
 	// Prepend `true` before the r yielded/returned values.
-	lua.lua_pushboolean(L, true)
-	lua.lua_insert(L, -(r + 1))
+	lua.api_pushboolean(L, true)
+	lua.api_insert(L, -(r + 1))
 	return i32(r) + 1
 }
 
@@ -77,21 +77,21 @@ co_resume :: proc "c" (Lp: rawptr) -> i32 {
 co_auxwrap :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	co := lua.lua_tothread(L, lua.lua_upvalueindex(1))
-	r := auxresume(L, co, lua.lua_gettop(L))
+	co := lua.api_tothread(L, lua.upvalueindex(1))
+	r := auxresume(L, co, lua.api_gettop(L))
 	if r < 0 { // error?
-		stat := lua.lua_status(co)
+		stat := lua.api_status(co)
 		if stat != .Ok && stat != .Yield { // error inside the coroutine?
-			stat = lua.lua_closethread(co, L) // close its to-be-closed variables
-			lua.lua_xmove(co, L, 1) // move the error message to the caller
+			stat = lua.api_closethread(co, L) // close its to-be-closed variables
+			lua.api_xmove(co, L, 1) // move the error message to the caller
 		}
-		if stat != .Err_Mem && lua.lua_type(L, -1) == lua.LUA_TSTRING {
+		if stat != .Err_Mem && lua.api_type(L, -1) == lua.TSTRING {
 			// Attach position information to a string error, like a normal error().
-			luaL_where(L, 1)
-			lua.lua_insert(L, -2)
-			lua.lua_concat(L, 2)
+			aux_where(L, 1)
+			lua.api_insert(L, -2)
+			lua.api_concat(L, 2)
 		}
-		lua.lua_error(L) // propagate (diverges)
+		lua.api_error(L) // propagate (diverges)
 	}
 	return i32(r)
 }
@@ -100,11 +100,11 @@ co_auxwrap :: proc "c" (Lp: rawptr) -> i32 {
 // thread, and move the function onto it. Reference `luaB_cocreate` factored out so
 // `co_wrap` can reuse it without calling a `proc "c"` reentrantly.
 @(private = "file")
-do_cocreate :: proc(L: ^lua.Lua_State) {
-	luaL_checktype(L, 1, lua.LUA_TFUNCTION)
-	NL := lua.lua_newthread(L)
-	lua.lua_pushvalue(L, 1) // move the function to the top ...
-	lua.lua_xmove(L, NL, 1) // ... then onto the new thread
+do_cocreate :: proc(L: ^lua.State) {
+	aux_checktype(L, 1, lua.TFUNCTION)
+	NL := lua.api_newthread(L)
+	lua.api_pushvalue(L, 1) // move the function to the top ...
+	lua.api_xmove(L, NL, 1) // ... then onto the new thread
 }
 
 // coroutine.create(f) -> a new suspended coroutine. Reference `luaB_cocreate`.
@@ -122,7 +122,7 @@ co_wrap :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	do_cocreate(L)
-	lua.lua_pushcclosure(L, co_auxwrap, 1) // capture the coroutine as upvalue #1
+	lua.api_pushcclosure(L, co_auxwrap, 1) // capture the coroutine as upvalue #1
 	return 1
 }
 
@@ -131,7 +131,7 @@ co_wrap :: proc "c" (Lp: rawptr) -> i32 {
 co_yield :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	return lua.lua_yield(L, lua.lua_gettop(L))
+	return lua.api_yield(L, lua.api_gettop(L))
 }
 
 // The internal status codes, indexing `statname`. Reference COS_* macros.
@@ -149,21 +149,21 @@ statname := []string{"running", "dead", "suspended", "normal"}
 
 // Classify a coroutine relative to the current thread. Reference `auxstatus`.
 @(private = "file")
-auxstatus :: proc(L: ^lua.Lua_State, co: ^lua.Lua_State) -> int {
+auxstatus :: proc(L: ^lua.State, co: ^lua.State) -> int {
 	if L == co {
 		return COS_RUN // the running coroutine is asking about itself
 	}
-	#partial switch lua.lua_status(co) {
+	#partial switch lua.api_status(co) {
 	case .Yield:
 		return COS_YIELD
 	case .Ok:
 		// A status of OK is ambiguous: it may be actively running (has frames),
 		// finished (no frames, empty stack), or freshly created but never resumed
 		// (no frames, but its function still sits on the stack).
-		ar: lua.Lua_Debug
-		if lua.lua_getstack(co, 0, &ar) {
+		ar: lua.Debug_Info
+		if lua.api_getstack(co, 0, &ar) {
 			return COS_NORM
-		} else if lua.lua_gettop(co) == 0 {
+		} else if lua.api_gettop(co) == 0 {
 			return COS_DEAD
 		} else {
 			return COS_YIELD
@@ -180,15 +180,15 @@ co_status :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	co := getco(L)
-	lua.lua_pushstring(L, statname[auxstatus(L, co)])
+	lua.api_pushstring(L, statname[auxstatus(L, co)])
 	return 1
 }
 
 // Coroutine argument that defaults to the current thread when omitted. Reference
 // `getoptco`.
 @(private = "file")
-getoptco :: proc(L: ^lua.Lua_State) -> ^lua.Lua_State {
-	return lua.lua_isnone(L, 1) ? L : getco(L)
+getoptco :: proc(L: ^lua.State) -> ^lua.State {
+	return lua.api_isnone(L, 1) ? L : getco(L)
 }
 
 // coroutine.isyieldable([co]) -> can this coroutine yield right now? Reference
@@ -198,7 +198,7 @@ co_yieldable :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	co := getoptco(L)
-	lua.lua_pushboolean(L, lua.lua_isyieldable(co))
+	lua.api_pushboolean(L, lua.api_isyieldable(co))
 	return 1
 }
 
@@ -208,8 +208,8 @@ co_yieldable :: proc "c" (Lp: rawptr) -> i32 {
 co_running :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	ismain := lua.lua_pushthread(L)
-	lua.lua_pushboolean(L, ismain)
+	ismain := lua.api_pushthread(L)
+	lua.api_pushboolean(L, ismain)
 	return 2
 }
 
@@ -223,23 +223,23 @@ co_close :: proc "c" (Lp: rawptr) -> i32 {
 	status := auxstatus(L, co)
 	switch status {
 	case COS_DEAD, COS_YIELD:
-		st := lua.lua_closethread(co, L)
+		st := lua.api_closethread(co, L)
 		if st == .Ok {
-			lua.lua_pushboolean(L, true)
+			lua.api_pushboolean(L, true)
 			return 1
 		}
-		lua.lua_pushboolean(L, false)
-		lua.lua_xmove(co, L, 1) // move the error message across
+		lua.api_pushboolean(L, false)
+		lua.api_xmove(co, L, 1) // move the error message across
 		return 2
 	case COS_NORM:
-		luaL_error(L, "cannot close a %s coroutine", statname[status])
+		aux_error(L, "cannot close a %s coroutine", statname[status])
 	case COS_RUN:
 		// A coroutine may only close itself; the main thread never can.
-		lua.lua_geti(L, lua.LUA_REGISTRYINDEX, lua.LUA_RIDX_MAINTHREAD)
-		if lua.lua_tothread(L, -1) == co {
-			luaL_error(L, "cannot close main thread")
+		lua.api_geti(L, lua.REGISTRYINDEX, lua.RIDX_MAINTHREAD)
+		if lua.api_tothread(L, -1) == co {
+			aux_error(L, "cannot close main thread")
 		}
-		lua.lua_closethread(co, L) // close itself
+		lua.api_closethread(co, L) // close itself
 	}
 	return 0
 }
@@ -257,9 +257,9 @@ co_funcs := []Reg {
 }
 
 // `luaopen_coroutine` -- build and return the coroutine table.
-luaopen_coroutine :: proc "c" (Lp: rawptr) -> i32 {
+open_coroutine :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	luaL_newlib(L, co_funcs)
+	aux_newlib(L, co_funcs)
 	return 1
 }

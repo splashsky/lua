@@ -281,28 +281,28 @@ parse_completion_word :: proc(line: []u8, cursor: int, parts: ^[MAX_COMPLETION_P
 // string: interning that name could allocate and therefore raise. The key handed
 // back by lua_next is carried unchanged into the next call, so it is always a
 // valid iteration key and cannot hit luaH_next's "invalid key" error path.
-raw_descend :: proc(L: ^lua.Lua_State, table_index: int, name: string) -> bool {
-	lua.lua_pushnil(L)
+raw_descend :: proc(L: ^lua.State, table_index: int, name: string) -> bool {
+	lua.api_pushnil(L)
 	visited := 0
-	for lua.lua_next(L, table_index) {
+	for lua.api_next(L, table_index) {
 		visited += 1
-		if lua.lua_type(L, -2) == lua.LUA_TSTRING {
-			key, _ := lua.lua_tolstring(L, -2)
+		if lua.api_type(L, -2) == lua.TSTRING {
+			key, _ := lua.api_tolstring(L, -2)
 			if key == name {
-				if lua.lua_type(L, -1) != lua.LUA_TTABLE {
-					lua.lua_pop(L, 2)
+				if lua.api_type(L, -1) != lua.TTABLE {
+					lua.api_pop(L, 2)
 					return false
 				}
-				lua.lua_copy(L, -1, table_index)
-				lua.lua_pop(L, 2)
+				lua.api_copy(L, -1, table_index)
+				lua.api_pop(L, 2)
 				return true
 			}
 		}
 		if visited == MAX_COMPLETION_VISITS {
-			lua.lua_pop(L, 2)
+			lua.api_pop(L, 2)
 			return false
 		}
-		lua.lua_pop(L, 1)
+		lua.api_pop(L, 1)
 	}
 	return false
 }
@@ -319,7 +319,7 @@ raw_descend :: proc(L: ^lua.Lua_State, table_index: int, name: string) -> bool {
 // is unreachable. Each table walk examines at most 4096 entries, and output is
 // capped at 256 candidates, bounding both time and redraw volume for deliberately
 // enormous globals tables.
-completion_candidates :: proc(L: ^lua.Lua_State, line: []u8, cursor: int) -> (c: Completion) {
+completion_candidates :: proc(L: ^lua.State, line: []u8, cursor: int) -> (c: Completion) {
 	if cursor < 0 || cursor > len(line) {
 		return
 	}
@@ -331,38 +331,38 @@ completion_candidates :: proc(L: ^lua.Lua_State, line: []u8, cursor: int) -> (c:
 	c.word_start = start
 	c.prefix = parts[part_count - 1]
 
-	base := lua.lua_gettop(L)
-	lua.lua_pushglobaltable(L)
-	table_index := lua.lua_absindex(L, -1)
+	base := lua.api_gettop(L)
+	lua.api_pushglobaltable(L)
+	table_index := lua.api_absindex(L, -1)
 	for i in 0 ..< part_count - 1 {
 		if !raw_descend(L, table_index, parts[i]) {
-			lua.lua_settop(L, base)
+			lua.api_settop(L, base)
 			return
 		}
 	}
 
-	lua.lua_pushnil(L)
+	lua.api_pushnil(L)
 	visited := 0
-	for lua.lua_next(L, table_index) {
+	for lua.api_next(L, table_index) {
 		visited += 1
-		if lua.lua_type(L, -2) == lua.LUA_TSTRING {
-			name, _ := lua.lua_tolstring(L, -2)
+		if lua.api_type(L, -2) == lua.TSTRING {
+			name, _ := lua.api_tolstring(L, -2)
 			if is_identifier(name) && starts_with(name, c.prefix) {
 				c.names[c.count] = name
 				c.count += 1
 				if c.count == MAX_COMPLETIONS {
-					lua.lua_pop(L, 2)
+					lua.api_pop(L, 2)
 					break
 				}
 			}
 		}
 		if visited == MAX_COMPLETION_VISITS {
-			lua.lua_pop(L, 2)
+			lua.api_pop(L, 2)
 			break
 		}
-		lua.lua_pop(L, 1)
+		lua.api_pop(L, 1)
 	}
-	lua.lua_settop(L, base)
+	lua.api_settop(L, base)
 	sort_completion(&c)
 	return
 }
@@ -382,7 +382,7 @@ show_completions :: proc(prompt: string, c: ^Completion) {
 }
 
 complete_line :: proc(
-	L: ^lua.Lua_State,
+	L: ^lua.State,
 	prompt: string,
 	line: []u8,
 	length, cursor, viewport: ^int,
@@ -422,7 +422,7 @@ complete_line :: proc(
 // idempotent restore_terminal call remains the backstop if that invariant is ever
 // accidentally broken.
 read_line :: proc(
-	L: ^lua.Lua_State,
+	L: ^lua.State,
 	prompt: string,
 	dst: []u8,
 	history: []string,
@@ -431,7 +431,7 @@ read_line :: proc(
 	   !stream.prepare_direct_read(stream.stdin()) {
 		return 0, false, false
 	}
-	if !lua.lua_checkstack(L, 4) {
+	if !lua.api_checkstack(L, 4) {
 		stream.finish_direct_read(stream.stdin())
 		return 0, false, false
 	}

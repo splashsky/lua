@@ -18,17 +18,17 @@ import "base:intrinsics"
 // errors. Reference Lua's `luaG_addinfo`. The lexer calls this to decorate its
 // messages before raising. When there is no source (an unnamed chunk), Lua uses a
 // bare "?" in place of the chunk id.
-luaG_addinfo :: proc(L: ^Lua_State, msg: string, src: ^TString, line: int) -> ^TString {
+debug_addinfo :: proc(L: ^State, msg: string, src: ^TString, line: int) -> ^TString {
 	// Reference `luaG_addinfo`: with no debug info the source pointer is nil, and
 	// BOTH the chunk id and the line render as "?" (a stripped chunk carries no
 	// line table, so there is no meaningful number to print -- not even -1).
 	if src == nil {
-		return luaO_pushfstring(L, "?:?: %s", msg)
+		return object_pushfstring(L, "?:?: %s", msg)
 	}
-	buff: [LUA_IDSIZE]u8
-	w := luaO_chunkid(buff[:], string(str_slice(src)))
+	buff: [IDSIZE]u8
+	w := object_chunkid(buff[:], string(str_slice(src)))
 	idstr := string(buff[:w])
-	return luaO_pushfstring(L, "%s:%d: %s", idstr, line, msg)
+	return object_pushfstring(L, "%s:%d: %s", idstr, line, msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -38,22 +38,22 @@ luaG_addinfo :: proc(L: ^Lua_State, msg: string, src: ^TString, line: int) -> ^T
 // VM events; the debug library and profilers install one. Until the debug API
 // lands (Phase 9) no hook is ever installed, so these drive dead branches -- but
 // the call/return machinery references them, so we define them faithfully now.
-LUA_HOOKCALL :: 0
-LUA_HOOKRET :: 1
-LUA_HOOKLINE :: 2
-LUA_HOOKCOUNT :: 3
-LUA_HOOKTAILCALL :: 4
+HOOKCALL :: 0
+HOOKRET :: 1
+HOOKLINE :: 2
+HOOKCOUNT :: 3
+HOOKTAILCALL :: 4
 
-LUA_MASKCALL :: i32(1) << LUA_HOOKCALL
-LUA_MASKRET :: i32(1) << LUA_HOOKRET
-LUA_MASKLINE :: i32(1) << LUA_HOOKLINE
-LUA_MASKCOUNT :: i32(1) << LUA_HOOKCOUNT
+MASKCALL :: i32(1) << HOOKCALL
+MASKRET :: i32(1) << HOOKRET
+MASKLINE :: i32(1) << HOOKLINE
+MASKCOUNT :: i32(1) << HOOKCOUNT
 
 // The activation record handed to a hook / queried by the debug API -- reference
 // Lua's `lua_Debug`. We keep the observable fields; `i_ci` identifies the frame by
 // index (our model) rather than by pointer. The remaining introspection fields are
 // filled in by the debug API in a later phase.
-Lua_Debug :: struct {
+Debug_Info :: struct {
 	event:           i32,
 	name:            string,
 	namewhat:        string,
@@ -69,7 +69,7 @@ Lua_Debug :: struct {
 	istailcall:      u8,
 	ftransfer:       u16,
 	ntransfer:       u16,
-	short_src:       [LUA_IDSIZE]u8,
+	short_src:       [IDSIZE]u8,
 	i_ci:            int, // index of the frame this record describes
 }
 
@@ -115,7 +115,7 @@ getbaseline :: proc(f: ^Proto, pc: int) -> (baseline: int, basepc: int) {
 // `luaG_getfuncline`. Returns -1 when the prototype carries no line info (a
 // stripped chunk). Otherwise walk the per-instruction deltas from the base
 // checkpoint up to the target pc.
-luaG_getfuncline :: proc(f: ^Proto, pc: int) -> int {
+debug_getfuncline :: proc(f: ^Proto, pc: int) -> int {
 	if f.lineinfo == nil {
 		return -1 // debug info was stripped
 	}
@@ -129,8 +129,8 @@ luaG_getfuncline :: proc(f: ^Proto, pc: int) -> int {
 }
 
 // The current source line of a Lua call frame -- reference Lua's `getcurrentline`.
-getcurrentline :: proc(L: ^Lua_State, ci: ^Call_Info) -> int {
-	return luaG_getfuncline(ci_func(L, ci).p, currentpc(ci))
+getcurrentline :: proc(L: ^State, ci: ^Call_Info) -> int {
+	return debug_getfuncline(ci_func(L, ci).p, currentpc(ci))
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +224,7 @@ dbg_findsetreg :: proc(p: ^Proto, lastpc: int, reg: int) -> int {
 @(private = "file")
 dbg_basicgetobjname :: proc(p: ^Proto, ppc: ^int, reg: int) -> (kind: string, name: string) {
 	pc := ppc^
-	local := luaF_getlocalname(p, reg + 1, pc)
+	local := func_getlocalname(p, reg + 1, pc)
 	if local != nil { // is it a live local?
 		return "local", string(str_slice(local))
 	}
@@ -282,7 +282,7 @@ dbg_isEnv :: proc(p: ^Proto, pc: int, i: Instruction, isup: bool) -> string {
 			valid = true
 		}
 	}
-	if valid && name == LUA_ENV {
+	if valid && name == ENV_NAME {
 		return "global"
 	}
 	return "field"
@@ -324,7 +324,7 @@ dbg_getobjname :: proc(p: ^Proto, lastpc: int, reg: int) -> (kind: string, name:
 // `funcnamefromcode`. Direct calls resolve the callee register; instructions that
 // dispatch through a metamethod report that metamethod's name. "" kind = none.
 @(private = "file")
-dbg_funcnamefromcode :: proc(L: ^Lua_State, p: ^Proto, pc: int) -> (kind: string, name: string) {
+dbg_funcnamefromcode :: proc(L: ^State, p: ^Proto, pc: int) -> (kind: string, name: string) {
 	i := p.code[pc]
 	tm := -1
 	#partial switch get_opcode(i) {
@@ -367,7 +367,7 @@ dbg_funcnamefromcode :: proc(L: ^Lua_State, p: ^Proto, pc: int) -> (kind: string
 // `funcnamefromcall`. `ci_idx` is the caller frame. Hooks and finalizers report a
 // synthetic name; ordinary Lua callers defer to `funcnamefromcode`.
 @(private = "file")
-dbg_funcnamefromcall :: proc(L: ^Lua_State, ci_idx: int) -> (kind: string, name: string) {
+dbg_funcnamefromcall :: proc(L: ^State, ci_idx: int) -> (kind: string, name: string) {
 	ci := &L.frames[ci_idx]
 	if (ci.callstatus & CIST_HOOKED) != 0 {
 		return "hook", "?"
@@ -385,7 +385,7 @@ dbg_funcnamefromcall :: proc(L: ^Lua_State, ci_idx: int) -> (kind: string, name:
 // A tail-called frame has no caller to inspect, and a function pulled off the stack
 // (`ci_idx < 0`) has no frame at all; both yield no name.
 @(private = "file")
-dbg_getfuncname :: proc(L: ^Lua_State, ci_idx: int) -> (kind: string, name: string) {
+dbg_getfuncname :: proc(L: ^State, ci_idx: int) -> (kind: string, name: string) {
 	if ci_idx <= 0 { // no described frame, or no caller below it
 		return "", ""
 	}
@@ -398,7 +398,7 @@ dbg_getfuncname :: proc(L: ^Lua_State, ci_idx: int) -> (kind: string, name: stri
 // Is `o` one of the current Lua frame's upvalues? If so, name it -- reference
 // Lua's `getupvalname`. "" kind means "not an upvalue".
 @(private = "file")
-dbg_getupvalname :: proc(L: ^Lua_State, ci_idx: int, o: ^TValue) -> (kind: string, name: string) {
+dbg_getupvalname :: proc(L: ^State, ci_idx: int, o: ^TValue) -> (kind: string, name: string) {
 	c := ci_func(L, &L.frames[ci_idx])
 	for k in 0 ..< int(c.nupvalues) {
 		if upval_value(c.upvals[k]) == o {
@@ -411,7 +411,7 @@ dbg_getupvalname :: proc(L: ^Lua_State, ci_idx: int, o: ^TValue) -> (kind: strin
 // Where in the current frame's register window does `o` live, if anywhere? Returns
 // the register number, or -1 -- reference Lua's `instack`.
 @(private = "file")
-dbg_instack :: proc(L: ^Lua_State, ci_idx: int, o: ^TValue) -> int {
+dbg_instack :: proc(L: ^State, ci_idx: int, o: ^TValue) -> int {
 	ci := &L.frames[ci_idx]
 	base := ci.func + 1
 	for pos := 0; base + pos < ci.top; pos += 1 {
@@ -425,17 +425,17 @@ dbg_instack :: proc(L: ^Lua_State, ci_idx: int, o: ^TValue) -> int {
 // Format a "( kind 'name')" hint, or "" when there is no information -- reference
 // Lua's `formatvarinfo`.
 @(private = "file")
-dbg_formatvarinfo :: proc(L: ^Lua_State, kind: string, name: string) -> string {
+dbg_formatvarinfo :: proc(L: ^State, kind: string, name: string) -> string {
 	if kind == "" {
 		return ""
 	}
-	return string(str_slice(luaO_pushfstring(L, " (%s '%s')", kind, name)))
+	return string(str_slice(object_pushfstring(L, " (%s '%s')", kind, name)))
 }
 
 // Build a human description of where value `o` came from ("global 'x'", etc.) to
 // append to a type error -- reference Lua's `varinfo`. Best-effort: an upvalue, a
 // register traced back to a name, or nothing.
-varinfo :: proc(L: ^Lua_State, o: ^TValue) -> string {
+varinfo :: proc(L: ^State, o: ^TValue) -> string {
 	ci_idx := L.ci
 	kind := ""
 	name := ""
@@ -454,7 +454,7 @@ varinfo :: proc(L: ^Lua_State, o: ^TValue) -> string {
 // A thin wrapper so `varinfo` can call `getobjname` with a frame index (it needs
 // the frame's proto and current pc).
 @(private = "file")
-dbg_getobjname_frame :: proc(L: ^Lua_State, ci_idx: int, reg: int) -> (kind: string, name: string) {
+dbg_getobjname_frame :: proc(L: ^State, ci_idx: int, reg: int) -> (kind: string, name: string) {
 	ci := &L.frames[ci_idx]
 	return dbg_getobjname(ci_func(L, ci).p, currentpc(ci), reg)
 }
@@ -470,14 +470,14 @@ dbg_getobjname_frame :: proc(L: ^Lua_State, ci_idx: int, reg: int) -> (kind: str
 // The shared type-error core -- reference Lua's static `typeerror`. `op` is the
 // verb ("index", "call", "perform arithmetic on", ...) and `extra` is the trailing
 // variable-info hint (possibly empty).
-typeerror :: proc(L: ^Lua_State, o: ^TValue, op: string, extra: string) {
-	t := luaT_objtypename(L, o)
-	luaG_runerror(L, "attempt to %s a %s value%s", op, t, extra)
+typeerror :: proc(L: ^State, o: ^TValue, op: string, extra: string) {
+	t := tm_objtypename(L, o)
+	debug_runerror(L, "attempt to %s a %s value%s", op, t, extra)
 }
 
 // A type error with standard variable info about the faulty object -- reference
 // Lua's `luaG_typeerror`.
-luaG_typeerror :: proc(L: ^Lua_State, o: ^TValue, op: string) {
+debug_typeerror :: proc(L: ^State, o: ^TValue, op: string) {
 	typeerror(L, o, op, varinfo(L, o))
 }
 
@@ -486,41 +486,41 @@ luaG_typeerror :: proc(L: ^Lua_State, o: ^TValue, op: string) {
 // frame): that is what turns a failed `__close`/`__index`/... dispatch into the
 // "(metamethod 'close')" hint. Only if that yields nothing do we fall back to the
 // generic variable-info recovery.
-luaG_callerror :: proc(L: ^Lua_State, o: ^TValue) {
+debug_callerror :: proc(L: ^State, o: ^TValue) {
 	kind, name := dbg_funcnamefromcall(L, L.ci)
 	extra := kind != "" ? dbg_formatvarinfo(L, kind, name) : varinfo(L, o)
 	typeerror(L, o, "call", extra)
 }
 
 // A `for` loop given a non-number control value -- reference Lua's `luaG_forerror`.
-luaG_forerror :: proc(L: ^Lua_State, o: ^TValue, what: string) {
-	luaG_runerror(L, "bad 'for' %s (number expected, got %s)", what, luaT_objtypename(L, o))
+debug_forerror :: proc(L: ^State, o: ^TValue, what: string) {
+	debug_runerror(L, "bad 'for' %s (number expected, got %s)", what, tm_objtypename(L, o))
 }
 
 // Concatenation of a non-concatenable value -- reference Lua's `luaG_concaterror`.
 // Whichever operand is *not* a string/number is the offender. (`cvt2str` in the
 // reference is simply "is a number".)
-luaG_concaterror :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue) {
+debug_concaterror :: proc(L: ^State, p1: ^TValue, p2: ^TValue) {
 	bad := p1
 	if base_type(p1) == TSTRING || is_number(p1) {
 		bad = p2
 	}
-	luaG_typeerror(L, bad, "concatenate")
+	debug_typeerror(L, bad, "concatenate")
 }
 
 // Arithmetic/bitwise on a non-number -- reference Lua's `luaG_opinterror`. The
 // first non-number operand is the one to blame.
-luaG_opinterror :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue, msg: string) {
+debug_opinterror :: proc(L: ^State, p1: ^TValue, p2: ^TValue, msg: string) {
 	bad := p2
 	if !is_number(p1) {
 		bad = p1
 	}
-	luaG_typeerror(L, bad, msg)
+	debug_typeerror(L, bad, msg)
 }
 
 // Both operands are numbers but at least one has no integer representation --
 // reference Lua's `luaG_tointerror`.
-luaG_tointerror :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue) {
+debug_tointerror :: proc(L: ^State, p1: ^TValue, p2: ^TValue) {
 	bad := p2
 	// Bitwise operators accept an integral float, but they do not silently floor
 	// a fractional one. Re-test with the same exact-conversion rule used by the
@@ -529,17 +529,17 @@ luaG_tointerror :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue) {
 	if _, ok := to_integer_no_string(p1, .Eq); !ok {
 		bad = p1
 	}
-	luaG_runerror(L, "number%s has no integer representation", varinfo(L, bad))
+	debug_runerror(L, "number%s has no integer representation", varinfo(L, bad))
 }
 
 // Comparison between incompatible types -- reference Lua's `luaG_ordererror`.
-luaG_ordererror :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue) {
-	t1 := luaT_objtypename(L, p1)
-	t2 := luaT_objtypename(L, p2)
+debug_ordererror :: proc(L: ^State, p1: ^TValue, p2: ^TValue) {
+	t1 := tm_objtypename(L, p1)
+	t2 := tm_objtypename(L, p2)
 	if t1 == t2 {
-		luaG_runerror(L, "attempt to compare two %s values", t1)
+		debug_runerror(L, "attempt to compare two %s values", t1)
 	} else {
-		luaG_runerror(L, "attempt to compare %s with %s", t1, t2)
+		debug_runerror(L, "attempt to compare %s with %s", t1, t2)
 	}
 }
 
@@ -548,17 +548,17 @@ luaG_ordererror :: proc(L: ^Lua_State, p1: ^TValue, p2: ^TValue) {
 // it is called first, with the error object as its single argument, and its result
 // replaces the object. A nil error object becomes the literal "<no error object>".
 // Finally we longjmp with LUA_ERRRUN (our `.Err_Run`).
-luaG_errormsg :: proc(L: ^Lua_State) {
+debug_errormsg :: proc(L: ^State) {
 	if L.errfunc != 0 {
 		// Push the handler below the argument and call it: [handler][errobj].
 		errfunc := L.errfunc
 		set_obj(stack_value(L, L.top), stack_value(L, L.top - 1)) // duplicate arg up
 		set_obj(stack_value(L, L.top - 1), stack_value(L, errfunc)) // handler underneath
 		L.top += 1 // EXTRA_STACK guarantees room
-		luaD_callnoyield(L, L.top - 2, 1)
+		do_callnoyield(L, L.top - 2, 1)
 	}
 	if is_nil(stack_value(L, L.top - 1)) {
-		set_string(stack_value(L, L.top - 1), luaS_new(L, "<no error object>"))
+		set_string(stack_value(L, L.top - 1), string_new(L, "<no error object>"))
 	}
 	throw(L, .Err_Run)
 }
@@ -567,24 +567,24 @@ luaG_errormsg :: proc(L: ^Lua_State) {
 // `luaG_runerror`. When the erroring frame is Lua code we prepend `source:line`
 // and drop the raw message, mirroring the reference exactly. We also pace the GC
 // via `luaC_checkGC` before building the message, as reference does.
-luaG_runerror :: proc(L: ^Lua_State, fmt: string, args: ..any) {
+debug_runerror :: proc(L: ^State, fmt: string, args: ..any) {
 	ci := &L.frames[L.ci]
-	luaC_checkGC(L) // the error message about to be built uses memory
-	msg := luaO_pushfstring(L, fmt, ..args)
+	gc_checkGC(L) // the error message about to be built uses memory
+	msg := object_pushfstring(L, fmt, ..args)
 	if is_lua_frame(ci) {
 		// Decorate with position, then collapse the two top slots into one.
-		luaG_addinfo(L, string(str_slice(msg)), ci_func(L, ci).p.source, getcurrentline(L, ci))
+		debug_addinfo(L, string(str_slice(msg)), ci_func(L, ci).p.source, getcurrentline(L, ci))
 		set_obj(stack_value(L, L.top - 2), stack_value(L, L.top - 1))
 		L.top -= 1
 	}
-	luaG_errormsg(L)
+	debug_errormsg(L)
 }
 
 // Raise the "global already defined" error for a repeated `<const>`/global
 // definition -- reference Lua's `luaG_errnnil`. The offending name is the string
 // constant at `K[k-1]` (reference reads it via `kname`); when `k == 0` the name is
 // unknown and reported as "?".
-luaG_errnnil :: proc(L: ^Lua_State, cl: ^LClosure, k: int) {
+debug_errnnil :: proc(L: ^State, cl: ^LClosure, k: int) {
 	globalname := "?"
 	if k > 0 {
 		o := &cl.p.k[k - 1]
@@ -592,7 +592,7 @@ luaG_errnnil :: proc(L: ^Lua_State, cl: ^LClosure, k: int) {
 			globalname = string(str_slice(str_value(o)))
 		}
 	}
-	luaG_runerror(L, "global '%s' already defined", globalname)
+	debug_runerror(L, "global '%s' already defined", globalname)
 }
 
 // ---------------------------------------------------------------------------
@@ -608,14 +608,14 @@ luaG_errnnil :: proc(L: ^Lua_State, cl: ^LClosure, k: int) {
 // `luaG_traceexec` clears it again the moment the relevant masks are gone.
 
 // Reload the instruction-count-down from its base -- reference `resethookcount`.
-resethookcount :: #force_inline proc "contextless" (L: ^Lua_State) {
+resethookcount :: #force_inline proc "contextless" (L: ^State) {
 	L.hookcount = L.basehookcount
 }
 
 // Mark every live Lua frame as trapping, so the VM will call `luaG_traceexec`
 // before each instruction -- reference Lua's `settraps`. Called when a hook is
 // installed. C frames have no per-instruction dispatch, so they are skipped.
-settraps :: proc(L: ^Lua_State) {
+settraps :: proc(L: ^State) {
 	for i := L.ci; i >= 0; i -= 1 {
 		if is_lua_frame(&L.frames[i]) {
 			L.frames[i].u.l.trap = 1
@@ -631,7 +631,7 @@ changedline :: proc(p: ^Proto, oldpc, newpc: int) -> bool {
 	if p.lineinfo == nil {
 		return false // stripped chunk: never report a line change
 	}
-	return luaG_getfuncline(p, oldpc) != luaG_getfuncline(p, newpc)
+	return debug_getfuncline(p, oldpc) != debug_getfuncline(p, newpc)
 }
 
 // Trace the execution of a Lua function, firing count and line hooks as needed --
@@ -646,11 +646,11 @@ changedline :: proc(p: ^Proto, oldpc, newpc: int) -> bool {
 // the frame's register top before calling the hook, so the hook sees a tidy
 // stack. Instructions that *do* use top (a multi-value CALL/RETURN setup) are
 // left alone.
-luaG_traceexec :: proc(L: ^Lua_State, pc: int) -> i32 {
+debug_traceexec :: proc(L: ^State, pc: int) -> i32 {
 	ci := &L.frames[L.ci]
 	mask := L.hookmask
 	p := ci_func(L, ci).p
-	if mask & (LUA_MASKLINE | LUA_MASKCOUNT) == 0 {
+	if mask & (MASKLINE | MASKCOUNT) == 0 {
 		ci.u.l.trap = 0 // no line/count hook: stop trapping this frame
 		return 0
 	}
@@ -658,10 +658,10 @@ luaG_traceexec :: proc(L: ^Lua_State, pc: int) -> i32 {
 	ci.u.l.savedpc = pc + 1 // reference's `savepc`: savedpc points at the *next* instr
 	counthook := false
 	L.hookcount -= 1
-	if L.hookcount == 0 && (mask & LUA_MASKCOUNT) != 0 {
+	if L.hookcount == 0 && (mask & MASKCOUNT) != 0 {
 		counthook = true
 		resethookcount(L)
-	} else if mask & LUA_MASKLINE == 0 {
+	} else if mask & MASKLINE == 0 {
 		return 1 // only a count hook, and it isn't due yet
 	}
 	if ci.callstatus & CIST_HOOKYIELD != 0 {
@@ -673,13 +673,13 @@ luaG_traceexec :: proc(L: ^Lua_State, pc: int) -> i32 {
 		L.top = ci.top
 	}
 	if counthook {
-		luaD_hook(L, LUA_HOOKCOUNT, -1, 0, 0)
+		do_hook(L, HOOKCOUNT, -1, 0, 0)
 	}
-	if mask & LUA_MASKLINE != 0 {
+	if mask & MASKLINE != 0 {
 		oldpc := L.oldpc < p.sizecode ? L.oldpc : 0
 		if npci <= oldpc || changedline(p, oldpc, npci) {
-			newline := luaG_getfuncline(p, npci)
-			luaD_hook(L, LUA_HOOKLINE, newline, 0, 0)
+			newline := debug_getfuncline(p, npci)
+			do_hook(L, HOOKLINE, newline, 0, 0)
 		}
 		L.oldpc = npci
 	}
@@ -717,8 +717,8 @@ Async_Hook_Request :: struct {
 // driver policy. Embedders never arm it, so their VM fast path sees nil.
 async_hook_request: ^Async_Hook_Request
 
-lua_prepare_async_hook :: proc(
-	L: ^Lua_State,
+api_prepare_async_hook :: proc(
+	L: ^State,
 	request: ^Async_Hook_Request,
 	hook: Hook_Proc,
 	mask, count: i32,
@@ -732,11 +732,11 @@ lua_prepare_async_hook :: proc(
 
 // This is intentionally the only operation an OS handler performs. It is not a
 // general Lua API call: one atomic store is the whole implementation.
-lua_request_async_hook :: proc "contextless" (request: ^Async_Hook_Request) {
+api_request_async_hook :: proc "contextless" (request: ^Async_Hook_Request) {
 	intrinsics.atomic_store(&request.pending, i32(1))
 }
 
-lua_disarm_async_hook :: proc(L: ^Lua_State, request: ^Async_Hook_Request) {
+api_disarm_async_hook :: proc(L: ^State, request: ^Async_Hook_Request) {
 	if async_hook_request == request {
 		async_hook_request = nil
 	}
@@ -748,7 +748,7 @@ lua_disarm_async_hook :: proc(L: ^Lua_State, request: ^Async_Hook_Request) {
 // The initial load matters for performance: an exchange is a locked read/modify/
 // write even when no interrupt is pending, whereas the overwhelmingly common
 // zero case needs only an acquire load and a branch.
-lua_apply_async_hook :: proc(L: ^Lua_State) -> bool {
+api_apply_async_hook :: proc(L: ^State) -> bool {
 	request := async_hook_request
 	if request == nil || intrinsics.atomic_load(&request.pending) == 0 {
 		return false
@@ -756,14 +756,14 @@ lua_apply_async_hook :: proc(L: ^Lua_State) -> bool {
 	if intrinsics.atomic_exchange(&request.pending, i32(0)) == 0 {
 		return false
 	}
-	lua_sethook(L, request.hook, request.mask, request.count)
+	api_sethook(L, request.hook, request.mask, request.count)
 	return true
 }
 
 // Install (or, with a nil func / zero mask, remove) a debug hook -- reference
 // `lua_sethook`. Installing a hook arms the trap flag on every live Lua frame so
 // the VM starts consulting `luaG_traceexec`.
-lua_sethook :: proc(L: ^Lua_State, fn: Hook_Proc, mask: i32, count: i32) {
+api_sethook :: proc(L: ^State, fn: Hook_Proc, mask: i32, count: i32) {
 	fn := fn
 	mask := mask
 	if fn == nil || mask == 0 { // turning hooks off
@@ -779,22 +779,22 @@ lua_sethook :: proc(L: ^Lua_State, fn: Hook_Proc, mask: i32, count: i32) {
 	}
 }
 
-lua_gethook :: proc(L: ^Lua_State) -> Hook_Proc {
+api_gethook :: proc(L: ^State) -> Hook_Proc {
 	return L.hook
 }
 
-lua_gethookmask :: proc(L: ^Lua_State) -> i32 {
+api_gethookmask :: proc(L: ^State) -> i32 {
 	return L.hookmask
 }
 
-lua_gethookcount :: proc(L: ^Lua_State) -> i32 {
+api_gethookcount :: proc(L: ^State) -> i32 {
 	return L.basehookcount
 }
 
 // Resolve stack `level` (0 = the current running frame) to a `Lua_Debug` record
 // identifying that frame -- reference `lua_getstack`. Frame index 0 (the C entry
 // frame) is excluded, exactly as reference excludes `base_ci`.
-lua_getstack :: proc(L: ^Lua_State, level: int, ar: ^Lua_Debug) -> bool {
+api_getstack :: proc(L: ^State, level: int, ar: ^Debug_Info) -> bool {
 	if level < 0 {
 		return false // an invalid (negative) level
 	}
@@ -815,10 +815,10 @@ lua_getstack :: proc(L: ^Lua_State, level: int, ar: ^Lua_Debug) -> bool {
 // `auxgetinfo`. `func` is the function value the record describes; `ci_idx` is its
 // frame (or -1 for a function pulled off the stack via the '>' selector).
 @(private = "file")
-auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_idx: int) -> bool {
+auxgetinfo :: proc(L: ^State, what: string, ar: ^Debug_Info, fv: ^TValue, ci_idx: int) -> bool {
 	status := true
 	is_lua := is_lua_closure(fv)
-	p: ^Proto = is_lua ? lua_closure_value(fv).p : nil
+	p: ^Proto = is_lua ? api_closure_value(fv).p : nil
 	for c in transmute([]u8)what {
 		switch c {
 		case 'S':
@@ -840,13 +840,13 @@ auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_
 			// Without a terminator a short label like "[C]" would show stale bytes
 			// from a previous, longer source. `w` is always < LUA_IDSIZE, so there
 			// is room to place the NUL.
-			w := luaO_chunkid(ar.short_src[:], ar.source)
+			w := object_chunkid(ar.short_src[:], ar.source)
 			ar.short_src[w] = 0
 		case 'l':
 			ar.currentline = (p != nil && ci_idx >= 0) ? i32(getcurrentline(L, &L.frames[ci_idx])) : -1
 		case 'u':
 			if is_lua {
-				ar.nups = u8(lua_closure_value(fv).nupvalues)
+				ar.nups = u8(api_closure_value(fv).nupvalues)
 			} else if is_c_closure(fv) {
 				ar.nups = u8(c_closure_value(fv).nupvalues)
 			} else {
@@ -909,13 +909,13 @@ auxgetinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug, fv: ^TValue, ci_
 // `lua_getinfo`. A leading '>' pops a function off the top of the stack to
 // describe; otherwise `ar.i_ci` (from `lua_getstack`) selects the frame. The 'f'
 // option pushes the function and 'L' pushes a table of its valid lines.
-lua_getinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug) -> bool {
+api_getinfo :: proc(L: ^State, what: string, ar: ^Debug_Info) -> bool {
 	what := what
 	fv: ^TValue
 	ci_idx := -1
 	if len(what) > 0 && what[0] == '>' {
 		fv = stack_value(L, L.top - 1)
-		assert(is_function(fv), "function expected in lua_getinfo")
+		assert(is_function(fv), "function expected in api_getinfo")
 		what = what[1:]
 		L.top -= 1 // pop the function
 	} else {
@@ -939,14 +939,14 @@ lua_getinfo :: proc(L: ^Lua_State, what: string, ar: ^Lua_Debug) -> bool {
 // Lua's `collectvalidlines`. For a C function (no line info) it pushes nil, again
 // matching reference.
 @(private = "file")
-collectvalidlines :: proc(L: ^Lua_State, fv: ^TValue) {
+collectvalidlines :: proc(L: ^State, fv: ^TValue) {
 	if !is_lua_closure(fv) {
 		set_nil(stack_value(L, L.top))
 		L.top += 1
 		return
 	}
-	p := lua_closure_value(fv).p
-	t := luaH_new(L)
+	p := api_closure_value(fv).p
+	t := table_new(L)
 	set_gc(stack_value(L, L.top), obj2gco(t))
 	L.top += 1
 	if p.lineinfo != nil {
@@ -964,7 +964,7 @@ collectvalidlines :: proc(L: ^Lua_State, fv: ^TValue) {
 		}
 		for ; i < p.sizecode; i += 1 {
 			currentline = nextline(p, currentline, i)
-			luaH_setint(L, t, Integer(currentline), &active)
+			table_setint(L, t, Integer(currentline), &active)
 		}
 	}
 }
@@ -974,7 +974,7 @@ collectvalidlines :: proc(L: ^Lua_State, fv: ^TValue) {
 @(private = "file")
 nextline :: proc(p: ^Proto, currentline: int, pc: int) -> int {
 	if p.lineinfo[pc] == ABSLINEINFO {
-		return luaG_getfuncline(p, pc)
+		return debug_getfuncline(p, pc)
 	}
 	return currentline + int(p.lineinfo[pc])
 }
@@ -982,7 +982,7 @@ nextline :: proc(p: ^Proto, currentline: int, pc: int) -> int {
 // Return the name of local variable number `n` in the frame `ar` describes, and
 // push its current value -- reference `lua_getlocal`. With a '>' style `ar`
 // (i_ci < 0) it instead reports a function's parameter names without a value.
-lua_getlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok: bool) {
+api_getlocal :: proc(L: ^State, ar: ^Debug_Info, n: int) -> (name: string, ok: bool) {
 	if ar == nil {
 		// "Non-active function" form: the function sits on top of the stack and we
 		// report its parameter *names* only (no live value to push). Reference Lua
@@ -991,8 +991,8 @@ lua_getlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok
 		if !is_lua_closure(fv) {
 			return "", false // only Lua functions carry local-variable names
 		}
-		p := lua_closure_value(fv).p
-		nm := luaF_getlocalname(p, n, 0)
+		p := api_closure_value(fv).p
+		nm := func_getlocalname(p, n, 0)
 		if nm == nil {
 			return "", false
 		}
@@ -1009,7 +1009,7 @@ lua_getlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok
 
 // Set local variable number `n` from the popped top value -- reference
 // `lua_setlocal`.
-lua_setlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok: bool) {
+api_setlocal :: proc(L: ^State, ar: ^Debug_Info, n: int) -> (name: string, ok: bool) {
 	nm, pos, found := findlocal(L, ar.i_ci, n)
 	if !found {
 		return "", false
@@ -1025,7 +1025,7 @@ lua_setlocal :: proc(L: ^Lua_State, ar: ^Lua_Debug, n: int) -> (name: string, ok
 // values (only in the PF_VAHID model, where extras sit just below `func`). A
 // positive slot with no source-level name but still inside the frame's live stack
 // window gets a generic "(temporary)"/"(C temporary)" name, exactly like reference.
-findlocal :: proc(L: ^Lua_State, ci_idx: int, n: int) -> (name: string, pos: int, ok: bool) {
+findlocal :: proc(L: ^State, ci_idx: int, n: int) -> (name: string, pos: int, ok: bool) {
 	ci := &L.frames[ci_idx]
 	base := ci.func + 1
 	found := false
@@ -1033,7 +1033,7 @@ findlocal :: proc(L: ^Lua_State, ci_idx: int, n: int) -> (name: string, pos: int
 		if n < 0 {
 			// Access to vararg values. The extras were hidden just below `func`
 			// when the frame was set up (see luaT_adjustvarargs, PF_VAHID model).
-			p := lua_closure_value(stack_value(L, ci.func)).p
+			p := api_closure_value(stack_value(L, ci.func)).p
 			if (p.flag & PF_VAHID) != 0 {
 				nextra := ci.u.l.nextraargs
 				if n >= -nextra {
@@ -1042,7 +1042,7 @@ findlocal :: proc(L: ^Lua_State, ci_idx: int, n: int) -> (name: string, pos: int
 			}
 			return "", 0, false // no such vararg
 		}
-		nm := luaF_getlocalname(ci_func(L, ci).p, n, currentpc(ci))
+		nm := func_getlocalname(ci_func(L, ci).p, n, currentpc(ci))
 
 		if nm != nil {
 			name = string(str_slice(nm))

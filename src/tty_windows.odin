@@ -16,7 +16,7 @@ package main
 
 import win "core:sys/windows"
 
-lua_stdin_is_tty :: proc() -> bool {
+stdin_is_tty :: proc() -> bool {
 	mode: win.DWORD
 	handle := win.GetStdHandle(win.STD_INPUT_HANDLE)
 	return win.GetConsoleMode(handle, &mode) != win.FALSE

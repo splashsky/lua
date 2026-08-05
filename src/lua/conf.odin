@@ -64,26 +64,26 @@ N2S_BUFF_SZ :: 64
 // The maximum length of a "chunk id" -- the short, human-readable source name Lua
 // prints in error messages (`luaO_chunkid` truncates to this). Reference Lua's
 // `LUA_IDSIZE`.
-LUA_IDSIZE :: 60
+IDSIZE :: 60
 
 // The initial size the lexer gives its token-accumulation buffer. Reference Lua's
 // `LUA_MINBUFFER`.
-LUA_MINBUFFER :: 32
+MINBUFFER :: 32
 
 // The name of the upvalue that holds the global environment. Reference Lua's
 // `LUA_ENV`.
-LUA_ENV :: "_ENV"
+ENV_NAME :: "_ENV"
 
 // Whether `global` is treated as a plain identifier rather than a reserved word.
 // Reference luaconf.h defines `LUA_COMPAT_GLOBAL` unconditionally in 5.5, so the
 // default build does NOT reserve `global`; we match that here. Flip to `false`
 // to enable the 5.5 `global` declaration keyword.
-LUA_COMPAT_GLOBAL :: true
+COMPAT_GLOBAL :: true
 
 // The "give me all results" sentinel for calls and varargs -- reference Lua's
 // `LUA_MULTRET` (lua.h). A call or vararg asked for `LUA_MULTRET` results returns
 // as many as it produces, adjusting the stack top rather than a fixed count.
-LUA_MULTRET :: -1
+MULTRET :: -1
 
 // ---------------------------------------------------------------------------
 // Embedding-API constants (reference `lua.h`)
@@ -100,90 +100,81 @@ LUA_MULTRET :: -1
 // derives the base from `INT_MAX/2` (not `LUAI_MAXSTACK`) precisely so it can never
 // collide with a real negative (top-relative) index, whose magnitude is bounded by
 // the far smaller `LUAI_MAXSTACK`.
-LUA_REGISTRYINDEX :: -(2147483647 / 2 + 1000)
+REGISTRYINDEX :: -(2147483647 / 2 + 1000)
 
 // The pseudo-index of the `i`-th upvalue of the running C function -- reference
 // Lua's `lua_upvalueindex` macro. Upvalue 1 is `LUA_REGISTRYINDEX - 1`, and so on
 // downward, so `index2value` recognizes any `idx < LUA_REGISTRYINDEX` as an upvalue.
-lua_upvalueindex :: #force_inline proc "contextless" (i: int) -> int {
-	return LUA_REGISTRYINDEX - i
+upvalueindex :: #force_inline proc "contextless" (i: int) -> int {
+	return REGISTRYINDEX - i
 }
 
 // The magic prefix of a precompiled (binary) chunk -- reference Lua's
 // `LUA_SIGNATURE`. `lua_load` peeks the first byte: an ESC (0x1b) means "binary,
 // hand off to the undumper"; anything else means "source text, hand off to the
 // parser".
-LUA_SIGNATURE :: "\x1bLua"
+SIGNATURE :: "\x1bLua"
 
 // The arithmetic operator selectors accepted by `lua_arith` -- reference Lua's
 // `LUA_OPADD` .. `LUA_OPBNOT`. Their integer values deliberately match our internal
 // `Arith_Op` enum (0..13) *and* the `TM_ADD`-relative metamethod order, so the API
 // can pass them straight through.
-LUA_OPADD :: 0
-LUA_OPSUB :: 1
-LUA_OPMUL :: 2
-LUA_OPMOD :: 3
-LUA_OPPOW :: 4
-LUA_OPDIV :: 5
-LUA_OPIDIV :: 6
-LUA_OPBAND :: 7
-LUA_OPBOR :: 8
-LUA_OPBXOR :: 9
-LUA_OPSHL :: 10
-LUA_OPSHR :: 11
-LUA_OPUNM :: 12
-LUA_OPBNOT :: 13
+OPADD :: 0
+OPSUB :: 1
+OPMUL :: 2
+OPMOD :: 3
+OPPOW :: 4
+OPDIV :: 5
+OPIDIV :: 6
+OPBAND :: 7
+OPBOR :: 8
+OPBXOR :: 9
+OPSHL :: 10
+OPSHR :: 11
+OPUNM :: 12
+OPBNOT :: 13
 
 // The comparison selectors accepted by `lua_compare` -- reference Lua's `LUA_OPEQ`
 // / `LUA_OPLT` / `LUA_OPLE`.
-LUA_OPEQ :: 0
-LUA_OPLT :: 1
-LUA_OPLE :: 2
+OPEQ :: 0
+OPLT :: 1
+OPLE :: 2
 
 // The `what` selectors for `lua_gc` -- reference Lua's `LUA_GC*`. Phase 6 wires the
 // ones the current (deterministic, Phase-3-foundation) collector can honor; the
 // incremental/generational knobs land with the full collector in Phase 7.
-LUA_GCSTOP :: 0
-LUA_GCRESTART :: 1
-LUA_GCCOLLECT :: 2
-LUA_GCCOUNT :: 3
-LUA_GCCOUNTB :: 4
-LUA_GCSTEP :: 5
-LUA_GCISRUNNING :: 6
-LUA_GCGEN :: 7
-LUA_GCINC :: 8
-LUA_GCPARAM :: 9 // adjust a GC parameter (reference LUA_GCPARAM)
+GCSTOP :: 0
+GCRESTART :: 1
+GCCOLLECT :: 2
+GCCOUNT :: 3
+GCCOUNTB :: 4
+GCSTEP :: 5
+GCISRUNNING :: 6
+GCGEN :: 7
+GCINC :: 8
+GCPARAM :: 9 // adjust a GC parameter (reference LUA_GCPARAM)
 
 // The tunable GC parameters, indices into `Global_State.gcparams` -- reference
 // Lua's `LUA_GCP*` (lua.h). Each is stored float-coded (see luaO_codeparam).
-LUA_GCPMINORMUL :: 0 // % new bytes that triggers a minor collection
-LUA_GCPMAJORMINOR :: 1 // % that shifts a major cycle back to minor
-LUA_GCPMINORMAJOR :: 2 // % old bytes that shifts minor -> major
-LUA_GCPPAUSE :: 3 // % heap growth before the next incremental cycle
-LUA_GCPSTEPMUL :: 4 // GC "speed": work units per allocated word
-LUA_GCPSTEPSIZE :: 5 // GC granularity, in bytes per step
-LUA_GCPN :: 6 // number of GC parameters
+GCPMINORMUL :: 0 // % new bytes that triggers a minor collection
+GCPMAJORMINOR :: 1 // % that shifts a major cycle back to minor
+GCPMINORMAJOR :: 2 // % old bytes that shifts minor -> major
+GCPPAUSE :: 3 // % heap growth before the next incremental cycle
+GCPSTEPMUL :: 4 // GC "speed": work units per allocated word
+GCPSTEPSIZE :: 5 // GC granularity, in bytes per step
+GCPN :: 6 // number of GC parameters
 
 // The reference default values for those parameters (lgc.h). Percentages are
 // fed through `luaO_codeparam`; STEPSIZE is a byte count recovered by applying
 // the coded value to 100.
-LUAI_GCPAUSE :: 250
-LUAI_GCMUL :: 200
-LUAI_GCSTEPSIZE_PCT :: 200 * size_of(Table)
-LUAI_GENMINORMUL :: 20
-LUAI_MINORMAJOR :: 70
-LUAI_MAJORMINOR :: 50
+GCPAUSE :: 250
+GCMUL :: 200
+GCSTEPSIZE_PCT :: 200 * size_of(Table)
+GENMINORMUL :: 20
+MINORMAJOR :: 70
+MAJORMINOR :: 50
 // The public type selectors returned by `lua_type` and passed to `lua_typename`
-// -- reference Lua's `LUA_TNONE` / `LUA_T*` (lua.h). These are just re-exports of
-// the kernel's base tags under their public API spelling, so the standard library
-// (a separate package) can name types without reaching into `object.odin`.
-LUA_TNONE :: TNONE
-LUA_TNIL :: TNIL
-LUA_TBOOLEAN :: TBOOLEAN
-LUA_TLIGHTUSERDATA :: TLIGHTUSERDATA
-LUA_TNUMBER :: TNUMBER
-LUA_TSTRING :: TSTRING
-LUA_TTABLE :: TTABLE
-LUA_TFUNCTION :: TFUNCTION
-LUA_TUSERDATA :: TUSERDATA
-LUA_TTHREAD :: TTHREAD
+// -- reference Lua's `LUA_TNONE` / `LUA_T*` (lua.h). The kernel's own base tags
+// (`TNONE`, `TNIL`, ... in object.odin) *are* those selectors: they share one
+// package namespace, so the standard library (a separate package) names them
+// directly as `kernel.TNIL` and no aliasing layer is needed.

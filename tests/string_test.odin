@@ -34,8 +34,8 @@ short_strings_are_interned :: proc(t: ^testing.T) {
 	// caller's pointer identity.
 	testing.expect(t, &buf_a[0] != &buf_b[0], "buffers must be distinct")
 
-	a := lua.luaS_newlstr(L, ([^]u8)(&buf_a[0]), 5)
-	b := lua.luaS_newlstr(L, ([^]u8)(&buf_b[0]), 5)
+	a := lua.string_newlstr(L, ([^]u8)(&buf_a[0]), 5)
+	b := lua.string_newlstr(L, ([^]u8)(&buf_b[0]), 5)
 	testing.expect(t, a != nil && b != nil)
 	testing.expect(t, a == b, "equal short strings must intern to one object")
 	testing.expect_value(t, str_contents(a), "hello")
@@ -50,13 +50,13 @@ distinct_short_strings_differ :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	a := lua.luaS_new(L, "alpha")
-	b := lua.luaS_new(L, "beta")
-	c := lua.luaS_new(L, "alpha")
+	a := lua.string_new(L, "alpha")
+	b := lua.string_new(L, "beta")
+	c := lua.string_new(L, "alpha")
 	testing.expect(t, a != b, "different contents must not share an object")
 	testing.expect(t, a == c, "repeat of the same content re-uses the object")
-	testing.expect(t, lua.luaS_eqstr(a, c), "eqstr must hold for interned equals")
-	testing.expect(t, !lua.luaS_eqstr(a, b), "eqstr must fail for different strings")
+	testing.expect(t, lua.string_eqstr(a, c), "eqstr must hold for interned equals")
+	testing.expect(t, !lua.string_eqstr(a, b), "eqstr must fail for different strings")
 }
 
 // Long strings (longer than MAXSHORTLEN) are intentionally never interned: two
@@ -77,15 +77,15 @@ long_strings_are_not_interned :: proc(t: ^testing.T) {
 		buf_b[i] = 'x'
 	}
 
-	a := lua.luaS_newlstr(L, ([^]u8)(&buf_a[0]), 50)
-	b := lua.luaS_newlstr(L, ([^]u8)(&buf_b[0]), 50)
+	a := lua.string_newlstr(L, ([^]u8)(&buf_a[0]), 50)
+	b := lua.string_newlstr(L, ([^]u8)(&buf_b[0]), 50)
 	testing.expect(t, a != nil && b != nil)
 	testing.expect(t, a.tt == lua.VLNGSTR, "long strings carry the VLNGSTR tag")
 	testing.expect(t, a != b, "equal long strings stay as separate objects")
 
 	// Content is still equal, and the long-string comparison helper must say so
 	// even though the objects differ.
-	testing.expect(t, lua.luaS_eqlngstr(a, b), "eqlngstr compares by content")
+	testing.expect(t, lua.string_eqlngstr(a, b), "eqlngstr compares by content")
 	testing.expect_value(t, len(str_contents(a)), 50)
 }
 
@@ -104,14 +104,14 @@ string_table_grows_and_keeps_interning :: proc(t: ^testing.T) {
 	for i in 0 ..< 400 {
 		buf: [16]u8
 		n := format_uint_into(buf[:], u64(i))
-		firsts[i] = lua.luaS_newlstr(L, ([^]u8)(&buf[0]), uint(n))
+		firsts[i] = lua.string_newlstr(L, ([^]u8)(&buf[0]), uint(n))
 		testing.expect(t, firsts[i] != nil)
 	}
 	// Re-intern each: it must return the identical object stored the first time.
 	for i in 0 ..< 400 {
 		buf: [16]u8
 		n := format_uint_into(buf[:], u64(i))
-		again := lua.luaS_newlstr(L, ([^]u8)(&buf[0]), uint(n))
+		again := lua.string_newlstr(L, ([^]u8)(&buf[0]), uint(n))
 		testing.expect(t, again == firsts[i], "interning must be stable across growth")
 	}
 }

@@ -25,7 +25,7 @@ package lua
 // a fragment of a larger message still to be continued; the handler uses it to
 // decide whether to flush a newline. If no handler is installed the warning is
 // silently dropped, exactly as reference Lua does when `g->warnf` is nil.
-lua_warning :: proc(L: ^Lua_State, msg: cstring, tocont: bool) {
+api_warning :: proc(L: ^State, msg: cstring, tocont: bool) {
 	g := L.g
 	if g.warnf != nil {
 		g.warnf(g.ud_warn, msg, tocont ? 1 : 0)
@@ -34,7 +34,7 @@ lua_warning :: proc(L: ^Lua_State, msg: cstring, tocont: bool) {
 
 // Install a new warning handler and its opaque user-data pointer -- reference
 // `lua_setwarnf`. Passing `nil` for `f` disables warnings.
-lua_setwarnf :: proc(L: ^Lua_State, f: Warn_Proc, ud: rawptr) {
+api_setwarnf :: proc(L: ^State, f: Warn_Proc, ud: rawptr) {
 	g := L.g
 	g.ud_warn = ud
 	g.warnf = f
@@ -50,12 +50,12 @@ lua_setwarnf :: proc(L: ^Lua_State, f: Warn_Proc, ud: rawptr) {
 // vector, so callers can both read the shared `UpVal*` and overwrite it (that is
 // how `lua_upvaluejoin` makes two closures share one upvalue). Only valid for Lua
 // closures; the caller must have already established that.
-getupvalref :: proc(L: ^Lua_State, fidx: int, n: int) -> (slot: ^^UpVal, f: ^LClosure, ok: bool) {
+getupvalref :: proc(L: ^State, fidx: int, n: int) -> (slot: ^^UpVal, f: ^LClosure, ok: bool) {
 	fi := index2value(L, fidx)
 	// Callers are contractually required to pass a Lua closure here. We assert on
 	// the tag rather than silently misbehaving, matching reference `api_check`.
-	assert(type_tag(fi) == VLCL, "lua_upvaluejoin/upvalueid on a non-Lua closure")
-	cl := lua_closure_value(fi)
+	assert(type_tag(fi) == VLCL, "api_upvaluejoin/upvalueid on a non-Lua closure")
+	cl := api_closure_value(fi)
 	// Reference `getupvalref` does NOT assert on an out-of-range index: it returns
 	// a pointer to a static NULL upvalue so callers can detect the miss. We mirror
 	// that with an `ok` flag (nil slot when false); `debug.upvalueid(f, 99)` must
@@ -72,7 +72,7 @@ getupvalref :: proc(L: ^Lua_State, fidx: int, n: int) -> (slot: ^^UpVal, f: ^LCl
 //   * Lua closure: the shared `UpVal*` object (its address is the identity).
 //   * C closure:   the address of the boxed `TValue` (C upvalues are never shared).
 //   * light C fn:  nil -- light functions carry no upvalues at all.
-lua_upvalueid :: proc(L: ^Lua_State, fidx: int, n: int) -> rawptr {
+api_upvalueid :: proc(L: ^State, fidx: int, n: int) -> rawptr {
 	fi := index2value(L, fidx)
 	switch type_tag(fi) {
 	case VLCL:
@@ -90,7 +90,7 @@ lua_upvalueid :: proc(L: ^Lua_State, fidx: int, n: int) -> rawptr {
 	case VLCF:
 		return nil // light C functions have no upvalues
 	case:
-		assert(false, "lua_upvalueid on a non-function value")
+		assert(false, "api_upvalueid on a non-function value")
 		return nil
 	}
 }
@@ -100,7 +100,7 @@ lua_upvalueid :: proc(L: ^Lua_State, fidx: int, n: int) -> rawptr {
 // be Lua closures. After the join, mutating one closure's upvalue is observable
 // through the other. We fire a forward barrier because `f1` now points at an object
 // (`*up1`) it did not reference before, and the GC must not lose track of it.
-lua_upvaluejoin :: proc(L: ^Lua_State, fidx1: int, n1: int, fidx2: int, n2: int) {
+api_upvaluejoin :: proc(L: ^State, fidx1: int, n1: int, fidx2: int, n2: int) {
 	up1, f1, ok1 := getupvalref(L, fidx1, n1)
 	up2, _, ok2 := getupvalref(L, fidx2, n2)
 	// Reference `api_check`s that both indices resolved; the stdlib wrapper
@@ -108,7 +108,7 @@ lua_upvaluejoin :: proc(L: ^Lua_State, fidx1: int, n1: int, fidx2: int, n2: int)
 	// a misbehaving direct C-API caller.
 	assert(ok1 && ok2, "invalid upvalue index")
 	up1^ = up2^
-	luaC_barrier(L, obj2gco(f1), obj2gco(up1^))
+	gc_barrier(L, obj2gco(f1), obj2gco(up1^))
 }
 
 // --------------------------------------------------------------------------------
@@ -128,7 +128,7 @@ lua_upvaluejoin :: proc(L: ^Lua_State, fidx1: int, n1: int, fidx2: int, n2: int)
 //      simply reset `top` to slot 1 (an empty, ready-to-use stack).
 //   5. Shrink the value stack back down to the base frame's declared top, releasing
 //      any growth the dead computation had forced.
-luaE_resetthread :: proc(L: ^Lua_State, status_in: Thread_Status) -> Thread_Status {
+state_resetthread :: proc(L: ^State, status_in: Thread_Status) -> Thread_Status {
 	reset_ci(L) // collapse to the base frame; also clears L.status/errfunc
 
 	status := status_in
@@ -137,7 +137,7 @@ luaE_resetthread :: proc(L: ^Lua_State, status_in: Thread_Status) -> Thread_Stat
 	}
 	// Close every to-be-closed variable above stack slot 1, under protection so a
 	// throwing `__close` handler cannot escape past us.
-	status = luaD_closeprotected(L, 1, status)
+	status = do_closeprotected(L, 1, status)
 	if status != .Ok {
 		// A close handler raised: park its error object at slot 1 for the caller.
 		set_error_object(L, status, 1)
@@ -156,7 +156,7 @@ luaE_resetthread :: proc(L: ^Lua_State, status_in: Thread_Status) -> Thread_Stat
 // `from` is the thread performing the close (used by reference Lua to restore the
 // C-call counter); we thread the yieldable/C-call bookkeeping through `nCcalls`
 // the same way the resume path does. The heavy lifting lives in `luaE_resetthread`.
-lua_closethread :: proc(L: ^Lua_State, from: ^Lua_State) -> Thread_Status {
+api_closethread :: proc(L: ^State, from: ^State) -> Thread_Status {
 	if from != nil {
 		// Inherit the caller's C-call budget so the close handlers run with a sane
 		// stack-depth guard (reference copies `getCcalls(from)`).
@@ -164,7 +164,7 @@ lua_closethread :: proc(L: ^Lua_State, from: ^Lua_State) -> Thread_Status {
 	} else {
 		L.n_ccalls = 0
 	}
-	status := luaE_resetthread(L, L.status)
+	status := state_resetthread(L, L.status)
 	if L == from { // closing itself: unwind the whole thread, do not return
 		throw_baselevel(L, status)
 	}

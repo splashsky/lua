@@ -87,7 +87,7 @@ change_white :: #force_inline proc "contextless" (o: ^GCObject) {
 
 // The current white shade as a bare bitmask -- the color every freshly created
 // object is painted. Reference `luaC_white`.
-luaC_white :: #force_inline proc "contextless" (g: ^Global_State) -> Byte {
+gc_white :: #force_inline proc "contextless" (g: ^Global_State) -> Byte {
 	return g.currentwhite & WHITEBITS
 }
 
@@ -106,7 +106,7 @@ set2black :: #force_inline proc "contextless" (o: ^GCObject) {
 // reference Lua's `makewhite`. Used by the sweep and by the forward barrier's
 // sweep-phase shortcut. The age bits are preserved.
 makewhite :: #force_inline proc "contextless" (g: ^Global_State, o: ^GCObject) {
-	o.marked = (o.marked & ~Byte(MASK_COLORS)) | luaC_white(g)
+	o.marked = (o.marked & ~Byte(MASK_COLORS)) | gc_white(g)
 }
 
 // Is the object flagged for finalization (its `__gc` has been noticed and it now
@@ -131,7 +131,7 @@ tofinalize :: #force_inline proc "contextless" (o: ^GCObject) -> bool {
 
 obj2gco :: #force_inline proc "contextless" (x: ^$T) -> ^GCObject
 	where T == Table || T == TString || T == Udata || T == UpVal ||
-	      T == CClosure || T == LClosure || T == Proto || T == Lua_State
+	      T == CClosure || T == LClosure || T == Proto || T == State
 {
 	return (^GCObject)(x)
 }
@@ -146,14 +146,14 @@ obj2gco :: #force_inline proc "contextless" (x: ^$T) -> ^GCObject
 // unrooted; the caller must make it reachable before the next allocation that
 // could trigger a collection. Returns nil if the allocation fails (the caller
 // raises the memory error, since it has the context to unwind).
-luaC_newobj :: proc(L: ^Lua_State, tt: Byte, size: uint) -> ^GCObject {
+gc_newobj :: proc(L: ^State, tt: Byte, size: uint) -> ^GCObject {
 	g := L.g
 	p := state_realloc(L, nil, uint(no_variant(tt)), size)
 	if p == nil {
 		return nil
 	}
 	o := (^GCObject)(p)
-	o.marked = luaC_white(g)
+	o.marked = gc_white(g)
 	o.tt = tt
 	o.next = g.allgc
 	g.allgc = o
@@ -165,9 +165,9 @@ luaC_newobj :: proc(L: ^Lua_State, tt: Byte, size: uint) -> ^GCObject {
 // `luaC_fix`. Used for the handful of strings (metamethod names, the memory-error
 // message) that must exist for the entire life of the state. It must be called
 // immediately after creation, while the object is still the head of `allgc`.
-luaC_fix :: proc(L: ^Lua_State, o: ^GCObject) {
+gc_fix :: proc(L: ^State, o: ^GCObject) {
 	g := L.g
-	assert(g.allgc == o, "luaC_fix: object must be the newest allgc entry")
+	assert(g.allgc == o, "gc_fix: object must be the newest allgc entry")
 	set2gray(o) // fixed objects are gray forever...
 	o.marked = (o.marked & ~Byte(AGE_BITS)) | G_OLD // ...and old forever
 	g.allgc = o.next // unlink from the sweep list
@@ -245,7 +245,7 @@ nextage := [G_TOUCHED2 + 1]u8 {
 // `o` back to white so the (now legal) edge stops re-triggering the barrier.
 // Generationally, a forward edge out of an old object drags `v` up to G_OLD0 so
 // it is not reclaimed by the next minor cycle. Reference `luaC_barrier_`.
-luaC_barrier_ :: proc(L: ^Lua_State, o: ^GCObject, v: ^GCObject) {
+gc_barrier_ :: proc(L: ^State, o: ^GCObject, v: ^GCObject) {
 	g := L.g
 	if keepinvariant(g) { // during propagate/atomic: mark the new child
 		reallymarkobject(g, v)
@@ -263,9 +263,9 @@ luaC_barrier_ :: proc(L: ^Lua_State, o: ^GCObject, v: ^GCObject) {
 
 // The wrapper: only bother if `o` is black and `v` is white. Reference
 // `luaC_objbarrier` / `luaC_barrier`.
-luaC_barrier :: #force_inline proc(L: ^Lua_State, o: ^GCObject, v: ^GCObject) {
+gc_barrier :: #force_inline proc(L: ^State, o: ^GCObject, v: ^GCObject) {
 	if is_black(o) && is_white(v) {
-		luaC_barrier_(L, o, v)
+		gc_barrier_(L, o, v)
 	}
 }
 
@@ -273,7 +273,7 @@ luaC_barrier :: #force_inline proc(L: ^Lua_State, o: ^GCObject, v: ^GCObject) {
 // than mark the entry, we re-gray the container so it is rescanned in the atomic
 // phase. A generational old container becomes G_TOUCHED1 so the correction pass
 // keeps it on a gray list. Reference `luaC_barrierback_`.
-luaC_barrierback_ :: proc(L: ^Lua_State, o: ^GCObject) {
+gc_barrierback_ :: proc(L: ^State, o: ^GCObject) {
 	g := L.g
 	if getage(o) == G_TOUCHED2 { // already threaded on a gray list?
 		set2gray(o) // just recolor: it is revisited anyway
@@ -288,10 +288,10 @@ luaC_barrierback_ :: proc(L: ^Lua_State, o: ^GCObject) {
 // The wrapper: only act on a black container while the invariant holds. Reference
 // `luaC_objbarrierback` / `luaC_barrierback`. (We conservatively skip the
 // stored-value white test; re-graying a black container is always safe.)
-luaC_barrierback :: #force_inline proc(L: ^Lua_State, o: ^GCObject) {
+gc_barrierback :: #force_inline proc(L: ^State, o: ^GCObject) {
 	g := L.g
 	if is_black(o) && keepinvariant(g) {
-		luaC_barrierback_(L, o)
+		gc_barrierback_(L, o)
 	}
 }
 
@@ -395,7 +395,7 @@ get_gclist :: proc(o: ^GCObject) -> ^^GCObject {
 	case VPROTO:
 		return &(^Proto)(o).gclist
 	case VTHREAD:
-		return &(^Lua_State)(o).gclist
+		return &(^State)(o).gclist
 	case VUSERDATA:
 		return &(^Udata)(o).gclist
 	}
@@ -432,7 +432,7 @@ propagatemark :: proc(g: ^Global_State) -> L_Mem {
 	case VPROTO:
 		return traverse_proto(g, (^Proto)(o))
 	case VTHREAD:
-		return traverse_thread(g, (^Lua_State)(o))
+		return traverse_thread(g, (^State)(o))
 	case VUSERDATA:
 		return traverse_udata(g, (^Udata)(o))
 	case:
@@ -618,7 +618,7 @@ getmode :: proc(g: ^Global_State, t: ^Table) -> int {
 	mt := t.metatable
 	mode: ^TValue = nil
 	if mt != nil && (mt.flags & Byte(u32(1) << u32(TM_MODE))) == 0 {
-		mode = luaT_gettm(mt, TM_MODE, g.tmname[TM_MODE])
+		mode = tm_gettm(mt, TM_MODE, g.tmname[TM_MODE])
 	}
 	if mode == nil || !is_string(mode) {
 		return 0 // ignore non-string modes
@@ -719,7 +719,7 @@ traverse_proto :: proc(g: ^Global_State, f: ^Proto) -> L_Mem {
 // revisited. On the final (atomic) traversal the dead stack tail is nil-cleared,
 // the stack may be shrunk, and the thread is re-linked into `twups` if it still has
 // open upvalues. Reference Lua's `traversethread`.
-traverse_thread :: proc(g: ^Global_State, th: ^Lua_State) -> L_Mem {
+traverse_thread :: proc(g: ^Global_State, th: ^State) -> L_Mem {
 	if isold(obj2gco(th)) || g.gcstate == GCSpropagate {
 		linkobjgclist(obj2gco(th), &g.grayagain)
 	}
@@ -802,7 +802,7 @@ objsize :: proc(o: ^GCObject) -> uint {
 		res += uint(f.sizeupvalues) * size_of(Upvaldesc)
 		return res
 	case VTHREAD:
-		th := (^Lua_State)(o)
+		th := (^State)(o)
 		res := uint(size_of(LX))
 		if th.stack != nil {
 			res += uint(th.stack_size + EXTRA_STACK) * size_of(StackValue)
@@ -824,11 +824,11 @@ objsize :: proc(o: ^GCObject) -> uint {
 // Free one object and all of its type-specific satellite allocations, routing
 // every byte back through the state allocator so the GC's accounting unwinds
 // exactly. Reference Lua's `freeobj`.
-freeobj :: proc(L: ^Lua_State, o: ^GCObject) {
+freeobj :: proc(L: ^State, o: ^GCObject) {
 	switch o.tt {
 	case VSHRSTR:
 		ts := (^TString)(o)
-		luaS_remove(L, ts) // unlink from the intern table first
+		string_remove(L, ts) // unlink from the intern table first
 		state_free(L, ts, string_alloc_size(ts))
 	case VLNGSTR:
 		ts := (^TString)(o)
@@ -840,7 +840,7 @@ freeobj :: proc(L: ^Lua_State, o: ^GCObject) {
 		}
 		state_free(L, uv, size_of(UpVal))
 	case VTABLE:
-		luaH_free(L, (^Table)(o))
+		table_free(L, (^Table)(o))
 	case VLCL:
 		cl := (^LClosure)(o)
 		state_free(L, cl, size_lclosure(int(cl.nupvalues)))
@@ -848,9 +848,9 @@ freeobj :: proc(L: ^Lua_State, o: ^GCObject) {
 		cl := (^CClosure)(o)
 		state_free(L, cl, size_cclosure(int(cl.nupvalues)))
 	case VPROTO:
-		luaF_freeproto(L, (^Proto)(o))
+		func_freeproto(L, (^Proto)(o))
 	case VTHREAD:
-		free_thread(L, (^Lua_State)(o))
+		free_thread(L, (^State)(o))
 	case VUSERDATA:
 		u := (^Udata)(o)
 		state_free(L, u, size_udata(int(u.nuvalue), u.len))
@@ -927,10 +927,10 @@ restartcollection :: proc(g: ^Global_State) {
 // `luaC_freeallobjects`. The embedded main thread is special: its struct is part
 // of the global block (freed wholesale by `close_state`), so we free everything it
 // owns *except* that struct.
-luaC_freeallobjects :: proc(L: ^Lua_State) {
+gc_freeallobjects :: proc(L: ^State) {
 	g := L.g
 	g.gcstp = GCSTPCLS // no extra finalizers may be enrolled after this point
-	luaC_changemode(L, KGC_INC) // finalization only runs in incremental mode
+	gc_changemode(L, KGC_INC) // finalization only runs in incremental mode
 	separatetobefnz(g, true) // separate every object that has a finalizer
 	callallpendingfinalizers(L)
 	main := obj2gco(&g.main_thread.l)

@@ -23,7 +23,7 @@ console_control_handler :: proc "system" (kind: win.DWORD) -> win.BOOL {
 		if intrinsics.atomic_load(&interrupt_stage) == 1 {
 			_, won := intrinsics.atomic_compare_exchange_strong(&interrupt_stage, i32(1), i32(2))
 			if won {
-				lua.lua_request_async_hook(&interrupt_request)
+				lua.api_request_async_hook(&interrupt_request)
 				return win.TRUE
 			}
 		}

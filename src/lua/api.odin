@@ -41,14 +41,14 @@ api_check :: #force_inline proc(cond: bool, msg: string, loc := #caller_location
 // index can be rejected. Keeping this as pointer identity (rather than a
 // separate boolean) is deliberately faithful to the reference.
 @(private = "file")
-nilobj :: #force_inline proc "contextless" (L: ^Lua_State) -> ^TValue {
+nilobj :: #force_inline proc "contextless" (L: ^State) -> ^TValue {
 	return &L.g.nilvalue
 }
 
 // Is `o` a real, addressable value (as opposed to the shared read-only nil we
 // return for invalid indices)? Reference Lua's `isvalid`.
 @(private = "file")
-isvalid :: #force_inline proc "contextless" (L: ^Lua_State, o: ^TValue) -> bool {
+isvalid :: #force_inline proc "contextless" (L: ^State, o: ^TValue) -> bool {
 	return o != &L.g.nilvalue
 }
 
@@ -59,7 +59,7 @@ isvalid :: #force_inline proc "contextless" (L: ^Lua_State, o: ^TValue) -> bool 
 // Is `idx` a pseudo-index (the registry or an upvalue slot)? Reference `ispseudo`.
 @(private = "file")
 ispseudo :: #force_inline proc "contextless" (idx: int) -> bool {
-	return idx <= LUA_REGISTRYINDEX
+	return idx <= REGISTRYINDEX
 }
 
 // Resolve an API index to the value it names -- reference Lua's `index2value`.
@@ -73,7 +73,7 @@ ispseudo :: #force_inline proc "contextless" (idx: int) -> bool {
 //   * Anything more negative than that is an upvalue of the *currently running* C
 //     closure: pseudo-index `LUA_REGISTRYINDEX - i` is that closure's i-th
 //     captured value. A light C function (which captures nothing) yields nil.
-index2value :: proc(L: ^Lua_State, idx: int) -> ^TValue {
+index2value :: proc(L: ^State, idx: int) -> ^TValue {
 	ci := &L.frames[L.ci]
 	if idx > 0 {
 		o := ci.func + idx
@@ -85,10 +85,10 @@ index2value :: proc(L: ^Lua_State, idx: int) -> ^TValue {
 	} else if !ispseudo(idx) { // negative, ordinary
 		api_check(idx != 0 && -idx <= L.top - (ci.func + 1), "invalid index")
 		return stack_value(L, L.top + idx)
-	} else if idx == LUA_REGISTRYINDEX {
+	} else if idx == REGISTRYINDEX {
 		return &L.g.registry
 	} else { // upvalue of the running closure
-		i := LUA_REGISTRYINDEX - idx // 1-based upvalue number
+		i := REGISTRYINDEX - idx // 1-based upvalue number
 		fv := stack_value(L, ci.func)
 		if is_c_closure(fv) {
 			cl := c_closure_value(fv)
@@ -103,7 +103,7 @@ index2value :: proc(L: ^Lua_State, idx: int) -> ^TValue {
 // Lua's `index2stack`. Used where only real stack slots make sense (rotate,
 // the message handler for pcall, ...).
 @(private = "file")
-index2stack :: proc(L: ^Lua_State, idx: int) -> int {
+index2stack :: proc(L: ^State, idx: int) -> int {
 	ci := &L.frames[L.ci]
 	if idx > 0 {
 		o := ci.func + idx
@@ -119,7 +119,7 @@ index2stack :: proc(L: ^Lua_State, idx: int) -> int {
 // Bump the top by one after pushing, checking we stayed inside the frame's
 // reserved region -- reference Lua's `api_incr_top`.
 @(private = "file")
-api_incr_top :: #force_inline proc(L: ^Lua_State) {
+api_incr_top :: #force_inline proc(L: ^State) {
 	L.top += 1
 	api_check(L.top <= L.frames[L.ci].top, "stack overflow")
 }
@@ -128,12 +128,12 @@ api_incr_top :: #force_inline proc(L: ^Lua_State) {
 // reference Lua's `api_checknelems`. `api_checkpop` additionally forbids popping
 // a value that is still guarded as to-be-closed.
 @(private = "file")
-api_checknelems :: #force_inline proc(L: ^Lua_State, n: int) {
+api_checknelems :: #force_inline proc(L: ^State, n: int) {
 	api_check(n < L.top - L.frames[L.ci].func, "not enough elements in the stack")
 }
 
 @(private = "file")
-api_checkpop :: #force_inline proc(L: ^Lua_State, n: int) {
+api_checkpop :: #force_inline proc(L: ^State, n: int) {
 	api_check(n < L.top - L.frames[L.ci].func, "not enough elements in the stack")
 	api_check(L.tbclist < L.top - n, "no tbc variable inside the popped elements")
 }
@@ -144,7 +144,7 @@ api_checkpop :: #force_inline proc(L: ^Lua_State, n: int) {
 
 // Turn any acceptable index into its absolute (positive/pseudo) form -- reference
 // Lua's `lua_absindex`.
-lua_absindex :: proc(L: ^Lua_State, idx: int) -> int {
+api_absindex :: proc(L: ^State, idx: int) -> int {
 	if idx > 0 || ispseudo(idx) {
 		return idx
 	}
@@ -152,7 +152,7 @@ lua_absindex :: proc(L: ^Lua_State, idx: int) -> int {
 }
 
 // How many values are on the stack in the current frame -- reference `lua_gettop`.
-lua_gettop :: proc(L: ^Lua_State) -> int {
+api_gettop :: proc(L: ^State) -> int {
 	return L.top - (L.frames[L.ci].func + 1)
 }
 
@@ -161,7 +161,7 @@ lua_gettop :: proc(L: ^Lua_State) -> int {
 // to-be-closed variable we must run its `__close` *synchronously* here (via
 // `luaF_close` with the `CLOSEKTOP` sentinel) -- reference Lua does exactly this,
 // and skipping it would silently leak a resource the program expected closed.
-lua_settop :: proc(L: ^Lua_State, idx: int) {
+api_settop :: proc(L: ^State, idx: int) {
 	ci := &L.frames[L.ci]
 	funcbase := ci.func + 1
 	newtop: int
@@ -178,7 +178,7 @@ lua_settop :: proc(L: ^Lua_State, idx: int) {
 	}
 	// If we are shrinking across a to-be-closed variable, close it now.
 	if newtop < L.top && L.tbclist >= newtop {
-		newtop = luaF_close(L, newtop, CLOSEKTOP, false)
+		newtop = func_close(L, newtop, CLOSEKTOP, false)
 	}
 	L.top = newtop
 }
@@ -186,20 +186,20 @@ lua_settop :: proc(L: ^Lua_State, idx: int) {
 // Close (run `__close` on) the to-be-closed variable pinned at `idx`, then nil
 // its slot -- reference Lua's `lua_closeslot`. Distinct from `settop` in that it
 // targets one specific slot the embedder marked with `lua_toclose`.
-lua_closeslot :: proc(L: ^Lua_State, idx: int) {
+api_closeslot :: proc(L: ^State, idx: int) {
 	level := index2stack(L, idx)
 	api_check(
 		(L.frames[L.ci].callstatus & CIST_TBC) != 0 && L.tbclist == level,
 		"no variable to close at given level",
 	)
-	level = luaF_close(L, level, CLOSEKTOP, false)
+	level = func_close(L, level, CLOSEKTOP, false)
 	set_nil(stack_value(L, level))
 }
 
 // Reverse a contiguous slice of the stack in place -- the workhorse behind
 // `lua_rotate`. Reference Lua's `reverse`.
 @(private = "file")
-reverse_slice :: proc(L: ^Lua_State, from, to: int) {
+reverse_slice :: proc(L: ^State, from, to: int) {
 	from, to := from, to
 	for from < to {
 		tmp: TValue
@@ -215,7 +215,7 @@ reverse_slice :: proc(L: ^Lua_State, from, to: int) {
 // Lua's `lua_rotate`. Implemented as three reversals, the classic trick. A
 // to-be-closed variable must not be shuffled (its slot is pinned), so we reject
 // any rotation whose segment contains one.
-lua_rotate :: proc(L: ^Lua_State, idx: int, n_rot: int) {
+api_rotate :: proc(L: ^State, idx: int, n_rot: int) {
 	t := L.top - 1 // end of the affected segment
 	p := index2stack(L, idx) // start of the affected segment
 	api_check(L.tbclist < p, "moving a to-be-closed variable")
@@ -239,26 +239,26 @@ lua_rotate :: proc(L: ^Lua_State, idx: int, n_rot: int) {
 // Copy the value at `fromidx` into the slot `toidx` -- reference `lua_copy`.
 // Writing through a real stack slot never needs a barrier (stack slots are never
 // black); writing an upvalue pseudo-index can, so we barrier in that case.
-lua_copy :: proc(L: ^Lua_State, fromidx, toidx: int) {
+api_copy :: proc(L: ^State, fromidx, toidx: int) {
 	fr := index2value(L, fromidx)
 	to := index2value(L, toidx)
 	api_check(isvalid(L, to), "invalid index")
 	set_obj(to, fr)
 	if ispseudo(toidx) && is_collectable(fr) { // writing an upvalue of the running C closure
 		fv := stack_value(L, L.frames[L.ci].func)
-		luaC_barrier(L, gc_value(fv), gc_value(fr))
+		gc_barrier(L, gc_value(fv), gc_value(fr))
 	}
 }
 
 // Push a copy of the value at `idx` -- reference `lua_pushvalue`.
-lua_pushvalue :: proc(L: ^Lua_State, idx: int) {
+api_pushvalue :: proc(L: ^State, idx: int) {
 	set_obj(stack_value(L, L.top), index2value(L, idx))
 	api_incr_top(L)
 }
 
 // Ensure the stack can hold `n` more values, growing if needed -- reference
 // `lua_checkstack`. Returns false (without raising) if it cannot.
-lua_checkstack :: proc(L: ^Lua_State, n: int) -> bool {
+api_checkstack :: proc(L: ^State, n: int) -> bool {
 	api_check(n >= 0, "negative 'n'")
 	ci := &L.frames[L.ci]
 	res: bool
@@ -275,7 +275,7 @@ lua_checkstack :: proc(L: ^Lua_State, n: int) -> bool {
 
 // Move `n` values from the top of `from` to the top of `to` -- reference
 // `lua_xmove`. Both threads must belong to the same global state.
-lua_xmove :: proc(from, to: ^Lua_State, n: int) {
+api_xmove :: proc(from, to: ^State, n: int) {
 	if from == to {
 		return
 	}
@@ -290,8 +290,8 @@ lua_xmove :: proc(from, to: ^Lua_State, n: int) {
 }
 
 // Pop `n` values -- reference Lua's `lua_pop` macro, expressed as `settop`.
-lua_pop :: proc(L: ^Lua_State, n: int) {
-	lua_settop(L, -n - 1)
+api_pop :: proc(L: ^State, n: int) {
+	api_settop(L, -n - 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -300,68 +300,68 @@ lua_pop :: proc(L: ^Lua_State, n: int) {
 
 // The Lua type of the value at `idx`, or `LUA_TNONE` (-1) for an out-of-range
 // index -- reference `lua_type`.
-lua_type :: proc(L: ^Lua_State, idx: int) -> int {
+api_type :: proc(L: ^State, idx: int) -> int {
 	o := index2value(L, idx)
-	return isvalid(L, o) ? int(base_type(o)) : LUA_TNONE
+	return isvalid(L, o) ? int(base_type(o)) : TNONE
 }
 
 // The human-readable name of a type tag -- reference `lua_typename`.
-lua_typename :: proc(L: ^Lua_State, t: int) -> string {
+api_typename :: proc(L: ^State, t: int) -> string {
 	api_check(TNONE <= t && t < NUM_TYPES, "invalid type")
 	return ttypename(t)
 }
 
-lua_isnumber :: proc(L: ^Lua_State, idx: int) -> bool {
-	_, ok := lua_tonumberx(L, idx)
+api_isnumber :: proc(L: ^State, idx: int) -> bool {
+	_, ok := api_tonumberx(L, idx)
 	return ok
 }
 
-lua_isinteger :: proc(L: ^Lua_State, idx: int) -> bool {
+api_isinteger :: proc(L: ^State, idx: int) -> bool {
 	return is_integer(index2value(L, idx))
 }
 
-lua_isstring :: proc(L: ^Lua_State, idx: int) -> bool {
+api_isstring :: proc(L: ^State, idx: int) -> bool {
 	o := index2value(L, idx)
 	return is_string(o) || is_number(o) // numbers are coercible to strings
 }
 
-lua_iscfunction :: proc(L: ^Lua_State, idx: int) -> bool {
+api_iscfunction :: proc(L: ^State, idx: int) -> bool {
 	o := index2value(L, idx)
 	return is_light_cfunction(o) || is_c_closure(o)
 }
 
-lua_isuserdata :: proc(L: ^Lua_State, idx: int) -> bool {
+api_isuserdata :: proc(L: ^State, idx: int) -> bool {
 	o := index2value(L, idx)
 	return is_full_userdata(o) || is_light_userdata(o)
 }
 
-lua_isfunction :: proc(L: ^Lua_State, idx: int) -> bool {
+api_isfunction :: proc(L: ^State, idx: int) -> bool {
 	return is_function(index2value(L, idx))
 }
 
-lua_istable :: proc(L: ^Lua_State, idx: int) -> bool {
+api_istable :: proc(L: ^State, idx: int) -> bool {
 	return is_table(index2value(L, idx))
 }
 
-lua_isnil :: proc(L: ^Lua_State, idx: int) -> bool {
+api_isnil :: proc(L: ^State, idx: int) -> bool {
 	return is_nil(index2value(L, idx))
 }
 
-lua_isboolean :: proc(L: ^Lua_State, idx: int) -> bool {
+api_isboolean :: proc(L: ^State, idx: int) -> bool {
 	return is_boolean(index2value(L, idx))
 }
 
-lua_isnone :: proc(L: ^Lua_State, idx: int) -> bool {
-	return lua_type(L, idx) == LUA_TNONE
+api_isnone :: proc(L: ^State, idx: int) -> bool {
+	return api_type(L, idx) == TNONE
 }
 
-lua_isnoneornil :: proc(L: ^Lua_State, idx: int) -> bool {
-	return lua_type(L, idx) <= TNIL
+api_isnoneornil :: proc(L: ^State, idx: int) -> bool {
+	return api_type(L, idx) <= TNIL
 }
 
 // Raw (metamethod-free) primitive equality of two values -- reference
 // `lua_rawequal`. Invalid indices compare unequal.
-lua_rawequal :: proc(L: ^Lua_State, idx1, idx2: int) -> bool {
+api_rawequal :: proc(L: ^State, idx1, idx2: int) -> bool {
 	o1 := index2value(L, idx1)
 	o2 := index2value(L, idx2)
 	return (isvalid(L, o1) && isvalid(L, o2)) ? raw_equal(o1, o2) : false
@@ -369,19 +369,19 @@ lua_rawequal :: proc(L: ^Lua_State, idx1, idx2: int) -> bool {
 
 // Compare two values with a given operator, honoring metamethods -- reference
 // `lua_compare`. `op` is one of `LUA_OPEQ`/`LUA_OPLT`/`LUA_OPLE`.
-lua_compare :: proc(L: ^Lua_State, idx1, idx2: int, op: int) -> bool {
+api_compare :: proc(L: ^State, idx1, idx2: int, op: int) -> bool {
 	o1 := index2value(L, idx1)
 	o2 := index2value(L, idx2)
 	if !(isvalid(L, o1) && isvalid(L, o2)) {
 		return false
 	}
 	switch op {
-	case LUA_OPEQ:
-		return luaV_equalobj(L, o1, o2)
-	case LUA_OPLT:
-		return luaV_lessthan(L, o1, o2)
-	case LUA_OPLE:
-		return luaV_lessequal(L, o1, o2)
+	case OPEQ:
+		return vm_equalobj(L, o1, o2)
+	case OPLT:
+		return vm_lessthan(L, o1, o2)
+	case OPLE:
+		return vm_lessequal(L, o1, o2)
 	case:
 		api_check(false, "invalid option")
 		return false
@@ -391,8 +391,8 @@ lua_compare :: proc(L: ^Lua_State, idx1, idx2: int, op: int) -> bool {
 // Apply an arithmetic (or bitwise) operator to the top values -- reference
 // `lua_arith`. Unary ops (unm, bnot) read one operand and duplicate it so the
 // two-operand core sees a well-formed pair, exactly as reference Lua does.
-lua_arith :: proc(L: ^Lua_State, op: int) {
-	if !(op == LUA_OPUNM || op == LUA_OPBNOT) {
+api_arith :: proc(L: ^State, op: int) {
+	if !(op == OPUNM || op == OPBNOT) {
 		api_checknelems(L, 2) // binary operators
 	} else {
 		api_checknelems(L, 1) // unary operators: duplicate the operand
@@ -400,36 +400,36 @@ lua_arith :: proc(L: ^Lua_State, op: int) {
 		api_incr_top(L)
 	}
 	// The result overwrites the first operand; the second is then popped.
-	luaO_arith(L, op, stack_value(L, L.top - 2), stack_value(L, L.top - 1), L.top - 2)
+	object_arith(L, op, stack_value(L, L.top - 2), stack_value(L, L.top - 1), L.top - 2)
 	L.top -= 1
 }
 
 // Interpret the value at `idx` as a floating number, coercing strings --
 // reference `lua_tonumberx`. `ok` reports whether a number was obtained.
-lua_tonumberx :: proc(L: ^Lua_State, idx: int) -> (n: Number, ok: bool) {
+api_tonumberx :: proc(L: ^State, idx: int) -> (n: Number, ok: bool) {
 	o := index2value(L, idx)
 	return vm_tonumber(o)
 }
 
-lua_tonumber :: proc(L: ^Lua_State, idx: int) -> Number {
-	n, _ := lua_tonumberx(L, idx)
+api_tonumber :: proc(L: ^State, idx: int) -> Number {
+	n, _ := api_tonumberx(L, idx)
 	return n
 }
 
 // Interpret the value at `idx` as an integer -- reference `lua_tointegerx`.
-lua_tointegerx :: proc(L: ^Lua_State, idx: int) -> (i: Integer, ok: bool) {
+api_tointegerx :: proc(L: ^State, idx: int) -> (i: Integer, ok: bool) {
 	o := index2value(L, idx)
 	return vm_tointeger(o, .Eq)
 }
 
-lua_tointeger :: proc(L: ^Lua_State, idx: int) -> Integer {
-	i, _ := lua_tointegerx(L, idx)
+api_tointeger :: proc(L: ^State, idx: int) -> Integer {
+	i, _ := api_tointegerx(L, idx)
 	return i
 }
 
 // Lua truthiness of the value at `idx` -- reference `lua_toboolean`. Only nil
 // and false are falsy.
-lua_toboolean :: proc(L: ^Lua_State, idx: int) -> bool {
+api_toboolean :: proc(L: ^State, idx: int) -> bool {
 	return !is_falsy(index2value(L, idx))
 }
 
@@ -441,7 +441,7 @@ lua_toboolean :: proc(L: ^Lua_State, idx: int) -> bool {
 // a string object, so a subsequent GC won't reclaim the bytes we just handed back
 // and repeated calls are cheap. This is precisely reference Lua's behavior (and
 // the reason `lua_tolstring` is not `const`-correct on its argument).
-lua_tolstring :: proc(L: ^Lua_State, idx: int) -> (s: string, ok: bool) {
+api_tolstring :: proc(L: ^State, idx: int) -> (s: string, ok: bool) {
 	o := index2value(L, idx)
 	if !is_string(o) {
 		if !is_number(o) { // not convertible
@@ -450,7 +450,7 @@ lua_tolstring :: proc(L: ^Lua_State, idx: int) -> (s: string, ok: bool) {
 		// Render the number and replace the value with the resulting string.
 		buf: [N2S_BUFF_SZ]u8
 		n := number_to_str(o, buf[:])
-		ts := luaS_newlstr(L, raw_data(buf[:]), uint(n))
+		ts := string_newlstr(L, raw_data(buf[:]), uint(n))
 		set_string(o, ts)
 		o = index2value(L, idx) // re-fetch (conversion cannot move the stack)
 	}
@@ -458,13 +458,13 @@ lua_tolstring :: proc(L: ^Lua_State, idx: int) -> (s: string, ok: bool) {
 	return string(str_slice(ts)), true
 }
 
-lua_tostring :: proc(L: ^Lua_State, idx: int) -> (s: string, ok: bool) {
-	return lua_tolstring(L, idx)
+api_tostring :: proc(L: ^State, idx: int) -> (s: string, ok: bool) {
+	return api_tolstring(L, idx)
 }
 
 // The raw length of a string, table, or userdata -- reference `lua_rawlen`.
 // (Tables report their border length; no `__len` metamethod is consulted.)
-lua_rawlen :: proc(L: ^Lua_State, idx: int) -> uint {
+api_rawlen :: proc(L: ^State, idx: int) -> uint {
 	o := index2value(L, idx)
 	switch type_tag(o) {
 	case VSHRSTR, VLNGSTR:
@@ -472,7 +472,7 @@ lua_rawlen :: proc(L: ^Lua_State, idx: int) -> uint {
 	case VUSERDATA:
 		return udata_value(o).len
 	case VTABLE:
-		return uint(luaH_getn(L, table_value(o)))
+		return uint(table_getn(L, table_value(o)))
 	case:
 		return 0
 	}
@@ -480,7 +480,7 @@ lua_rawlen :: proc(L: ^Lua_State, idx: int) -> uint {
 
 // The native function behind the value at `idx`, or nil -- reference
 // `lua_tocfunction`.
-lua_tocfunction :: proc(L: ^Lua_State, idx: int) -> C_Function {
+api_tocfunction :: proc(L: ^State, idx: int) -> C_Function {
 	o := index2value(L, idx)
 	if is_light_cfunction(o) {
 		return cfunction_value(o)
@@ -492,7 +492,7 @@ lua_tocfunction :: proc(L: ^Lua_State, idx: int) -> C_Function {
 
 // A pointer to a full userdata's payload, or the pointer stored in a light
 // userdata -- reference `lua_touserdata`.
-lua_touserdata :: proc(L: ^Lua_State, idx: int) -> rawptr {
+api_touserdata :: proc(L: ^State, idx: int) -> rawptr {
 	o := index2value(L, idx)
 	switch base_type(o) {
 	case TUSERDATA:
@@ -505,7 +505,7 @@ lua_touserdata :: proc(L: ^Lua_State, idx: int) -> rawptr {
 }
 
 // The thread behind the value at `idx`, or nil -- reference `lua_tothread`.
-lua_tothread :: proc(L: ^Lua_State, idx: int) -> ^Lua_State {
+api_tothread :: proc(L: ^State, idx: int) -> ^State {
 	o := index2value(L, idx)
 	return is_thread(o) ? thread_value(o) : nil
 }
@@ -513,7 +513,7 @@ lua_tothread :: proc(L: ^Lua_State, idx: int) -> ^Lua_State {
 // A generic pointer identifying the object at `idx` -- reference `lua_topointer`,
 // used mostly by `tostring`/debugging to print `table: 0x...`. Non-object values
 // yield nil.
-lua_topointer :: proc(L: ^Lua_State, idx: int) -> rawptr {
+api_topointer :: proc(L: ^State, idx: int) -> rawptr {
 	o := index2value(L, idx)
 	switch type_tag(o) {
 	case VLCF:
@@ -531,49 +531,49 @@ lua_topointer :: proc(L: ^Lua_State, idx: int) -> rawptr {
 // Push functions: program -> stack
 // ---------------------------------------------------------------------------
 
-lua_pushnil :: proc(L: ^Lua_State) {
+api_pushnil :: proc(L: ^State) {
 	set_nil(stack_value(L, L.top))
 	api_incr_top(L)
 }
 
-lua_pushnumber :: proc(L: ^Lua_State, n: Number) {
+api_pushnumber :: proc(L: ^State, n: Number) {
 	set_float(stack_value(L, L.top), n)
 	api_incr_top(L)
 }
 
-lua_pushinteger :: proc(L: ^Lua_State, n: Integer) {
+api_pushinteger :: proc(L: ^State, n: Integer) {
 	set_int(stack_value(L, L.top), n)
 	api_incr_top(L)
 }
 
 // Push a byte string, interning it -- reference `lua_pushlstring`. Returns the
 // interned bytes so the caller can keep referring to them.
-lua_pushlstring :: proc(L: ^Lua_State, s: []u8) -> string {
+api_pushlstring :: proc(L: ^State, s: []u8) -> string {
 	ts: ^TString
 	if len(s) == 0 {
-		ts = luaS_newlstr(L, raw_data([]u8{0}), 0)
+		ts = string_newlstr(L, raw_data([]u8{0}), 0)
 	} else {
-		ts = luaS_newlstr(L, raw_data(s), uint(len(s)))
+		ts = string_newlstr(L, raw_data(s), uint(len(s)))
 	}
 	set_string(stack_value(L, L.top), ts)
 	api_incr_top(L)
-	luaC_checkGC(L)
+	gc_checkGC(L)
 	return string(str_slice(ts))
 }
 
 // Push a NUL-free Odin string -- reference `lua_pushstring`.
-lua_pushstring :: proc(L: ^Lua_State, s: string) -> string {
-	ts := luaS_new(L, s)
+api_pushstring :: proc(L: ^State, s: string) -> string {
+	ts := string_new(L, s)
 	set_string(stack_value(L, L.top), ts)
 	api_incr_top(L)
-	luaC_checkGC(L)
+	gc_checkGC(L)
 	return string(str_slice(ts))
 }
 
 // Push a printf-style formatted string -- reference `lua_pushfstring`. Delegates
 // to `luaO_pushfstring`, which builds the result directly on the stack.
-lua_pushfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> string {
-	ts := luaO_pushfstring(L, fmt, ..args)
+api_pushfstring :: proc(L: ^State, fmt: string, args: ..any) -> string {
+	ts := object_pushfstring(L, fmt, ..args)
 	return string(str_slice(ts))
 }
 
@@ -581,7 +581,7 @@ lua_pushfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> string {
 // With `n == 0` this is a bare light C function (no captured state); otherwise it
 // pops `n` values into a freshly allocated closure. The captured values move by
 // copy, matching native-closure semantics.
-lua_pushcclosure :: proc(L: ^Lua_State, fn: C_Function, n: int) {
+api_pushcclosure :: proc(L: ^State, fn: C_Function, n: int) {
 	if n == 0 {
 		set_c_function(stack_value(L, L.top), fn)
 		api_incr_top(L)
@@ -589,7 +589,7 @@ lua_pushcclosure :: proc(L: ^Lua_State, fn: C_Function, n: int) {
 	}
 	api_checknelems(L, n)
 	api_check(n <= MAXUPVAL, "upvalue index too large")
-	cl := luaF_newCclosure(L, n)
+	cl := func_newCclosure(L, n)
 	if cl == nil {
 		throw(L, .Err_Mem) // allocation failed under an active protected boundary
 	}
@@ -602,28 +602,28 @@ lua_pushcclosure :: proc(L: ^Lua_State, fn: C_Function, n: int) {
 	}
 	set_c_closure(stack_value(L, L.top), cl)
 	api_incr_top(L)
-	luaC_checkGC(L)
+	gc_checkGC(L)
 }
 
 // Convenience: push a light C function (a closure with no upvalues) -- reference
 // `lua_pushcfunction` macro.
-lua_pushcfunction :: proc(L: ^Lua_State, fn: C_Function) {
-	lua_pushcclosure(L, fn, 0)
+api_pushcfunction :: proc(L: ^State, fn: C_Function) {
+	api_pushcclosure(L, fn, 0)
 }
 
-lua_pushboolean :: proc(L: ^Lua_State, b: bool) {
+api_pushboolean :: proc(L: ^State, b: bool) {
 	set_bool(stack_value(L, L.top), b)
 	api_incr_top(L)
 }
 
-lua_pushlightuserdata :: proc(L: ^Lua_State, p: rawptr) {
+api_pushlightuserdata :: proc(L: ^State, p: rawptr) {
 	set_light_userdata(stack_value(L, L.top), p)
 	api_incr_top(L)
 }
 
 // Push the running thread and report whether it is the main thread -- reference
 // `lua_pushthread`.
-lua_pushthread :: proc(L: ^Lua_State) -> bool {
+api_pushthread :: proc(L: ^State) -> bool {
 	set_gc(stack_value(L, L.top), obj2gco(L))
 	api_incr_top(L)
 	return L == &L.g.main_thread.l
@@ -637,8 +637,8 @@ lua_pushthread :: proc(L: ^Lua_State) -> bool {
 // This copies through the tag-returning table API instead of retaining an array
 // slot pointer; the registry array will shortly have split tags and payloads.
 @(private = "file")
-getGtable :: #force_inline proc(L: ^Lua_State, res: ^TValue) {
-	tag := luaH_getint(table_value(&L.g.registry), LUA_RIDX_GLOBALS, res)
+getGtable :: #force_inline proc(L: ^State, res: ^TValue) {
+	tag := table_getint(table_value(&L.g.registry), RIDX_GLOBALS, res)
 	assert(!tag_is_empty(tag))
 }
 
@@ -647,28 +647,28 @@ getGtable :: #force_inline proc(L: ^Lua_State, res: ^TValue) {
 // resolves error positions against the *current* frame (there is no bytecode pc
 // to sync). `luaV_finishget` walks any `__index` chain.
 @(private = "file")
-api_get :: proc(L: ^Lua_State, t: ^TValue, key: ^TValue, ra: int) {
+api_get :: proc(L: ^State, t: ^TValue, key: ^TValue, ra: int) {
 	if is_table(t) {
 		h := table_value(t)
 		tag: Byte
 		if is_integer(key) {
-			tag = luaH_fastgeti(h, int_value(key), stack_value(L, ra))
+			tag = table_fastgeti(h, int_value(key), stack_value(L, ra))
 		} else {
-			tag = luaH_fastget(h, key, stack_value(L, ra))
+			tag = table_fastget(h, key, stack_value(L, ra))
 		}
 		if !tag_is_empty(tag) {
 			return
 		}
 	}
-	luaV_finishget(L, t, key, ra)
+	vm_finishget(L, t, key, ra)
 }
 
 // Read `t[k]` for a string key, pushing the result -- reference `auxgetstr`.
 // The key/value slot alias is intentional and safe (reference does the same):
 // the key string is only read *before* the value is written.
 @(private = "file")
-auxgetstr :: proc(L: ^Lua_State, t: ^TValue, k: string) -> int {
-	str := luaS_new(L, k)
+auxgetstr :: proc(L: ^State, t: ^TValue, k: string) -> int {
+	str := string_new(L, k)
 	set_string(stack_value(L, L.top), str)
 	api_incr_top(L)
 	api_get(L, t, stack_value(L, L.top - 1), L.top - 1)
@@ -677,28 +677,28 @@ auxgetstr :: proc(L: ^Lua_State, t: ^TValue, k: string) -> int {
 
 // `push(t[k])` where `t` is the value at `idx` and `k` is popped from the top --
 // reference `lua_gettable`.
-lua_gettable :: proc(L: ^Lua_State, idx: int) -> int {
+api_gettable :: proc(L: ^State, idx: int) -> int {
 	api_checkpop(L, 1)
 	t := index2value(L, idx)
 	api_get(L, t, stack_value(L, L.top - 1), L.top - 1)
 	return int(base_type(stack_value(L, L.top - 1)))
 }
 
-lua_getfield :: proc(L: ^Lua_State, idx: int, k: string) -> int {
+api_getfield :: proc(L: ^State, idx: int, k: string) -> int {
 	return auxgetstr(L, index2value(L, idx), k)
 }
 
-lua_getglobal :: proc(L: ^Lua_State, name: string) -> int {
+api_getglobal :: proc(L: ^State, name: string) -> int {
 	gt: TValue
 	getGtable(L, &gt)
 	return auxgetstr(L, &gt, name)
 }
 
 @(private = "file")
-lua_geti_slow :: proc(L: ^Lua_State, t: ^TValue, n: Integer) -> int {
+api_geti_slow :: proc(L: ^State, t: ^TValue, n: Integer) -> int {
 	key: TValue
 	set_int(&key, n)
-	luaV_finishget(L, t, &key, L.top)
+	vm_finishget(L, t, &key, L.top)
 	api_incr_top(L)
 	return int(base_type(stack_value(L, L.top - 1)))
 }
@@ -707,36 +707,36 @@ lua_geti_slow :: proc(L: ^Lua_State, t: ^TValue, n: Integer) -> int {
 // also the inner read primitive for table.sort. Keep its hit path tiny so Odin
 // can optimize it independently of the uncommon metamethod path, which remains
 // outlined in `lua_geti_slow`.
-lua_geti :: proc(L: ^Lua_State, idx: int, n: Integer) -> int {
+api_geti :: proc(L: ^State, idx: int, n: Integer) -> int {
 	t := index2value(L, idx)
 	if is_table(t) {
-		tag := luaH_fastgeti(table_value(t), n, stack_value(L, L.top))
+		tag := table_fastgeti(table_value(t), n, stack_value(L, L.top))
 		if !tag_is_empty(tag) {
 			api_incr_top(L)
 			return int(base_type(stack_value(L, L.top - 1)))
 		}
 	}
 	// Do not route this miss through `api_get`: that would look up n twice.
-	return lua_geti_slow(L, t, n)
+	return api_geti_slow(L, t, n)
 }
 
 // Raw (metamethod-free) reads -----------------------------------------------
 
-lua_rawget :: proc(L: ^Lua_State, idx: int) -> int {
+api_rawget :: proc(L: ^State, idx: int) -> int {
 	t := index2value(L, idx)
 	api_check(is_table(t), "table expected")
 	api_checkpop(L, 1)
-	tag := luaH_get(table_value(t), stack_value(L, L.top - 1), stack_value(L, L.top - 1))
+	tag := table_get(table_value(t), stack_value(L, L.top - 1), stack_value(L, L.top - 1))
 	if tag_is_empty(tag) {
 		set_nil(stack_value(L, L.top - 1))
 	}
 	return int(base_type(stack_value(L, L.top - 1)))
 }
 
-lua_rawgeti :: proc(L: ^Lua_State, idx: int, n: Integer) -> int {
+api_rawgeti :: proc(L: ^State, idx: int, n: Integer) -> int {
 	t := index2value(L, idx)
 	api_check(is_table(t), "table expected")
-	tag := luaH_fastgeti(table_value(t), n, stack_value(L, L.top))
+	tag := table_fastgeti(table_value(t), n, stack_value(L, L.top))
 	if tag_is_empty(tag) {
 		set_nil(stack_value(L, L.top))
 	}
@@ -745,12 +745,12 @@ lua_rawgeti :: proc(L: ^Lua_State, idx: int, n: Integer) -> int {
 }
 
 // Raw read keyed by a light-userdata pointer -- reference `lua_rawgetp`.
-lua_rawgetp :: proc(L: ^Lua_State, idx: int, p: rawptr) -> int {
+api_rawgetp :: proc(L: ^State, idx: int, p: rawptr) -> int {
 	t := index2value(L, idx)
 	api_check(is_table(t), "table expected")
 	key: TValue
 	set_light_userdata(&key, p)
-	tag := luaH_get(table_value(t), &key, stack_value(L, L.top))
+	tag := table_get(table_value(t), &key, stack_value(L, L.top))
 	if tag_is_empty(tag) {
 		set_nil(stack_value(L, L.top))
 	}
@@ -760,40 +760,40 @@ lua_rawgetp :: proc(L: ^Lua_State, idx: int, p: rawptr) -> int {
 
 // Create a fresh table (optionally pre-sized) and push it -- reference
 // `lua_createtable`.
-lua_createtable :: proc(L: ^Lua_State, narray, nrec: int) {
-	t := luaH_new(L)
+api_createtable :: proc(L: ^State, narray, nrec: int) {
+	t := table_new(L)
 	set_gc(stack_value(L, L.top), obj2gco(t))
 	api_incr_top(L)
 	if narray > 0 || nrec > 0 {
-		luaH_resize(L, t, u32(narray), u32(nrec))
+		table_resize(L, t, u32(narray), u32(nrec))
 	}
-	luaC_checkGC(L)
+	gc_checkGC(L)
 }
 
-lua_newtable :: proc(L: ^Lua_State) {
-	lua_createtable(L, 0, 0)
+api_newtable :: proc(L: ^State) {
+	api_createtable(L, 0, 0)
 }
 
 // Allocate a full userdata with `nuvalue` user values and push it, returning a
 // pointer to its raw payload -- reference `lua_newuserdatauv`.
-lua_newuserdatauv :: proc(L: ^Lua_State, size: uint, nuvalue: int) -> rawptr {
+api_newuserdatauv :: proc(L: ^State, size: uint, nuvalue: int) -> rawptr {
 	api_check(0 <= nuvalue && nuvalue < 0x10000, "invalid value count")
-	u := luaS_newudata(L, size, nuvalue)
+	u := string_newudata(L, size, nuvalue)
 	set_userdata(stack_value(L, L.top), u)
 	api_incr_top(L)
-	luaC_checkGC(L)
+	gc_checkGC(L)
 	return rawptr(udata_mem(u))
 }
 
 // Push userdata's n-th user value -- reference `lua_getiuservalue`.
-lua_getiuservalue :: proc(L: ^Lua_State, idx: int, n: int) -> int {
+api_getiuservalue :: proc(L: ^State, idx: int, n: int) -> int {
 	o := index2value(L, idx)
 	api_check(is_full_userdata(o), "full userdata expected")
 	u := udata_value(o)
 	if n <= 0 || n > int(u.nuvalue) {
 		set_nil(stack_value(L, L.top))
 		api_incr_top(L)
-		return LUA_TNONE
+		return TNONE
 	}
 	set_obj(stack_value(L, L.top), udata_uv(u, n - 1))
 	api_incr_top(L)
@@ -802,7 +802,7 @@ lua_getiuservalue :: proc(L: ^Lua_State, idx: int, n: int) -> int {
 
 // Push the metatable of the value at `idx`, if any -- reference
 // `lua_getmetatable`. Returns whether one was pushed.
-lua_getmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
+api_getmetatable :: proc(L: ^State, objindex: int) -> bool {
 	o := index2value(L, objindex)
 	mt: ^Table
 	switch base_type(o) {
@@ -829,32 +829,32 @@ lua_getmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
 // setter. Mirrors the VM's fast path; `luaV_finishset` walks any `__newindex`
 // chain and performs the raw insert when no metamethod intervenes.
 @(private = "file")
-api_set :: proc(L: ^Lua_State, t: ^TValue, key: ^TValue, val: ^TValue) {
+api_set :: proc(L: ^State, t: ^TValue, key: ^TValue, val: ^TValue) {
 	if is_table(t) {
 		h := table_value(t)
 		hres: int
 		if is_integer(key) {
-			hres = luaH_fastseti(h, int_value(key), val)
+			hres = table_fastseti(h, int_value(key), val)
 		} else {
-			hres = luaH_fastpset(h, key, val)
+			hres = table_fastpset(h, key, val)
 		}
 		if hres == HOK {
 			if is_collectable(val) {
-				luaC_barrierback(L, obj2gco(h))
+				gc_barrierback(L, obj2gco(h))
 			}
 			return
 		}
-		luaV_finishset(L, t, key, val, hres)
+		vm_finishset(L, t, key, val, hres)
 		return
 	}
-	luaV_finishset(L, t, key, val, HNOTATABLE)
+	vm_finishset(L, t, key, val, HNOTATABLE)
 }
 
 // `t[k] = v` for a string key, popping the value -- reference `auxsetstr`.
 @(private = "file")
-auxsetstr :: proc(L: ^Lua_State, t: ^TValue, k: string) {
+auxsetstr :: proc(L: ^State, t: ^TValue, k: string) {
 	api_checknelems(L, 1)
-	str := luaS_new(L, k)
+	str := string_new(L, k)
 	set_string(stack_value(L, L.top), str) // push key above the value
 	api_incr_top(L)
 	api_set(L, t, stack_value(L, L.top - 1), stack_value(L, L.top - 2))
@@ -863,26 +863,26 @@ auxsetstr :: proc(L: ^Lua_State, t: ^TValue, k: string) {
 
 // `t[k] = v` where `t` is at `idx` and both key and value are popped -- reference
 // `lua_settable`.
-lua_settable :: proc(L: ^Lua_State, idx: int) {
+api_settable :: proc(L: ^State, idx: int) {
 	api_checkpop(L, 2)
 	t := index2value(L, idx)
 	api_set(L, t, stack_value(L, L.top - 2), stack_value(L, L.top - 1))
 	L.top -= 2
 }
 
-lua_setfield :: proc(L: ^Lua_State, idx: int, k: string) {
+api_setfield :: proc(L: ^State, idx: int, k: string) {
 	auxsetstr(L, index2value(L, idx), k)
 }
 
-lua_setglobal :: proc(L: ^Lua_State, name: string) {
+api_setglobal :: proc(L: ^State, name: string) {
 	gt: TValue
 	getGtable(L, &gt)
 	auxsetstr(L, &gt, name)
 }
 
 @(private = "file")
-lua_seti_slow :: proc(
-	L: ^Lua_State,
+api_seti_slow :: proc(
+	L: ^State,
 	t: ^TValue,
 	n: Integer,
 	val: ^TValue,
@@ -890,65 +890,65 @@ lua_seti_slow :: proc(
 ) {
 	key: TValue
 	set_int(&key, n)
-	luaV_finishset(L, t, &key, val, hres)
+	vm_finishset(L, t, &key, val, hres)
 	L.top -= 1
 }
 
 // `t[n] = v` for an integer key, popping the value -- reference `lua_seti`.
 // table.sort performs swaps through this API, so mirror the get side: inline the
 // successful array update and leave key construction/metamethod handling cold.
-lua_seti :: proc(L: ^Lua_State, idx: int, n: Integer) {
+api_seti :: proc(L: ^State, idx: int, n: Integer) {
 	api_checknelems(L, 1)
 	t := index2value(L, idx)
 	val := stack_value(L, L.top - 1)
 	hres := HNOTATABLE
 	if is_table(t) {
 		h := table_value(t)
-		hres = luaH_fastseti(h, n, val)
+		hres = table_fastseti(h, n, val)
 		if hres == HOK {
 			if is_collectable(val) {
-				luaC_barrierback(L, obj2gco(h))
+				gc_barrierback(L, obj2gco(h))
 			}
 			L.top -= 1
 			return
 		}
 	}
-	lua_seti_slow(L, t, n, val, hres)
+	api_seti_slow(L, t, n, val, hres)
 }
 
 // Raw (metamethod-free) writes ----------------------------------------------
 
-lua_rawset :: proc(L: ^Lua_State, idx: int) {
+api_rawset :: proc(L: ^State, idx: int) {
 	api_checkpop(L, 2)
 	t := index2value(L, idx)
 	api_check(is_table(t), "table expected")
 	h := table_value(t)
-	luaH_set(L, h, stack_value(L, L.top - 2), stack_value(L, L.top - 1))
+	table_set(L, h, stack_value(L, L.top - 2), stack_value(L, L.top - 1))
 	invalidateTMcache(h)
-	luaC_barrierback(L, obj2gco(h))
+	gc_barrierback(L, obj2gco(h))
 	L.top -= 2
 }
 
-lua_rawseti :: proc(L: ^Lua_State, idx: int, n: Integer) {
+api_rawseti :: proc(L: ^State, idx: int, n: Integer) {
 	api_checknelems(L, 1)
 	t := index2value(L, idx)
 	api_check(is_table(t), "table expected")
 	h := table_value(t)
-	luaH_setint(L, h, n, stack_value(L, L.top - 1))
-	luaC_barrierback(L, obj2gco(h))
+	table_setint(L, h, n, stack_value(L, L.top - 1))
+	gc_barrierback(L, obj2gco(h))
 	L.top -= 1
 }
 
 // Raw write keyed by a light-userdata pointer -- reference `lua_rawsetp`.
-lua_rawsetp :: proc(L: ^Lua_State, idx: int, p: rawptr) {
+api_rawsetp :: proc(L: ^State, idx: int, p: rawptr) {
 	api_checknelems(L, 1)
 	t := index2value(L, idx)
 	api_check(is_table(t), "table expected")
 	h := table_value(t)
 	key: TValue
 	set_light_userdata(&key, p)
-	luaH_set(L, h, &key, stack_value(L, L.top - 1))
-	luaC_barrierback(L, obj2gco(h))
+	table_set(L, h, &key, stack_value(L, L.top - 1))
+	gc_barrierback(L, obj2gco(h))
 	L.top -= 1
 }
 
@@ -964,7 +964,7 @@ lua_rawsetp :: proc(L: ^Lua_State, idx: int, p: rawptr) {
 // state. A forward barrier keeps the tricolor invariant when a black object
 // starts pointing at a (possibly white) metatable. If the new metatable carries a
 // `__gc` field, the object is enrolled for finalization via `luaC_checkfinalizer`.
-lua_setmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
+api_setmetatable :: proc(L: ^State, objindex: int) -> bool {
 	api_checknelems(L, 1)
 	o := index2value(L, objindex)
 	v := stack_value(L, L.top - 1)
@@ -980,15 +980,15 @@ lua_setmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
 		h := table_value(o)
 		h.metatable = mt
 		if mt != nil {
-			luaC_barrier(L, obj2gco(h), obj2gco(mt))
-			luaC_checkfinalizer(L, obj2gco(h), mt)
+			gc_barrier(L, obj2gco(h), obj2gco(mt))
+			gc_checkfinalizer(L, obj2gco(h), mt)
 		}
 	case TUSERDATA:
 		u := udata_value(o)
 		u.metatable = mt
 		if mt != nil {
-			luaC_barrier(L, obj2gco(u), obj2gco(mt))
-			luaC_checkfinalizer(L, obj2gco(u), mt)
+			gc_barrier(L, obj2gco(u), obj2gco(mt))
+			gc_checkfinalizer(L, obj2gco(u), mt)
 		}
 	case:
 		L.g.mt[base_type(o)] = mt
@@ -999,7 +999,7 @@ lua_setmetatable :: proc(L: ^Lua_State, objindex: int) -> bool {
 
 // Store the top value as the n-th user value of a userdata -- reference
 // `lua_setiuservalue`. Returns false if `n` is out of range (value still popped).
-lua_setiuservalue :: proc(L: ^Lua_State, idx: int, n: int) -> bool {
+api_setiuservalue :: proc(L: ^State, idx: int, n: int) -> bool {
 	api_checknelems(L, 1)
 	o := index2value(L, idx)
 	api_check(is_full_userdata(o), "full userdata expected")
@@ -1009,7 +1009,7 @@ lua_setiuservalue :: proc(L: ^Lua_State, idx: int, n: int) -> bool {
 		res = false
 	} else {
 		set_obj(udata_uv(u, n - 1), stack_value(L, L.top - 1))
-		luaC_barrierback(L, obj2gco(u))
+		gc_barrierback(L, obj2gco(u))
 		res = true
 	}
 	L.top -= 1
@@ -1029,26 +1029,26 @@ lua_setiuservalue :: proc(L: ^Lua_State, idx: int, n: int) -> bool {
 //
 // When the collector is internally stopped (mid-close or being torn down) every
 // operation is invalid and we hand back -1, just like the reference guard.
-lua_gc :: proc(L: ^Lua_State, what: int, args: ..int) -> int {
+api_gc :: proc(L: ^State, what: int, args: ..int) -> int {
 	g := L.g
 	if g.gcstp & (GCSTPGC | GCSTPCLS) != 0 {
 		return -1 // internal stop: all options are invalid
 	}
 	res := 0
 	switch what {
-	case LUA_GCSTOP:
+	case GCSTOP:
 		g.gcstp = GCSTPUSR // stopped by the user
-	case LUA_GCRESTART:
-		luaE_setdebt(g, 0)
+	case GCRESTART:
+		state_setdebt(g, 0)
 		g.gcstp = 0 // (other bits must be zero here)
-	case LUA_GCCOLLECT:
-		luaC_fullgc(L, false)
-	case LUA_GCCOUNT:
+	case GCCOLLECT:
+		gc_fullgc(L, false)
+	case GCCOUNT:
 		// GC values are expressed in Kbytes: #bytes / 2^10.
 		res = int(gettotalbytes(g) >> 10)
-	case LUA_GCCOUNTB:
+	case GCCOUNTB:
 		res = int(gettotalbytes(g) & 0x3ff)
-	case LUA_GCSTEP:
+	case GCSTEP:
 		oldstp := g.gcstp
 		n: L_Mem = len(args) > 0 ? L_Mem(args[0]) : 0
 		work := false
@@ -1056,32 +1056,32 @@ lua_gc :: proc(L: ^Lua_State, what: int, args: ..int) -> int {
 		if n <= 0 {
 			n = g.gc_debt // force to run one basic step
 		}
-		luaE_setdebt(g, g.gc_debt - n)
+		state_setdebt(g, g.gc_debt - n)
 		// condGC: only steps when the debt has come due, mirroring `luaC_condGC`.
 		if g.gc_debt <= 0 {
-			luaC_step(L)
+			gc_step(L)
 			work = true
 		}
 		if work && g.gcstate == GCSpause { // end of cycle?
 			res = 1 // signal it
 		}
 		g.gcstp = oldstp // restore previous state
-	case LUA_GCISRUNNING:
+	case GCISRUNNING:
 		res = gcrunning(g) ? 1 : 0
-	case LUA_GCGEN:
-		res = (g.gckind == KGC_INC) ? LUA_GCINC : LUA_GCGEN
-		luaC_changemode(L, KGC_GENMINOR)
-	case LUA_GCINC:
-		res = (g.gckind == KGC_INC) ? LUA_GCINC : LUA_GCGEN
-		luaC_changemode(L, KGC_INC)
-	case LUA_GCPARAM:
+	case GCGEN:
+		res = (g.gckind == KGC_INC) ? GCINC : GCGEN
+		gc_changemode(L, KGC_GENMINOR)
+	case GCINC:
+		res = (g.gckind == KGC_INC) ? GCINC : GCGEN
+		gc_changemode(L, KGC_INC)
+	case GCPARAM:
 		api_check(len(args) >= 1, "missing GC parameter index")
 		param := args[0]
-		api_check(0 <= param && param < LUA_GCPN, "invalid parameter")
-		res = int(luaO_applyparam(g.gcparams[param], 100))
+		api_check(0 <= param && param < GCPN, "invalid parameter")
+		res = int(object_applyparam(g.gcparams[param], 100))
 		value := len(args) >= 2 ? args[1] : -1
 		if value >= 0 {
-			g.gcparams[param] = luaO_codeparam(uint(value))
+			g.gcparams[param] = object_codeparam(uint(value))
 		}
 	case:
 		res = -1 // invalid option
@@ -1101,9 +1101,9 @@ CallS :: struct {
 }
 
 @(private = "file")
-f_call :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
+f_call :: proc(L: ^State, ud: rawptr) -> Thread_Status {
 	c := (^CallS)(ud)
-	luaD_callnoyield(L, c.funcidx, c.nresults)
+	do_callnoyield(L, c.funcidx, c.nresults)
 	return .Ok
 }
 
@@ -1112,7 +1112,7 @@ f_call :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
 // thread can yield, we route through `luaD_call` (which permits a yield to
 // unwind and later resume into `k`); otherwise we forbid yields with
 // `luaD_callnoyield`, exactly as reference Lua decides.
-lua_callk :: proc(L: ^Lua_State, nargs, nresults: int, ctx: K_Context = 0, k: K_Function = nil) {
+api_callk :: proc(L: ^State, nargs, nresults: int, ctx: K_Context = 0, k: K_Function = nil) {
 	api_checknelems(L, nargs + 1)
 	api_check(L.status == .Ok, "cannot do calls on non-normal thread")
 	funcidx := L.top - (nargs + 1)
@@ -1120,15 +1120,15 @@ lua_callk :: proc(L: ^Lua_State, nargs, nresults: int, ctx: K_Context = 0, k: K_
 		ci := &L.frames[L.ci]
 		ci.u.c.k = k
 		ci.u.c.ctx = ctx
-		luaD_call(L, funcidx, nresults)
+		do_call(L, funcidx, nresults)
 	} else {
-		luaD_callnoyield(L, funcidx, nresults)
+		do_callnoyield(L, funcidx, nresults)
 	}
 	adjust_results(L, nresults)
 }
 
-lua_call :: proc(L: ^Lua_State, nargs, nresults: int) {
-	lua_callk(L, nargs, nresults, 0, nil)
+api_call :: proc(L: ^State, nargs, nresults: int) {
+	api_callk(L, nargs, nresults, 0, nil)
 }
 
 // Protected call, optionally yieldable with a continuation -- reference
@@ -1139,8 +1139,8 @@ lua_call :: proc(L: ^Lua_State, nargs, nresults: int) {
 // C frame and marks it `CIST_YPCALL`, so a `pcall` boundary survives a yield and
 // its `k` runs on resume with the right status -- the whole reason `pcallk`
 // exists.
-lua_pcallk :: proc(
-	L: ^Lua_State,
+api_pcallk :: proc(
+	L: ^State,
 	nargs, nresults, errfunc: int,
 	ctx: K_Context = 0,
 	k: K_Function = nil,
@@ -1156,7 +1156,7 @@ lua_pcallk :: proc(
 	if k == nil || !yieldable(L) {
 		// Conventional protected call.
 		c := CallS{funcidx, nresults}
-		status = luaD_pcall(L, f_call, &c, funcidx, func_ef)
+		status = do_pcall(L, f_call, &c, funcidx, func_ef)
 	} else {
 		// Yieldable protected call: retain the continuation across a possible yield.
 		ci := &L.frames[L.ci]
@@ -1167,7 +1167,7 @@ lua_pcallk :: proc(
 		L.errfunc = func_ef
 		set_oah(ci, L.allowhook)
 		ci.callstatus |= CIST_YPCALL
-		luaD_call(L, funcidx, nresults) // yieldable call
+		do_call(L, funcidx, nresults) // yieldable call
 		ci.callstatus &= ~CIST_YPCALL
 		L.errfunc = ci.u.c.old_errfunc
 		status = .Ok
@@ -1176,16 +1176,16 @@ lua_pcallk :: proc(
 	return status
 }
 
-lua_pcall :: proc(L: ^Lua_State, nargs, nresults, errfunc: int) -> Thread_Status {
-	return lua_pcallk(L, nargs, nresults, errfunc, 0, nil)
+api_pcall :: proc(L: ^State, nargs, nresults, errfunc: int) -> Thread_Status {
+	return api_pcallk(L, nargs, nresults, errfunc, 0, nil)
 }
 
 // Compile (or load precompiled) a chunk into a closure and push it -- reference
 // `lua_load`. Parsing runs under `luaD_protectedparser`, which fully cleans up
 // its scratch buffers on every path. On success we wire the loaded main
 // function's sole upvalue (`_ENV`) to the globals table, mirroring reference Lua.
-lua_load :: proc(
-	L: ^Lua_State,
+api_load :: proc(
+	L: ^State,
 	reader: Reader,
 	data: rawptr,
 	chunkname: string,
@@ -1193,14 +1193,14 @@ lua_load :: proc(
 ) -> Thread_Status {
 	z: Zio
 	zio_init(L, &z, reader, data)
-	status := luaD_protectedparser(L, &z, chunkname, mode)
+	status := do_protectedparser(L, &z, chunkname, mode)
 	if status == .Ok {
-		f := lua_closure_value(stack_value(L, L.top - 1)) // the freshly loaded closure
+		f := api_closure_value(stack_value(L, L.top - 1)) // the freshly loaded closure
 		if f.nupvalues >= 1 {
 			gt: TValue
 			getGtable(L, &gt)
 			set_obj(upval_value(f.upvals[0]), &gt)
-			luaC_barrier(L, obj2gco(f.upvals[0]), gc_value(&gt))
+			gc_barrier(L, obj2gco(f.upvals[0]), gc_value(&gt))
 		}
 	}
 	return status
@@ -1213,13 +1213,13 @@ lua_load :: proc(
 // stack exactly the size it came in at, with the function still on top). We
 // mirror that save/restore precisely; forgetting it leaves the aux table dangling
 // above the function.
-lua_dump :: proc(L: ^Lua_State, writer: Lua_Writer, data: rawptr, strip: bool) -> i32 {
+api_dump :: proc(L: ^State, writer: Writer, data: rawptr, strip: bool) -> i32 {
 	api_checknelems(L, 1)
 	otop := L.top // original top, restored after the dump
 	o := stack_value(L, L.top - 1)
 	status: i32 = 1 // not a Lua function: nothing dumped
 	if is_lua_closure(o) {
-		status = luaU_dump(L, lua_closure_value(o).p, writer, data, strip)
+		status = dump_chunk(L, api_closure_value(o).p, writer, data, strip)
 	}
 	L.top = otop // drop the aux table luaU_dump anchored
 	return status
@@ -1230,40 +1230,40 @@ lua_dump :: proc(L: ^Lua_State, writer: Lua_Writer, data: rawptr, strip: bool) -
 // ---------------------------------------------------------------------------
 
 // The thread's current status -- reference `lua_status`.
-lua_status :: proc(L: ^Lua_State) -> Thread_Status {
+api_status :: proc(L: ^State) -> Thread_Status {
 	return L.status
 }
 
 // Concatenate the `n` topmost values, honoring `__concat` -- reference
 // `lua_concat`. `n == 0` pushes the empty string; `n == 1` is a no-op leaving the
 // single value (numbers are *not* coerced in that case, per reference).
-lua_concat :: proc(L: ^Lua_State, n: int) {
+api_concat :: proc(L: ^State, n: int) {
 	api_checknelems(L, n)
 	if n > 0 {
-		luaV_concat(L, n)
+		vm_concat(L, n)
 	} else {
-		set_string(stack_value(L, L.top), luaS_newlstr(L, raw_data([]u8{0}), 0))
+		set_string(stack_value(L, L.top), string_newlstr(L, raw_data([]u8{0}), 0))
 		api_incr_top(L)
 	}
-	luaC_checkGC(L)
+	gc_checkGC(L)
 }
 
 // Push `#v` for the value at `idx`, honoring `__len` -- reference `lua_len`.
-lua_len :: proc(L: ^Lua_State, idx: int) {
+api_len :: proc(L: ^State, idx: int) {
 	t := index2value(L, idx)
-	luaV_objlen(L, L.top, t)
+	vm_objlen(L, L.top, t)
 	api_incr_top(L)
 }
 
 // Advance a table traversal: pop a key, push the next key/value pair (or nothing
 // at the end) -- reference `lua_next`. Returns whether a pair was produced.
-lua_next :: proc(L: ^Lua_State, idx: int) -> bool {
+api_next :: proc(L: ^State, idx: int) -> bool {
 	t := index2value(L, idx)
 	api_check(is_table(t), "table expected")
 	api_checkpop(L, 1)
 	knext: TValue
 	vnext: TValue
-	more := luaH_next(L, table_value(t), stack_value(L, L.top - 1), &knext, &vnext)
+	more := table_next(L, table_value(t), stack_value(L, L.top - 1), &knext, &vnext)
 	if more {
 		set_obj(stack_value(L, L.top - 1), &knext) // replace the old key
 		set_obj(stack_value(L, L.top), &vnext) // push the value
@@ -1277,25 +1277,25 @@ lua_next :: proc(L: ^Lua_State, idx: int) -> bool {
 // Mark the value at `idx` as to-be-closed -- reference `lua_toclose`. When the
 // enclosing block later unwinds past this slot (via `settop`/`closeslot`/error),
 // its `__close` metamethod runs.
-lua_toclose :: proc(L: ^Lua_State, idx: int) {
+api_toclose :: proc(L: ^State, idx: int) {
 	level := index2stack(L, idx)
 	api_check(L.tbclist < level, "given index below or equal a marked one")
-	luaF_newtbcupval(L, level) // enroll the slot
+	func_newtbcupval(L, level) // enroll the slot
 	L.frames[L.ci].callstatus |= CIST_TBC
 }
 
 // Raise an error with the value at the top of the stack as the error object --
 // reference `lua_error`. Never returns (it longjmps through the active boundary).
-lua_error :: proc(L: ^Lua_State) -> ! {
+api_error :: proc(L: ^State) -> ! {
 	api_checknelems(L, 1)
-	luaG_errormsg(L)
+	debug_errormsg(L)
 	unreachable() // luaG_errormsg always throws; this satisfies the `-> !` contract
 }
 
 // Parse a string into a pushed number -- reference `lua_stringtonumber`. Returns
 // the number of bytes consumed on success, or 0 if the whole string was not a
 // valid numeral.
-lua_stringtonumber :: proc(L: ^Lua_State, s: string) -> uint {
+api_stringtonumber :: proc(L: ^State, s: string) -> uint {
 	// Reuse the object-layer parser, which accepts the exact Lua numeral grammar
 	// (decimal + hex integers and floats, surrounding spaces).
 	buf := transmute([]u8)s
@@ -1311,14 +1311,14 @@ lua_stringtonumber :: proc(L: ^Lua_State, s: string) -> uint {
 // Retrieve / replace the allocator -- reference `lua_getallocf`/`lua_setallocf`.
 // Our allocator bundles the function and its user pointer in one `Allocator`
 // struct; we surface them separately here to match the reference C signatures.
-lua_getallocf :: proc(L: ^Lua_State, ud: ^rawptr) -> Alloc_Proc {
+api_getallocf :: proc(L: ^State, ud: ^rawptr) -> Alloc_Proc {
 	if ud != nil {
 		ud^ = L.g.alloc.ud
 	}
 	return L.g.alloc.alloc
 }
 
-lua_setallocf :: proc(L: ^Lua_State, f: Alloc_Proc, ud: rawptr) {
+api_setallocf :: proc(L: ^State, f: Alloc_Proc, ud: rawptr) {
 	L.g.alloc.alloc = f
 	L.g.alloc.ud = ud
 }
@@ -1329,15 +1329,15 @@ lua_setallocf :: proc(L: ^Lua_State, f: Alloc_Proc, ud: rawptr) {
 
 // Create a new thread sharing this global state and push it -- reference
 // `lua_newthread`.
-lua_newthread :: proc(L: ^Lua_State) -> ^Lua_State {
-	th := luaE_newthread(L)
+api_newthread :: proc(L: ^State) -> ^State {
+	th := state_newthread(L)
 	set_gc(stack_value(L, L.top), obj2gco(th))
 	api_incr_top(L)
 	return th
 }
 
 // Whether the thread may currently yield -- reference `lua_isyieldable`.
-lua_isyieldable :: proc(L: ^Lua_State) -> bool {
+api_isyieldable :: proc(L: ^State) -> bool {
 	return yieldable(L)
 }
 
@@ -1361,7 +1361,7 @@ aux_upvalue :: proc(fi: ^TValue, n: int) -> (name: string, val: ^TValue, owner: 
 		// C upvalue (distinct from the "(no name)" a stripped Lua closure gives).
 		return "", &f.upvalue[n - 1], obj2gco(f)
 	case VLCL:
-		f := lua_closure_value(fi)
+		f := api_closure_value(fi)
 		p := f.p
 		if !(1 <= n && n <= int(p.sizeupvalues)) {
 			return "", nil, nil
@@ -1379,7 +1379,7 @@ aux_upvalue :: proc(fi: ^TValue, n: int) -> (name: string, val: ^TValue, owner: 
 
 // Push the n-th upvalue of the closure at `funcindex` and return its name --
 // reference `lua_getupvalue`. An empty name means "no name" (a C upvalue).
-lua_getupvalue :: proc(L: ^Lua_State, funcindex, n: int) -> (name: string, ok: bool) {
+api_getupvalue :: proc(L: ^State, funcindex, n: int) -> (name: string, ok: bool) {
 	fi := index2value(L, funcindex)
 	nm, val, _ := aux_upvalue(fi, n)
 	if val == nil {
@@ -1392,7 +1392,7 @@ lua_getupvalue :: proc(L: ^Lua_State, funcindex, n: int) -> (name: string, ok: b
 
 // Set the n-th upvalue of the closure at `funcindex` from the popped top value --
 // reference `lua_setupvalue`.
-lua_setupvalue :: proc(L: ^Lua_State, funcindex, n: int) -> (name: string, ok: bool) {
+api_setupvalue :: proc(L: ^State, funcindex, n: int) -> (name: string, ok: bool) {
 	fi := index2value(L, funcindex)
 	nm, val, owner := aux_upvalue(fi, n)
 	if val == nil {
@@ -1401,7 +1401,7 @@ lua_setupvalue :: proc(L: ^Lua_State, funcindex, n: int) -> (name: string, ok: b
 	L.top -= 1
 	set_obj(val, stack_value(L, L.top))
 	if is_collectable(stack_value(L, L.top)) {
-		luaC_barrier(L, owner, gc_value(stack_value(L, L.top)))
+		gc_barrier(L, owner, gc_value(stack_value(L, L.top)))
 	}
 	return nm, true
 }

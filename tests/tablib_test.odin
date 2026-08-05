@@ -9,21 +9,21 @@ import "core:testing"
 import lua "luao:lua"
 import aux "luao:stdlib"
 
-tab_state :: proc() -> ^lua.Lua_State {
+tab_state :: proc() -> ^lua.State {
 	L := lua.new_state(lua.default_allocator())
-	lua.lua_pushcfunction(L, aux.luaopen_base)
-	lua.lua_call(L, 0, 0)
-	lua.lua_pushcfunction(L, aux.luaopen_table)
-	lua.lua_call(L, 0, 1)
-	lua.lua_setglobal(L, "table")
+	lua.api_pushcfunction(L, aux.open_base)
+	lua.api_call(L, 0, 0)
+	lua.api_pushcfunction(L, aux.open_table)
+	lua.api_call(L, 0, 1)
+	lua.api_setglobal(L, "table")
 	return L
 }
 
-tab_run :: proc(L: ^lua.Lua_State, src: string) -> lua.Thread_Status {
-	if st := aux.luaL_loadstring(L, src); st != .Ok {
+tab_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
+	if st := aux.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.lua_pcall(L, 0, lua.LUA_MULTRET, 0)
+	return lua.api_pcall(L, 0, lua.MULTRET, 0)
 }
 
 @(test)
@@ -41,7 +41,7 @@ tab_insert_remove :: proc(t: ^testing.T) {
 		"return t[1]..','..t[2]..','..t[3]..','..t[4]",
 	)
 	testing.expect(t, st == .Ok)
-	s, _ := lua.lua_tolstring(L, -1)
+	s, _ := lua.api_tolstring(L, -1)
 	testing.expect(t, s == "5,20,30,40", "insert/remove reshape the sequence")
 }
 
@@ -50,11 +50,11 @@ tab_concat :: proc(t: ^testing.T) {
 	L := tab_state()
 	defer lua.close_state(L)
 	testing.expect(t, tab_run(L, "return table.concat({'a','b','c'}, '-')") == .Ok)
-	s, _ := lua.lua_tolstring(L, -1)
+	s, _ := lua.api_tolstring(L, -1)
 	testing.expect(t, s == "a-b-c", "concat joins with the separator")
 
 	testing.expect(t, tab_run(L, "return table.concat({1,2,3,4}, ',', 2, 3)") == .Ok)
-	s, _ = lua.lua_tolstring(L, -1)
+	s, _ = lua.api_tolstring(L, -1)
 	testing.expect(t, s == "2,3", "concat honors the i..j range")
 }
 
@@ -70,7 +70,7 @@ tab_pack_unpack :: proc(t: ^testing.T) {
 		"return a + b + c",
 	)
 	testing.expect(t, st == .Ok)
-	n, ok := lua.lua_tointegerx(L, -1)
+	n, ok := lua.api_tointegerx(L, -1)
 	testing.expect(t, ok && n == 600, "unpack yields all elements")
 }
 
@@ -86,7 +86,7 @@ tab_move :: proc(t: ^testing.T) {
 		"return table.concat(t, ',')",
 	)
 	testing.expect(t, st == .Ok)
-	s, _ := lua.lua_tolstring(L, -1)
+	s, _ := lua.api_tolstring(L, -1)
 	testing.expect(t, s == "1,2,1,2,3", "overlapping move copies right-to-left")
 }
 
@@ -129,6 +129,6 @@ tab_sort_comparator :: proc(t: ^testing.T) {
 		"return t[1]..','..t[#t]",
 	)
 	testing.expect(t, st == .Ok)
-	s, _ := lua.lua_tolstring(L, -1)
+	s, _ := lua.api_tolstring(L, -1)
 	testing.expect(t, s == "9,1", "custom comparator sorts descending")
 }

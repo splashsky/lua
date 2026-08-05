@@ -27,7 +27,7 @@ package lua
 // counts strings recorded in it. `fixed` is retained for fidelity but, per the
 // note above, never changes memory decisions.
 LoadState :: struct {
-	L:      ^Lua_State,
+	L:      ^State,
 	Z:      ^Zio,
 	name:   string, // chunk name, for error messages
 	h:      ^Table, // list (int-keyed table) for string reuse
@@ -40,7 +40,7 @@ LoadState :: struct {
 // reference `error`, this never returns: `throw` longjmps back to the innermost
 // protected boundary (here, the protected parser that invoked us).
 undump_error :: proc(S: ^LoadState, why: string) {
-	luaO_pushfstring(S.L, "%s: bad binary format (%s)", S.name, why)
+	object_pushfstring(S.L, "%s: bad binary format (%s)", S.name, why)
 	throw(S.L, .Err_Syntax)
 }
 
@@ -125,7 +125,7 @@ load_integer :: proc(S: ^LoadState) -> Integer {
 // raising `Err_Mem` if the allocation fails. An `n` of 0 yields a nil pointer
 // (an empty array needs no storage). This is our counterpart to reference
 // `luaM_newvectorchecked` for the copy-only loader.
-load_new_vector :: proc(L: ^Lua_State, $T: typeid, n: int) -> [^]T {
+load_new_vector :: proc(L: ^State, $T: typeid, n: int) -> [^]T {
 	if n == 0 {
 		return nil
 	}
@@ -156,34 +156,34 @@ load_string :: proc(S: ^LoadState, p: ^Proto, sl: ^^TString) {
 			return
 		}
 		stv: TValue
-		luaH_getint(S.h, Integer(idx), &stv)
+		table_getint(S.h, Integer(idx), &stv)
 		if base_type(&stv) != TSTRING {
 			undump_error(S, "invalid string index")
 		}
 		ts = str_value(&stv)
 		sl^ = ts
-		luaC_barrier(L, obj2gco(p), obj2gco(ts))
+		gc_barrier(L, obj2gco(p), obj2gco(ts))
 		return // do not save it again
 	} else if size - 1 <= MAXSHORTLEN { // short string?
 		real := size - 1
 		buff: [MAXSHORTLEN + 1]Byte // extra byte for the trailing NUL
 		load_block(S, &buff[0], real + 1)
-		ts = luaS_newlstr(L, &buff[0], real)
+		ts = string_newlstr(L, &buff[0], real)
 		sl^ = ts
-		luaC_barrier(L, obj2gco(p), obj2gco(ts))
+		gc_barrier(L, obj2gco(p), obj2gco(ts))
 	} else { // long string: allocate then read directly into its buffer
 		real := size - 1
-		ts = luaS_createlngstrobj(L, real)
+		ts = string_createlngstrobj(L, real)
 		sl^ = ts // anchor before the read (which can GC)
-		luaC_barrier(L, obj2gco(p), obj2gco(ts))
+		gc_barrier(L, obj2gco(p), obj2gco(ts))
 		load_block(S, str_bytes(ts), real + 1) // content plus NUL, in place
 	}
 	// Record the newly-loaded string for future reuse references.
 	S.nstr += 1
 	sv: TValue
 	set_string(&sv, ts)
-	luaH_setint(L, S.h, Integer(S.nstr), &sv)
-	luaC_barrierback(L, obj2gco(S.h))
+	table_setint(L, S.h, Integer(S.nstr), &sv)
+	gc_barrierback(L, obj2gco(S.h))
 }
 
 // Read the bytecode. Reference `loadCode`.
@@ -245,8 +245,8 @@ load_protos :: proc(S: ^LoadState, f: ^Proto) {
 		f.p[i] = nil
 	}
 	for i in 0 ..< n {
-		f.p[i] = luaF_newproto(S.L)
-		luaC_barrier(S.L, obj2gco(f), obj2gco(f.p[i]))
+		f.p[i] = func_newproto(S.L)
+		gc_barrier(S.L, obj2gco(f), obj2gco(f.p[i]))
 		load_function(S, f.p[i])
 	}
 }
@@ -349,7 +349,7 @@ check_literal :: proc(S: ^LoadState, s: string, msg: string) {
 // Raise a "<type> <what> mismatch" error for a numeric-format check. Reference
 // `numerror`.
 num_error :: proc(S: ^LoadState, what: string, tname: string) {
-	ts := luaO_pushfstring(S.L, "%s %s mismatch", tname, what)
+	ts := object_pushfstring(S.L, "%s %s mismatch", tname, what)
 	undump_error(S, string(str_slice(ts)))
 }
 
@@ -371,18 +371,18 @@ check_num :: proc(S: ^LoadState, expected: $T, tname: string) {
 // `checkHeader`. The first signature byte was already consumed by the parser
 // (that is what routed us here), so we check `LUA_SIGNATURE[1:]`.
 check_header :: proc(S: ^LoadState) {
-	check_literal(S, LUA_SIGNATURE[1:], "not a binary chunk")
-	if load_byte(S) != LUAC_VERSION {
+	check_literal(S, SIGNATURE[1:], "not a binary chunk")
+	if load_byte(S) != HEADER_VERSION {
 		undump_error(S, "version mismatch")
 	}
-	if load_byte(S) != LUAC_FORMAT {
+	if load_byte(S) != HEADER_FORMAT {
 		undump_error(S, "format mismatch")
 	}
-	check_literal(S, LUAC_DATA, "corrupted chunk")
-	check_num(S, i32(LUAC_INT), "int") // C int marker: 4 bytes
-	check_num(S, Instruction(LUAC_INST), "instruction")
-	check_num(S, Integer(LUAC_INT), "Lua integer")
-	check_num(S, Number(LUAC_NUM), "Lua number")
+	check_literal(S, HEADER_DATA, "corrupted chunk")
+	check_num(S, i32(HEADER_INT), "int") // C int marker: 4 bytes
+	check_num(S, Instruction(HEADER_INST), "instruction")
+	check_num(S, Integer(HEADER_INT), "Lua integer")
+	check_num(S, Number(HEADER_NUM), "Lua number")
 }
 
 // luaU_undump reconstructs a `Proto` tree from a precompiled chunk read through
@@ -393,14 +393,14 @@ check_header :: proc(S: ^LoadState) {
 // The closure and the saved-string table are both anchored on the stack during
 // the load (so an emergency GC can never reclaim work in progress); the table is
 // popped before returning, leaving the closure on top exactly as reference does.
-luaU_undump :: proc(L: ^Lua_State, z: ^Zio, name: string, fixed: bool) -> ^LClosure {
+undump_chunk :: proc(L: ^State, z: ^Zio, name: string, fixed: bool) -> ^LClosure {
 	S: LoadState
 	// Normalize the chunk name for error messages, mirroring reference.
 	nm := name
 	if len(nm) > 0 {
 		if nm[0] == '@' || nm[0] == '=' {
 			nm = nm[1:]
-		} else if nm[0] == LUA_SIGNATURE[0] {
+		} else if nm[0] == SIGNATURE[0] {
 			nm = "binary string"
 		}
 	}
@@ -410,15 +410,15 @@ luaU_undump :: proc(L: ^Lua_State, z: ^Zio, name: string, fixed: bool) -> ^LClos
 	S.fixed = fixed
 	S.offset = 1 // the first byte was already read by the parser
 	check_header(&S)
-	cl := luaF_newLclosure(L, int(load_byte(&S)))
+	cl := func_newLclosure(L, int(load_byte(&S)))
 	set_gc(stack_value(L, L.top), obj2gco(cl)) // anchor the closure
 	inc_top(L)
-	S.h = luaH_new(L) // create the saved-string list
+	S.h = table_new(L) // create the saved-string list
 	S.nstr = 0
 	set_gc(stack_value(L, L.top), obj2gco(S.h)) // anchor it too
 	inc_top(L)
-	cl.p = luaF_newproto(L)
-	luaC_barrier(L, obj2gco(cl), obj2gco(cl.p))
+	cl.p = func_newproto(L)
+	gc_barrier(L, obj2gco(cl), obj2gco(cl.p))
 	load_function(&S, cl.p)
 	if int(cl.nupvalues) != cl.p.sizeupvalues {
 		undump_error(&S, "corrupted chunk")

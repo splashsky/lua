@@ -15,7 +15,7 @@ import aux "luao:stdlib"
 
 // A protected computation that pushes a few scratch values and then raises a
 // runtime error with a caller-supplied integer as the error object on top.
-raising_proc :: proc(L: ^lua.Lua_State, ud: rawptr) -> lua.Thread_Status {
+raising_proc :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	errval := (^i64)(ud)^
 	lua.set_int(lua.stack_value(L, L.top), 111)
 	L.top += 1
@@ -27,7 +27,7 @@ raising_proc :: proc(L: ^lua.Lua_State, ud: rawptr) -> lua.Thread_Status {
 }
 
 // A protected computation that simply succeeds.
-ok_proc :: proc(L: ^lua.Lua_State, ud: rawptr) -> lua.Thread_Status {
+ok_proc :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	return .Ok
 }
 
@@ -98,7 +98,7 @@ protected_boundary_nests :: proc(t: ^testing.T) {
 
 // The outer computation runs an inner protected call that raises, confirms it
 // caught Err_Run, and reports success -- modeling a pcall that recovers.
-nested_outer :: proc(L: ^lua.Lua_State, ud: rawptr) -> lua.Thread_Status {
+nested_outer :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	inner := lua.run_protected(L, raising_proc, ud)
 	if inner != .Err_Run {
 		return .Err_Run // propagate an unexpected result so the test fails loudly
@@ -123,7 +123,7 @@ Jump_Stress_Level :: struct {
 // into tail recursion; its address also escapes, forcing the value to memory
 // rather than relying on LLVM understanding setjmp's missing "returns_twice"
 // attribute.
-deep_jump_stress :: #force_no_inline proc(L: ^lua.Lua_State, depth: int, shared: ^Jump_Stress_Shared) -> lua.Thread_Status {
+deep_jump_stress :: #force_no_inline proc(L: ^lua.State, depth: int, shared: ^Jump_Stress_Shared) -> lua.Thread_Status {
 	sentinel := i64(0x120000 + depth)
 	sentinel_ptr := &sentinel
 	if depth == 0 {
@@ -141,7 +141,7 @@ deep_jump_stress :: #force_no_inline proc(L: ^lua.Lua_State, depth: int, shared:
 // Every level catches the child at a different native depth, verifies a local
 // which was live across that jump, then throws again to its own parent. This
 // proves that the errorJmp chain routes each jump to the innermost live buffer.
-jump_stress_level :: proc(L: ^lua.Lua_State, ud: rawptr) -> lua.Thread_Status {
+jump_stress_level :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	level := (^Jump_Stress_Level)(ud)
 	if level.parent_sentinel != nil &&
 	   level.parent_sentinel^ != i64(0x340000 + level.depth + 1) {
@@ -206,7 +206,7 @@ protected_boundary_lua_surface_stress :: proc(t: ^testing.T) {
 	L := lua.new_state(lua.default_allocator())
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
-	aux.luaL_openlibs(L)
+	aux.aux_openlibs(L)
 
 	before_ccalls := L.n_ccalls
 	source :=
@@ -253,14 +253,14 @@ protected_boundary_lua_surface_stress :: proc(t: ^testing.T) {
 		"assert(survivor.tag == 'alive' and survivor.value == 0x12345)\n" +
 		"return 0x5eed"
 
-	testing.expect_value(t, aux.luaL_loadstring(L, source), lua.Thread_Status.Ok)
-	status := lua.lua_pcall(L, 0, 1, 0)
+	testing.expect_value(t, aux.aux_loadstring(L, source), lua.Thread_Status.Ok)
+	status := lua.api_pcall(L, 0, 1, 0)
 	if status != .Ok {
-		message, _ := lua.lua_tolstring(L, -1)
+		message, _ := lua.api_tolstring(L, -1)
 		testing.expectf(t, false, "jump stress chunk failed: %s", message)
 		return
 	}
-	testing.expect_value(t, lua.lua_tointeger(L, -1), i64(0x5eed))
+	testing.expect_value(t, lua.api_tointeger(L, -1), i64(0x5eed))
 	testing.expect_value(t, L.n_ccalls, before_ccalls)
 	testing.expect(t, L.errorJmp == nil, "public pcall left no protected boundary linked")
 	testing.expect_value(t, L.status, lua.Thread_Status.Ok)

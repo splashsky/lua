@@ -15,16 +15,16 @@ import lua "luao:lua"
 
 // Build a fresh full userdata (no user values, minimal payload) and return it.
 @(private = "file")
-new_udata :: proc(L: ^lua.Lua_State) -> ^lua.Udata {
-	return lua.luaS_newudata(L, 1, 0)
+new_udata :: proc(L: ^lua.State) -> ^lua.Udata {
+	return lua.string_newudata(L, 1, 0)
 }
 
 // Install `key = value` (both by string key) into table `mt`.
 @(private = "file")
-set_str_field :: proc(L: ^lua.Lua_State, mt: ^lua.Table, key: string, value: ^lua.TValue) {
+set_str_field :: proc(L: ^lua.State, mt: ^lua.Table, key: string, value: ^lua.TValue) {
 	k: lua.TValue
-	lua.set_string(&k, lua.luaS_new(L, key))
-	_ = lua.luaH_set(L, mt, &k, value)
+	lua.set_string(&k, lua.string_new(L, key))
+	_ = lua.table_set(L, mt, &k, value)
 }
 
 // `luaT_gettmbyobj` must resolve an event through the userdata's *own* metatable,
@@ -41,20 +41,20 @@ udata_gettmbyobj_uses_own_metatable :: proc(t: ^testing.T) {
 	lua.set_userdata(&uo, u)
 	push_root(L, lua.obj2gco(u))
 
-	mt := lua.luaH_new(L)
+	mt := lua.table_new(L)
 	push_root(L, lua.obj2gco(mt))
 	sentinel: lua.TValue
-	lua.set_string(&sentinel, lua.luaS_new(L, "userdata-index-hook"))
+	lua.set_string(&sentinel, lua.string_new(L, "userdata-index-hook"))
 	set_str_field(L, mt, "__index", &sentinel)
 	u.metatable = mt
 
-	tm := lua.luaT_gettmbyobj(L, &uo, lua.TM_INDEX)
+	tm := lua.tm_gettmbyobj(L, &uo, lua.TM_INDEX)
 	testing.expect(t, !lua.is_nil(tm), "userdata's own __index is found")
 	testing.expect(t, lua.is_string(tm), "the resolved metamethod is our sentinel")
 	testing.expect_value(t, str_contents(lua.str_value(tm)), "userdata-index-hook")
 
 	// A different event with no entry must still report absent.
-	none := lua.luaT_gettmbyobj(L, &uo, lua.TM_ADD)
+	none := lua.tm_gettmbyobj(L, &uo, lua.TM_ADD)
 	testing.expect(t, lua.is_nil(none), "an unset event is absent, not spuriously found")
 }
 
@@ -71,16 +71,16 @@ udata_objtypename_reports_name :: proc(t: ^testing.T) {
 	push_root(L, lua.obj2gco(u))
 
 	// Without a metatable, the generic type name is used.
-	testing.expect_value(t, lua.luaT_objtypename(L, &uo), "userdata")
+	testing.expect_value(t, lua.tm_objtypename(L, &uo), "userdata")
 
-	mt := lua.luaH_new(L)
+	mt := lua.table_new(L)
 	push_root(L, lua.obj2gco(mt))
 	nameval: lua.TValue
-	lua.set_string(&nameval, lua.luaS_new(L, "Point"))
+	lua.set_string(&nameval, lua.string_new(L, "Point"))
 	set_str_field(L, mt, "__name", &nameval)
 	u.metatable = mt
 
-	testing.expect_value(t, lua.luaT_objtypename(L, &uo), "Point")
+	testing.expect_value(t, lua.tm_objtypename(L, &uo), "Point")
 }
 
 // `luaV_equalobj` must consult `__eq` when two *distinct* userdata share (or each
@@ -102,7 +102,7 @@ udata_eq_metamethod_honored :: proc(t: ^testing.T) {
 	push_root(L, lua.obj2gco(a))
 	push_root(L, lua.obj2gco(b))
 
-	mt := lua.luaH_new(L)
+	mt := lua.table_new(L)
 	push_root(L, lua.obj2gco(mt))
 	eqval: lua.TValue
 	lua.set_c_function(&eqval, udata_eq_true)
@@ -112,7 +112,7 @@ udata_eq_metamethod_honored :: proc(t: ^testing.T) {
 
 	// Distinct objects: raw equality is false, but __eq makes them equal.
 	testing.expect(t, !lua.raw_equal(&ao, &bo), "distinct userdata are not raw-equal")
-	testing.expect(t, lua.luaV_equalobj(L, &ao, &bo), "__eq reports them equal")
+	testing.expect(t, lua.vm_equalobj(L, &ao, &bo), "__eq reports them equal")
 
 	pop_root(L) // mt
 	pop_root(L) // b
@@ -123,7 +123,7 @@ udata_eq_metamethod_honored :: proc(t: ^testing.T) {
 // truthy result on the stack, matching the C-function calling convention.
 @(private = "file")
 udata_eq_true :: proc "c" (Lp: rawptr) -> i32 {
-	L := (^lua.Lua_State)(Lp)
+	L := (^lua.State)(Lp)
 	// Push `true` as the single return value.
 	lua.set_bool(&L.stack[L.top].val, true)
 	L.top += 1
@@ -153,7 +153,7 @@ udata_gc_finalizer_runs :: proc(t: ^testing.T) {
 
 	udata_final_count = 0
 
-	mt := lua.luaH_new(L)
+	mt := lua.table_new(L)
 	push_root(L, lua.obj2gco(mt))
 	gcval: lua.TValue
 	lua.set_c_function(&gcval, udata_finalizer)
@@ -161,9 +161,9 @@ udata_gc_finalizer_runs :: proc(t: ^testing.T) {
 
 	victim := new_udata(L) // deliberately not rooted
 	victim.metatable = mt
-	lua.luaC_checkfinalizer(L, lua.obj2gco(victim), mt)
+	lua.gc_checkfinalizer(L, lua.obj2gco(victim), mt)
 
-	lua.lua_gc(L, lua.LUA_GCCOLLECT)
+	lua.api_gc(L, lua.GCCOLLECT)
 	testing.expect_value(t, udata_final_count, 1)
 
 	pop_root(L) // mt

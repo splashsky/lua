@@ -10,21 +10,21 @@ import "core:testing"
 import lua "luao:lua"
 import aux "luao:stdlib"
 
-oslib_state :: proc() -> ^lua.Lua_State {
+oslib_state :: proc() -> ^lua.State {
 	L := lua.new_state(lua.default_allocator())
-	lua.lua_pushcfunction(L, aux.luaopen_base)
-	lua.lua_call(L, 0, 0)
-	lua.lua_pushcfunction(L, aux.luaopen_os)
-	lua.lua_call(L, 0, 1)
-	lua.lua_setglobal(L, "os")
+	lua.api_pushcfunction(L, aux.open_base)
+	lua.api_call(L, 0, 0)
+	lua.api_pushcfunction(L, aux.open_os)
+	lua.api_call(L, 0, 1)
+	lua.api_setglobal(L, "os")
 	return L
 }
 
-oslib_run :: proc(L: ^lua.Lua_State, src: string) -> lua.Thread_Status {
-	if st := aux.luaL_loadstring(L, src); st != .Ok {
+oslib_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
+	if st := aux.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.lua_pcall(L, 0, lua.LUA_MULTRET, 0)
+	return lua.api_pcall(L, 0, lua.MULTRET, 0)
 }
 
 @(test)
@@ -84,7 +84,7 @@ oslib_getenv_and_clock :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 	st := oslib_run(
 		L,
-		"assert(os.getenv('LUA_ODIN_DEFINITELY_NOT_SET_9F3A') == nil, 'unset env is nil')\n" +
+		"assert(os.getenv('ODIN_DEFINITELY_NOT_SET_9F3A') == nil, 'unset env is nil')\n" +
 		"assert(type(os.clock()) == 'number', 'clock is a number')\n" +
 		"assert(os.clock() >= 0, 'clock is non-negative')\n" +
 		"assert(type(os.time()) == 'number', 'time is a number')\n" +

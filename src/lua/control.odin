@@ -105,8 +105,8 @@ Exec_Outcome :: struct {
 // state to jump back to and the error code being carried out. It lives on the
 // native stack of whichever `run_protected` created it -- never on the heap --
 // so nothing here can itself fail to allocate while we're handling an error.
-Lua_Longjmp :: struct {
-	previous: ^Lua_Longjmp,  // the enclosing protected scope, if any
+Longjmp :: struct {
+	previous: ^Longjmp,  // the enclosing protected scope, if any
 	b:        Jmp_Buf,       // saved machine state (the `setjmp` target)
 	status:   Thread_Status, // error code in flight; set by `throw`, read on catch
 }
@@ -119,7 +119,7 @@ Lua_Longjmp :: struct {
 // back to `run_protected` and never returns. `f` must never *return* an
 // `.Err_*` status -- if it does, a throw site was missed, and `run_protected`
 // asserts to catch that during development.
-Protected_Proc :: #type proc(L: ^Lua_State, ud: rawptr) -> Thread_Status
+Protected_Proc :: #type proc(L: ^State, ud: rawptr) -> Thread_Status
 
 // Run `f` under a fresh protected boundary and report the caught status. This is
 // our analogue of `luaD_rawrunprotected`. We push a `Lua_Longjmp` onto the
@@ -134,9 +134,9 @@ Protected_Proc :: #type proc(L: ^Lua_State, ud: rawptr) -> Thread_Status
 // slots, restoring `errfunc`/`allowhook`, installing the error object, shrinking
 // the stack) is a *separate* layer built on top of this in Phase 5; keeping it
 // out of here mirrors reference Lua's split and avoids conflating the two.
-run_protected :: proc(L: ^Lua_State, f: Protected_Proc, ud: rawptr) -> Thread_Status {
+run_protected :: proc(L: ^State, f: Protected_Proc, ud: rawptr) -> Thread_Status {
 	old_ccalls := L.n_ccalls
-	lj: Lua_Longjmp
+	lj: Longjmp
 	lj.status = .Ok
 	lj.previous = L.errorJmp // chain onto any enclosing boundary
 	L.errorJmp = &lj
@@ -172,7 +172,7 @@ run_protected :: proc(L: ^Lua_State, f: Protected_Proc, ud: rawptr) -> Thread_St
 // `return throw(L, .Err_*)` propagation sites keep compiling unchanged. Both
 // branches below diverge (`longjmp` and `abort` are both `-> !`), so there is no
 // reachable `return` and Odin is happy; the type is never actually produced.
-throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
+throw :: proc(L: ^State, errcode: Thread_Status) -> Thread_Status {
 	if L.errorJmp != nil {
 		L.errorJmp.status = errcode
 		jmp_long(&L.errorJmp.b, 1)
@@ -200,7 +200,7 @@ throw :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
 // run from inside a coroutine must terminate the whole coroutine (back to the
 // `resume` boundary), not merely pop out to some enclosing `pcall`. With no
 // boundary at all it degenerates to a plain `throw` (panic + abort).
-throw_baselevel :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status {
+throw_baselevel :: proc(L: ^State, errcode: Thread_Status) -> Thread_Status {
 	if L.errorJmp != nil {
 		for L.errorJmp.previous != nil {
 			L.errorJmp = L.errorJmp.previous
@@ -224,7 +224,7 @@ throw_baselevel :: proc(L: ^Lua_State, errcode: Thread_Status) -> Thread_Status 
 //     surviving value, so callers see a stable diagnostic string.
 //   * any other error: the raiser left the error object at `top-1`; slide it down
 //     to `old_top`.
-set_error_object :: proc(L: ^Lua_State, errcode: Thread_Status, old_top: int) {
+set_error_object :: proc(L: ^State, errcode: Thread_Status, old_top: int) {
 	if errcode == .Err_Mem {
 		if L.g.memerrmsg != nil {
 			set_string(stack_value(L, old_top), L.g.memerrmsg)
@@ -232,7 +232,7 @@ set_error_object :: proc(L: ^Lua_State, errcode: Thread_Status, old_top: int) {
 			set_nil(stack_value(L, old_top))
 		}
 	} else if errcode == .Err_Err {
-		set_string(stack_value(L, old_top), luaS_new(L, "error in error handling"))
+		set_string(stack_value(L, old_top), string_new(L, "error in error handling"))
 	} else {
 		stack_value(L, old_top)^ = stack_value(L, L.top - 1)^
 	}

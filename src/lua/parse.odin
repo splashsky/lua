@@ -245,7 +245,7 @@ reglevel :: proc "contextless" (fs: ^FuncState, nvar: int) -> int {
 
 // Number of variables currently living on the register stack. Reference
 // `luaY_nvarstack`.
-luaY_nvarstack :: proc "contextless" (fs: ^FuncState) -> int {
+parse_nvarstack :: proc "contextless" (fs: ^FuncState) -> int {
 	return reglevel(fs, int(fs.nactvar))
 }
 
@@ -260,19 +260,19 @@ errorlimit :: proc(fs: ^FuncState, limit: int, what: string) {
 	if line == 0 {
 		loc = "main function"
 	} else {
-		loc = string(str_slice(luaO_pushfstring(L, "function at line %d", line)))
+		loc = string(str_slice(object_pushfstring(L, "function at line %d", line)))
 	}
 	msg := string(
 		str_slice(
-			luaO_pushfstring(L, "too many %s (limit is %d) in %s", what, limit, loc),
+			object_pushfstring(L, "too many %s (limit is %d) in %s", what, limit, loc),
 		),
 	)
-	luaX_syntaxerror(fs.ls, msg)
+	lex_syntaxerror(fs.ls, msg)
 }
 
 // Assert that value 'v' does not exceed limit 'l'; raise otherwise. Reference
 // `luaY_checklimit`.
-luaY_checklimit :: proc(fs: ^FuncState, v: int, l: int, what: string) {
+parse_checklimit :: proc(fs: ^FuncState, v: int, l: int, what: string) {
 	if v > l {
 		errorlimit(fs, l, what)
 	}
@@ -306,7 +306,7 @@ SHRT_MAX :: 32767
 // `n_ccalls` counter here; Phase 5 will unify this with the call machinery once
 // the trampoline exists. 200 mirrors reference `LUAI_MAXCCALLS`.
 @(private = "file")
-LUAI_MAXCCALLS :: 200
+MAXCCALLS :: 200
 
 // Whether an expression kind can yield *multiple* results (a call or a vararg).
 // Reference macro `hasmultret`.
@@ -354,9 +354,9 @@ needvatab :: #force_inline proc "contextless" (p: ^Proto) {
 // `error_expected`.
 @(private = "file")
 error_expected :: proc(ls: ^LexState, token: int) {
-	luaX_syntaxerror(
+	lex_syntaxerror(
 		ls,
-		string(str_slice(luaO_pushfstring(ls.L, "%s expected", luaX_token2str(ls, token)))),
+		string(str_slice(object_pushfstring(ls.L, "%s expected", lex_token2str(ls, token)))),
 	)
 }
 
@@ -365,7 +365,7 @@ error_expected :: proc(ls: ^LexState, token: int) {
 @(private = "file")
 testnext :: proc(ls: ^LexState, c: int) -> bool {
 	if ls.t.token == c {
-		luaX_next(ls)
+		lex_next(ls)
 		return true
 	}
 	return false
@@ -383,7 +383,7 @@ check :: proc(ls: ^LexState, c: int) {
 @(private = "file")
 checknext :: proc(ls: ^LexState, c: int) {
 	check(ls, c)
-	luaX_next(ls)
+	lex_next(ls)
 }
 
 // Require token `what` and consume it; on failure, if the opener `who` was on a
@@ -395,15 +395,15 @@ check_match :: proc(ls: ^LexState, what, who, where_line: int) {
 		if where_line == ls.linenumber {
 			error_expected(ls, what) // same line: the short message is enough
 		} else {
-			luaX_syntaxerror(
+			lex_syntaxerror(
 				ls,
 				string(
 					str_slice(
-						luaO_pushfstring(
+						object_pushfstring(
 							ls.L,
 							"%s expected (to close %s at line %d)",
-							luaX_token2str(ls, what),
-							luaX_token2str(ls, who),
+							lex_token2str(ls, what),
+							lex_token2str(ls, who),
 							where_line,
 						),
 					),
@@ -419,7 +419,7 @@ check_match :: proc(ls: ^LexState, what, who, where_line: int) {
 str_checkname :: proc(ls: ^LexState) -> ^TString {
 	check(ls, TK_NAME)
 	ts := ls.t.seminfo.ts
-	luaX_next(ls)
+	lex_next(ls)
 	return ts
 }
 
@@ -475,7 +475,7 @@ registerlocalvar :: proc(ls: ^LexState, fs: ^FuncState, varname: ^TString) -> i1
 	idx := fs.ndebugvars
 	f.locvars[idx].varname = varname
 	f.locvars[idx].startpc = fs.pc
-	luaC_barrier(ls.L, obj2gco(f), obj2gco(varname)) // f now points at varname
+	gc_barrier(ls.L, obj2gco(f), obj2gco(varname)) // f now points at varname
 	fs.ndebugvars += 1
 	return idx
 }
@@ -514,7 +514,7 @@ new_localvar :: proc(ls: ^LexState, name: ^TString) -> int {
 // interns the literal through the scanner's string table.
 @(private = "file")
 new_localvarliteral :: proc(ls: ^LexState, s: string) -> int {
-	return new_localvar(ls, luaX_newstring(ls, raw_data(transmute([]u8)s), uint(len(s))))
+	return new_localvar(ls, lex_newstring(ls, raw_data(transmute([]u8)s), uint(len(s))))
 }
 
 // Debug-info entry for active variable `vidx`, or nil if the variable is a
@@ -575,7 +575,7 @@ check_readonly :: proc(ls: ^LexState, e: ^Expdesc) {
 		return
 	}
 	if varname != nil {
-		luaK_semerror(ls, "attempt to assign to const variable '%s'", getstr(varname))
+		code_semerror(ls, "attempt to assign to const variable '%s'", getstr(varname))
 	}
 }
 
@@ -584,7 +584,7 @@ check_readonly :: proc(ls: ^LexState, e: ^Expdesc) {
 @(private = "file")
 adjustlocalvars :: proc(ls: ^LexState, nvars: int) {
 	fs := ls.fs
-	reglvl := luaY_nvarstack(fs)
+	reglvl := parse_nvarstack(fs)
 	for _ in 0 ..< nvars {
 		vidx := int(fs.nactvar)
 		fs.nactvar += 1
@@ -592,7 +592,7 @@ adjustlocalvars :: proc(ls: ^LexState, nvars: int) {
 		var.ridx = u8(reglvl)
 		reglvl += 1
 		var.pidx = registerlocalvar(ls, fs, var.name)
-		luaY_checklimit(fs, reglvl, MAXVARS, "local variables")
+		parse_checklimit(fs, reglvl, MAXVARS, "local variables")
 	}
 }
 
@@ -629,7 +629,7 @@ searchupvalue :: proc(fs: ^FuncState, name: ^TString) -> int {
 allocupvalue :: proc(fs: ^FuncState) -> ^Upvaldesc {
 	f := fs.f
 	oldsize := f.sizeupvalues
-	luaY_checklimit(fs, fs.nups + 1, MAXUPVAL, "upvalues")
+	parse_checklimit(fs, fs.nups + 1, MAXUPVAL, "upvalues")
 	grow_vector(fs.ls.L, &f.upvalues, fs.nups, &f.sizeupvalues, MAXUPVAL, "upvalues")
 	for oldsize < f.sizeupvalues {
 		f.upvalues[oldsize].name = nil // nil-out freshly grown slots for the GC
@@ -656,7 +656,7 @@ newupvalue :: proc(fs: ^FuncState, name: ^TString, v: ^Expdesc) -> int {
 		up.kind = prev.f.upvalues[v.u.info].kind
 	}
 	up.name = name
-	luaC_barrier(fs.ls.L, obj2gco(fs.f), obj2gco(name))
+	gc_barrier(fs.ls.L, obj2gco(fs.f), obj2gco(name))
 	return fs.nups - 1
 }
 
@@ -728,7 +728,7 @@ singlevaraux :: proc(fs: ^FuncState, n: ^TString, var: ^Expdesc, base: int) {
 	if v >= 0 { // found here
 		if base == 0 {
 			if var.k == .VVARGVAR { // capturing a vararg parameter?
-				luaK_vapar2local(fs, var) // demote it to a regular local first
+				code_vapar2local(fs, var) // demote it to a regular local first
 			}
 			if var.k == .VLOCAL {
 				markupval(fs, int(var.u.var.vidx)) // it will be used as an upvalue
@@ -758,11 +758,11 @@ buildglobal :: proc(ls: ^LexState, varname: ^TString, var: ^Expdesc) {
 	init_exp(var, .VGLOBAL, -1) // global by default
 	singlevaraux(fs, ls.envn, var, 1) // resolve _ENV
 	if var.k == .VGLOBAL { // _ENV itself resolved as a global?!
-		luaK_semerror(ls, "%s is global when accessing variable '%s'", LUA_ENV, getstr(varname))
+		code_semerror(ls, "%s is global when accessing variable '%s'", ENV_NAME, getstr(varname))
 	}
-	luaK_exp2anyregup(fs, var) // _ENV could be a constant
+	code_exp2anyregup(fs, var) // _ENV could be a constant
 	codestring(&key, varname) // key is the variable's name
-	luaK_indexed(fs, var, &key) // 'var' now represents _ENV[varname]
+	code_indexed(fs, var, &key) // 'var' now represents _ENV[varname]
 }
 
 // Resolve name `varname`, handling locals, upvalues, and globals. Reference
@@ -775,7 +775,7 @@ buildvar :: proc(ls: ^LexState, varname: ^TString, var: ^Expdesc) {
 	if var.k == .VGLOBAL { // came out as a global name?
 		info := var.u.info
 		if info == -2 { // inside a `global` declaration with no matching entry?
-			luaK_semerror(ls, "variable '%s' not declared", getstr(varname))
+			code_semerror(ls, "variable '%s' not declared", getstr(varname))
 		}
 		buildglobal(ls, varname, var)
 		if info != -1 && ls.dyd.actvar.arr[info].kind == GDKCONST {
@@ -797,23 +797,23 @@ singlevar :: proc(ls: ^LexState, var: ^Expdesc) {
 adjust_assign :: proc(ls: ^LexState, nvars, nexps: int, e: ^Expdesc) {
 	fs := ls.fs
 	needed := nvars - nexps // extra values still needed
-	luaK_checkstack(fs, needed)
+	code_checkstack(fs, needed)
 	if hasmultret(e.k) { // last expression returns multiple values?
 		extra := needed + 1 // it also has to cover itself
 		if extra < 0 {
 			extra = 0
 		}
-		luaK_setreturns(fs, e, extra) // let it provide the difference
+		code_setreturns(fs, e, extra) // let it provide the difference
 	} else {
 		if e.k != .VVOID { // at least one expression?
-			luaK_exp2nextreg(fs, e) // close the last one
+			code_exp2nextreg(fs, e) // close the last one
 		}
 		if needed > 0 { // still short?
-			luaK_nil(fs, fs.freereg, needed) // pad with nils
+			code_nil(fs, fs.freereg, needed) // pad with nils
 		}
 	}
 	if needed > 0 {
-		luaK_reserveregs(fs, needed) // reserve registers for the extra values
+		code_reserveregs(fs, needed) // reserve registers for the extra values
 	} else {
 		fs.freereg = fs.freereg + needed // negative: drop the surplus values
 	}
@@ -824,8 +824,8 @@ adjust_assign :: proc(ls: ^LexState, nvars, nexps: int, e: ^Expdesc) {
 @(private = "file")
 enterlevel :: proc(ls: ^LexState) {
 	ls.L.n_ccalls += 1
-	if (ls.L.n_ccalls & 0xffff) >= LUAI_MAXCCALLS {
-		luaX_syntaxerror(ls, "too many syntax levels")
+	if (ls.L.n_ccalls & 0xffff) >= MAXCCALLS {
+		lex_syntaxerror(ls, "too many syntax levels")
 	}
 }
 @(private = "file")
@@ -842,7 +842,7 @@ leavelevel :: proc(ls: ^LexState) {
 jumpscopeerror :: proc(ls: ^LexState, gt: ^Labeldesc) {
 	tsname := getlocalvardesc(ls.fs, int(gt.nactvar)).name
 	varname := tsname != nil ? getstr(tsname) : "*"
-	luaK_semerror(
+	code_semerror(
 		ls,
 		"<goto %s> at line %d jumps into the scope of '%s'",
 		getstr(gt.name),
@@ -869,7 +869,7 @@ closegoto :: proc(ls: ^LexState, g: int, label: ^Labeldesc, bup: u8) {
 		fs.f.code[gt.pc] = create_ABCk(.CLOSE, stklevel, 0, 0, 0)
 		gt.pc += 1 // gt.pc now points at the jump proper
 	}
-	luaK_patchlist(ls.fs, gt.pc, label.pc) // goto jumps to the label
+	code_patchlist(ls.fs, gt.pc, label.pc) // goto jumps to the label
 	// Remove the goto from the pending list, shifting the tail down.
 	for i := g; i < gl.n - 1; i += 1 {
 		gl.arr[i] = gl.arr[i + 1]
@@ -910,8 +910,8 @@ newlabelentry :: proc(ls: ^LexState, l: ^Labellist, name: ^TString, line, pc: in
 @(private = "file")
 newgotoentry :: proc(ls: ^LexState, name: ^TString, line: int) -> int {
 	fs := ls.fs
-	pc := luaK_jump(fs)
-	luaK_codeABC(fs, .CLOSE, 0, 1, 0) // dead placeholder (comes after the jump)
+	pc := code_jump(fs)
+	code_codeABC(fs, .CLOSE, 0, 1, 0) // dead placeholder (comes after the jump)
 	return newlabelentry(ls, &ls.dyd.gt, name, line, pc)
 }
 
@@ -922,7 +922,7 @@ newgotoentry :: proc(ls: ^LexState, name: ^TString, line: int) -> int {
 createlabel :: proc(ls: ^LexState, name: ^TString, line: int, last: bool) {
 	fs := ls.fs
 	ll := &ls.dyd.label
-	l := newlabelentry(ls, ll, name, line, luaK_getlabel(fs))
+	l := newlabelentry(ls, ll, name, line, code_getlabel(fs))
 	if last {
 		ll.arr[l].nactvar = fs.bl.nactvar
 	}
@@ -974,7 +974,7 @@ enterblock :: proc(fs: ^FuncState, bl: ^BlockCnt, isloop: u8) {
 // Error: a goto never found its label. Reference `undefgoto`.
 @(private = "file")
 undefgoto :: proc(ls: ^LexState, gt: ^Labeldesc) {
-	luaK_semerror(
+	code_semerror(
 		ls,
 		"no visible label '%s' for <goto> at line %d",
 		getstr(gt.name),
@@ -991,7 +991,7 @@ leaveblock :: proc(fs: ^FuncState) {
 	ls := fs.ls
 	stklevel := reglevel(fs, int(bl.nactvar)) // register level outside the block
 	if bl.previous != nil && bl.upval != 0 { // need a CLOSE?
-		luaK_codeABC(fs, .CLOSE, stklevel, 0, 0)
+		code_codeABC(fs, .CLOSE, stklevel, 0, 0)
 	}
 	fs.freereg = stklevel // free the block's registers
 	removevars(fs, int(bl.nactvar)) // drop the block's locals
@@ -1022,10 +1022,10 @@ addprototype :: proc(ls: ^LexState) -> ^Proto {
 			oldsize += 1
 		}
 	}
-	clp := luaF_newproto(L)
+	clp := func_newproto(L)
 	f.p[fs.np] = clp
 	fs.np += 1
-	luaC_barrier(L, obj2gco(f), obj2gco(clp))
+	gc_barrier(L, obj2gco(f), obj2gco(clp))
 	return clp
 }
 
@@ -1034,8 +1034,8 @@ addprototype :: proc(ls: ^LexState) -> ^Proto {
 @(private = "file")
 codeclosure :: proc(ls: ^LexState, v: ^Expdesc) {
 	fs := ls.fs.prev // code goes into the *enclosing* function
-	init_exp(v, .VRELOC, luaK_codeABx(fs, .CLOSURE, 0, fs.np - 1))
-	luaK_exp2nextreg(fs, v) // fix it at the last register
+	init_exp(v, .VRELOC, code_codeABx(fs, .CLOSURE, 0, fs.np - 1))
+	code_exp2nextreg(fs, v) // fix it at the last register
 }
 
 // Begin compiling a new function `fs` (whose `.f` prototype the caller has set),
@@ -1065,9 +1065,9 @@ open_func :: proc(ls: ^LexState, fs: ^FuncState, bl: ^BlockCnt) {
 	fs.firstlabel = ls.dyd.label.n
 	fs.bl = nil
 	f.source = ls.source
-	luaC_barrier(L, obj2gco(f), obj2gco(f.source))
+	gc_barrier(L, obj2gco(f), obj2gco(f.source))
 	f.maxstacksize = 2 // registers 0/1 are always valid
-	fs.kcache = luaH_new(L) // per-function constant cache
+	fs.kcache = table_new(L) // per-function constant cache
 	set_gc(stack_value(L, L.top), obj2gco(fs.kcache)) // anchor it on the stack
 	inc_top(L)
 	enterblock(fs, bl, 0)
@@ -1082,9 +1082,9 @@ close_func :: proc(ls: ^LexState) {
 	L := ls.L
 	fs := ls.fs
 	f := fs.f
-	luaK_ret(fs, luaY_nvarstack(fs), 0) // final (default) return
+	code_ret(fs, parse_nvarstack(fs), 0) // final (default) return
 	leaveblock(fs)
-	luaK_finish(fs)
+	code_finish(fs)
 	// Trim each growable array from its allocated capacity down to what was
 	// actually used, so the prototype occupies no more memory than necessary
 	// (and so the size fields describe exactly the live contents).
@@ -1097,7 +1097,7 @@ close_func :: proc(ls: ^LexState) {
 	shrink_vector(L, &f.upvalues, &f.sizeupvalues, fs.nups)
 	ls.fs = fs.prev
 	L.top -= 1 // pop the constant-cache table
-	luaC_checkGC(L) // a completed prototype is a good pacing point
+	gc_checkGC(L) // a completed prototype is a good pacing point
 }
 
 // ===========================================================================
@@ -1138,18 +1138,18 @@ statlist :: proc(ls: ^LexState) {
 fieldsel :: proc(ls: ^LexState, v: ^Expdesc) {
 	fs := ls.fs
 	key: Expdesc
-	luaK_exp2anyregup(fs, v)
-	luaX_next(ls) // skip the '.' or ':'
+	code_exp2anyregup(fs, v)
+	lex_next(ls) // skip the '.' or ':'
 	codename(ls, &key)
-	luaK_indexed(fs, v, &key)
+	code_indexed(fs, v, &key)
 }
 
 // Parse `[ expr ]` as a table index. Reference `yindex`.
 @(private = "file")
 yindex :: proc(ls: ^LexState, v: ^Expdesc) {
-	luaX_next(ls) // skip '['
+	lex_next(ls) // skip '['
 	expr(ls, v)
-	luaK_exp2val(ls.fs, v)
+	code_exp2val(ls.fs, v)
 	checknext(ls, ']')
 }
 
@@ -1188,9 +1188,9 @@ recfield :: proc(ls: ^LexState, cc: ^ConsControl) {
 	cc.nh += 1
 	checknext(ls, '=')
 	tab := cc.t^
-	luaK_indexed(fs, &tab, &key)
+	code_indexed(fs, &tab, &key)
 	expr(ls, &val)
-	luaK_storevar(fs, &tab, &val)
+	code_storevar(fs, &tab, &val)
 	fs.freereg = reg // free the registers used for the field
 }
 
@@ -1198,10 +1198,10 @@ recfield :: proc(ls: ^LexState, cc: ^ConsControl) {
 // itself once it reaches the threshold. Reference `closelistfield`.
 @(private = "file")
 closelistfield :: proc(fs: ^FuncState, cc: ^ConsControl) {
-	luaK_exp2nextreg(fs, &cc.v)
+	code_exp2nextreg(fs, &cc.v)
 	cc.v.k = .VVOID
 	if cc.tostore >= cc.maxtostore {
-		luaK_setlist(fs, cc.t.u.info, cc.na, cc.tostore) // flush
+		code_setlist(fs, cc.t.u.info, cc.na, cc.tostore) // flush
 		cc.na += cc.tostore
 		cc.tostore = 0
 	}
@@ -1215,14 +1215,14 @@ lastlistfield :: proc(fs: ^FuncState, cc: ^ConsControl) {
 		return
 	}
 	if hasmultret(cc.v.k) {
-		luaK_setreturns(fs, &cc.v, LUA_MULTRET)
-		luaK_setlist(fs, cc.t.u.info, cc.na, LUA_MULTRET)
+		code_setreturns(fs, &cc.v, MULTRET)
+		code_setlist(fs, cc.t.u.info, cc.na, MULTRET)
 		cc.na -= 1 // do not count the last (unknown-count) expression
 	} else {
 		if cc.v.k != .VVOID {
-			luaK_exp2nextreg(fs, &cc.v)
+			code_exp2nextreg(fs, &cc.v)
 		}
-		luaK_setlist(fs, cc.t.u.info, cc.na, cc.tostore)
+		code_setlist(fs, cc.t.u.info, cc.na, cc.tostore)
 	}
 	cc.na += cc.tostore
 }
@@ -1240,7 +1240,7 @@ listfield :: proc(ls: ^LexState, cc: ^ConsControl) {
 field :: proc(ls: ^LexState, cc: ^ConsControl) {
 	switch ls.t.token {
 	case TK_NAME: // could be a list item or a `NAME = value` record field
-		if luaX_lookahead(ls) != '=' {
+		if lex_lookahead(ls) != '=' {
 			listfield(ls, cc)
 		} else {
 			recfield(ls, cc)
@@ -1270,15 +1270,15 @@ maxtostore :: proc(fs: ^FuncState) -> int {
 constructor :: proc(ls: ^LexState, t: ^Expdesc) {
 	fs := ls.fs
 	line := ls.linenumber
-	pc := luaK_codevABCk(fs, .NEWTABLE, 0, 0, 0, 0)
+	pc := code_codevABCk(fs, .NEWTABLE, 0, 0, 0, 0)
 	cc: ConsControl
-	luaK_code(fs, 0) // room for the extra-argument instruction
+	code_code(fs, 0) // room for the extra-argument instruction
 	cc.na = 0
 	cc.nh = 0
 	cc.tostore = 0
 	cc.t = t
 	init_exp(t, .VNONRELOC, fs.freereg) // table will live at the stack top
-	luaK_reserveregs(fs, 1)
+	code_reserveregs(fs, 1)
 	init_exp(&cc.v, .VVOID, 0) // no value yet
 	checknext(ls, '{')
 	cc.maxtostore = maxtostore(fs)
@@ -1290,14 +1290,14 @@ constructor :: proc(ls: ^LexState, t: ^Expdesc) {
 			closelistfield(fs, &cc)
 		}
 		field(ls, &cc)
-		luaY_checklimit(fs, cc.tostore + cc.na + cc.nh, MAX_CNST, "items in a constructor")
+		parse_checklimit(fs, cc.tostore + cc.na + cc.nh, MAX_CNST, "items in a constructor")
 		if !(testnext(ls, ',') || testnext(ls, ';')) {
 			break
 		}
 	}
 	check_match(ls, '}', '{', line)
 	lastlistfield(fs, &cc)
-	luaK_settablesize(fs, pc, t.u.info, cc.na, cc.nh)
+	code_settablesize(fs, pc, t.u.info, cc.na, cc.nh)
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,7 +1309,7 @@ constructor :: proc(ls: ^LexState, t: ^Expdesc) {
 @(private = "file")
 setvararg :: proc(fs: ^FuncState) {
 	fs.f.flag |= u8(PF_VAHID) // default: use hidden vararg arguments
-	luaK_codeABC(fs, .VARARGPREP, 0, 0, 0)
+	code_codeABC(fs, .VARARGPREP, 0, 0, 0)
 }
 
 // Parse a function parameter list. Reference `parlist`.
@@ -1327,14 +1327,14 @@ parlist :: proc(ls: ^LexState) {
 				nparams += 1
 			case TK_DOTS:
 				varargk = true
-				luaX_next(ls) // skip '...'
+				lex_next(ls) // skip '...'
 				if ls.t.token == TK_NAME { // named vararg parameter?
 					new_varkind(ls, str_checkname(ls), RDKVAVAR)
 				} else {
 					new_localvarliteral(ls, "(vararg table)")
 				}
 			case:
-				luaX_syntaxerror(ls, "<name> or '...' expected")
+				lex_syntaxerror(ls, "<name> or '...' expected")
 			}
 			if varargk || !testnext(ls, ',') {
 				break
@@ -1347,7 +1347,7 @@ parlist :: proc(ls: ^LexState) {
 		setvararg(fs) // declared vararg
 		adjustlocalvars(ls, 1) // the vararg parameter itself
 	}
-	luaK_reserveregs(fs, int(fs.nactvar)) // registers for the parameters
+	code_reserveregs(fs, int(fs.nactvar)) // registers for the parameters
 }
 
 // Parse a function body `( parlist ) block END` into a fresh nested function and
@@ -1380,7 +1380,7 @@ explist :: proc(ls: ^LexState, v: ^Expdesc) -> int {
 	n := 1
 	expr(ls, v)
 	for testnext(ls, ',') {
-		luaK_exp2nextreg(ls.fs, v)
+		code_exp2nextreg(ls.fs, v)
 		expr(ls, v)
 		n += 1
 	}
@@ -1396,13 +1396,13 @@ funcargs :: proc(ls: ^LexState, f: ^Expdesc) {
 	line := ls.linenumber
 	switch ls.t.token {
 	case '(': // '(' [ explist ] ')'
-		luaX_next(ls)
+		lex_next(ls)
 		if ls.t.token == ')' { // empty argument list?
 			args.k = .VVOID
 		} else {
 			explist(ls, &args)
 			if hasmultret(args.k) {
-				luaK_setreturns(fs, &args, LUA_MULTRET)
+				code_setreturns(fs, &args, MULTRET)
 			}
 		}
 		check_match(ls, ')', '(', line)
@@ -1410,22 +1410,22 @@ funcargs :: proc(ls: ^LexState, f: ^Expdesc) {
 		constructor(ls, &args)
 	case TK_STRING: // a single string-literal argument
 		codestring(&args, ls.t.seminfo.ts)
-		luaX_next(ls) // must consume seminfo before advancing
+		lex_next(ls) // must consume seminfo before advancing
 	case:
-		luaX_syntaxerror(ls, "function arguments expected")
+		lex_syntaxerror(ls, "function arguments expected")
 	}
 	base := f.u.info // base register holding the function
 	nparams: int
 	if hasmultret(args.k) {
-		nparams = LUA_MULTRET // open call (all available arguments)
+		nparams = MULTRET // open call (all available arguments)
 	} else {
 		if args.k != .VVOID {
-			luaK_exp2nextreg(fs, &args) // close the last argument
+			code_exp2nextreg(fs, &args) // close the last argument
 		}
 		nparams = fs.freereg - (base + 1)
 	}
-	init_exp(f, .VCALL, luaK_codeABC(fs, .CALL, base, nparams + 1, 2))
-	luaK_fixline(fs, line)
+	init_exp(f, .VCALL, code_codeABC(fs, .CALL, base, nparams + 1, 2))
+	code_fixline(fs, line)
 	fs.freereg = base + 1 // call leaves one result at 'base'
 }
 
@@ -1439,14 +1439,14 @@ primaryexp :: proc(ls: ^LexState, v: ^Expdesc) {
 	switch ls.t.token {
 	case '(':
 		line := ls.linenumber
-		luaX_next(ls)
+		lex_next(ls)
 		expr(ls, v)
 		check_match(ls, ')', '(', line)
-		luaK_dischargevars(ls.fs, v)
+		code_dischargevars(ls.fs, v)
 	case TK_NAME:
 		singlevar(ls, v)
 	case:
-		luaX_syntaxerror(ls, "unexpected symbol")
+		lex_syntaxerror(ls, "unexpected symbol")
 	}
 }
 
@@ -1462,17 +1462,17 @@ suffixedexp :: proc(ls: ^LexState, v: ^Expdesc) {
 			fieldsel(ls, v)
 		case '[': // '[' exp ']'
 			key: Expdesc
-			luaK_exp2anyregup(fs, v)
+			code_exp2anyregup(fs, v)
 			yindex(ls, &key)
-			luaK_indexed(fs, v, &key)
+			code_indexed(fs, v, &key)
 		case ':': // method call ':' NAME funcargs
 			key: Expdesc
-			luaX_next(ls)
+			lex_next(ls)
 			codename(ls, &key)
-			luaK_self(fs, v, &key)
+			code_self(fs, v, &key)
 			funcargs(ls, v)
 		case '(', TK_STRING, '{': // a call
-			luaK_exp2nextreg(fs, v)
+			code_exp2nextreg(fs, v)
 			funcargs(ls, v)
 		case:
 			return
@@ -1502,21 +1502,21 @@ simpleexp :: proc(ls: ^LexState, v: ^Expdesc) {
 	case TK_DOTS: // vararg '...'
 		fs := ls.fs
 		if !isvararg(fs.f) {
-			luaX_syntaxerror(ls, "cannot use '...' outside a vararg function")
+			lex_syntaxerror(ls, "cannot use '...' outside a vararg function")
 		}
-		init_exp(v, .VVARARG, luaK_codeABC(fs, .VARARG, 0, int(fs.f.numparams), 1))
+		init_exp(v, .VVARARG, code_codeABC(fs, .VARARG, 0, int(fs.f.numparams), 1))
 	case '{': // table constructor
 		constructor(ls, v)
 		return
 	case TK_FUNCTION:
-		luaX_next(ls)
+		lex_next(ls)
 		body(ls, v, false, ls.linenumber)
 		return
 	case:
 		suffixedexp(ls, v)
 		return
 	}
-	luaX_next(ls)
+	lex_next(ls)
 }
 
 // Map a token to a unary operator (or "none"). Reference `getunopr`.
@@ -1621,9 +1621,9 @@ subexpr :: proc(ls: ^LexState, v: ^Expdesc, limit: int) -> BinOpr {
 	uop := getunopr(ls.t.token)
 	if uop != .OPR_NOUNOPR { // prefix unary operator?
 		line := ls.linenumber
-		luaX_next(ls) // skip the operator
+		lex_next(ls) // skip the operator
 		subexpr(ls, v, UNARY_PRIORITY)
-		luaK_prefix(ls.fs, uop, v, line)
+		code_prefix(ls.fs, uop, v, line)
 	} else {
 		simpleexp(ls, v)
 	}
@@ -1632,10 +1632,10 @@ subexpr :: proc(ls: ^LexState, v: ^Expdesc, limit: int) -> BinOpr {
 	for op != .OPR_NOBINOPR && int(binop_priority[int(op)].left) > limit {
 		v2: Expdesc
 		line := ls.linenumber
-		luaX_next(ls) // skip the operator
-		luaK_infix(ls.fs, op, v)
+		lex_next(ls) // skip the operator
+		code_infix(ls.fs, op, v)
 		nextop := subexpr(ls, &v2, int(binop_priority[int(op)].right))
-		luaK_posfix(ls.fs, op, v, &v2, line)
+		code_posfix(ls.fs, op, v, &v2, line)
 		op = nextop
 	}
 	leavelevel(ls)
@@ -1701,11 +1701,11 @@ check_conflict :: proc(ls: ^LexState, lh: ^LHS_assign, v: ^Expdesc) {
 	if conflict {
 		// Copy the local/upvalue into the temporary at 'extra'.
 		if v.k == .VLOCAL {
-			luaK_codeABC(fs, .MOVE, extra, int(v.u.var.ridx), 0)
+			code_codeABC(fs, .MOVE, extra, int(v.u.var.ridx), 0)
 		} else {
-			luaK_codeABC(fs, .GETUPVAL, extra, v.u.info, 0)
+			code_codeABC(fs, .GETUPVAL, extra, v.u.info, 0)
 		}
-		luaK_reserveregs(fs, 1)
+		code_reserveregs(fs, 1)
 	}
 }
 
@@ -1715,7 +1715,7 @@ check_conflict :: proc(ls: ^LexState, lh: ^LHS_assign, v: ^Expdesc) {
 storevartop :: proc(fs: ^FuncState, var: ^Expdesc) {
 	e: Expdesc
 	init_exp(&e, .VNONRELOC, fs.freereg - 1)
-	luaK_storevar(fs, var, &e) // also frees the top register
+	code_storevar(fs, var, &e) // also frees the top register
 }
 
 // Parse and compile the tail of a (possibly multiple) assignment; the first
@@ -1724,7 +1724,7 @@ storevartop :: proc(fs: ^FuncState, var: ^Expdesc) {
 restassign :: proc(ls: ^LexState, lh: ^LHS_assign, nvars: int) {
 	e: Expdesc
 	if !vkisvar(lh.v.k) {
-		luaX_syntaxerror(ls, "syntax error")
+		lex_syntaxerror(ls, "syntax error")
 	}
 	check_readonly(ls, &lh.v)
 	if testnext(ls, ',') { // more targets: ',' suffixedexp restassign
@@ -1744,8 +1744,8 @@ restassign :: proc(ls: ^LexState, lh: ^LHS_assign, nvars: int) {
 		if nexps != nvars {
 			adjust_assign(ls, nvars, nexps, &e)
 		} else {
-			luaK_setoneret(ls.fs, &e) // close the last expression
-			luaK_storevar(ls.fs, &lh.v, &e)
+			code_setoneret(ls.fs, &e) // close the last expression
+			code_storevar(ls.fs, &lh.v, &e)
 			return // avoid the default path below
 		}
 	}
@@ -1761,7 +1761,7 @@ cond :: proc(ls: ^LexState) -> int {
 	if v.k == .VNIL { // 'nil' and 'false' behave identically here
 		v.k = .VFALSE
 	}
-	luaK_goiftrue(ls.fs, &v)
+	code_goiftrue(ls.fs, &v)
 	return v.f
 }
 
@@ -1784,10 +1784,10 @@ breakstat :: proc(ls: ^LexState, line: int) {
 		}
 	}
 	if found == nil {
-		luaX_syntaxerror(ls, "break outside loop")
+		lex_syntaxerror(ls, "break outside loop")
 	}
 	found.isloop = 2 // signal that the block has pending breaks
-	luaX_next(ls) // skip 'break'
+	lex_next(ls) // skip 'break'
 	newgotoentry(ls, ls.brkn, line)
 }
 
@@ -1797,7 +1797,7 @@ breakstat :: proc(ls: ^LexState, line: int) {
 checkrepeated :: proc(ls: ^LexState, name: ^TString) {
 	lb := findlabel(ls, name, ls.fs.firstlabel)
 	if lb != nil {
-		luaK_semerror(ls, "label '%s' already defined on line %d", getstr(name), lb.line)
+		code_semerror(ls, "label '%s' already defined on line %d", getstr(name), lb.line)
 	}
 }
 
@@ -1817,39 +1817,39 @@ labelstat :: proc(ls: ^LexState, name: ^TString, line: int) {
 whilestat :: proc(ls: ^LexState, line: int) {
 	fs := ls.fs
 	bl: BlockCnt
-	luaX_next(ls) // skip WHILE
-	whileinit := luaK_getlabel(fs)
+	lex_next(ls) // skip WHILE
+	whileinit := code_getlabel(fs)
 	condexit := cond(ls)
 	enterblock(fs, &bl, 1)
 	checknext(ls, TK_DO)
 	block(ls)
-	luaK_patchlist(fs, luaK_jump(fs), whileinit) // loop back (luaK_jumpto)
+	code_patchlist(fs, code_jump(fs), whileinit) // loop back (luaK_jumpto)
 	check_match(ls, TK_END, TK_WHILE, line)
 	leaveblock(fs)
-	luaK_patchtohere(fs, condexit) // false conditions exit the loop
+	code_patchtohere(fs, condexit) // false conditions exit the loop
 }
 
 // Parse `repeat block until cond`. Reference `repeatstat`.
 @(private = "file")
 repeatstat :: proc(ls: ^LexState, line: int) {
 	fs := ls.fs
-	repeat_init := luaK_getlabel(fs)
+	repeat_init := code_getlabel(fs)
 	bl1, bl2: BlockCnt
 	enterblock(fs, &bl1, 1) // loop block
 	enterblock(fs, &bl2, 0) // scope block
-	luaX_next(ls) // skip REPEAT
+	lex_next(ls) // skip REPEAT
 	statlist(ls)
 	check_match(ls, TK_UNTIL, TK_REPEAT, line)
 	condexit := cond(ls) // read the condition (inside the scope block)
 	leaveblock(fs) // finish the scope
 	if bl2.upval != 0 { // upvalues to close?
-		exit := luaK_jump(fs) // the normal exit must jump over the fix
-		luaK_patchtohere(fs, condexit) // repetition closes upvalues
-		luaK_codeABC(fs, .CLOSE, reglevel(fs, int(bl2.nactvar)), 0, 0)
-		condexit = luaK_jump(fs) // repeat after closing
-		luaK_patchtohere(fs, exit)
+		exit := code_jump(fs) // the normal exit must jump over the fix
+		code_patchtohere(fs, condexit) // repetition closes upvalues
+		code_codeABC(fs, .CLOSE, reglevel(fs, int(bl2.nactvar)), 0, 0)
+		condexit = code_jump(fs) // repeat after closing
+		code_patchtohere(fs, exit)
 	}
-	luaK_patchlist(fs, condexit, repeat_init) // close the loop
+	code_patchlist(fs, condexit, repeat_init) // close the loop
 	leaveblock(fs) // finish the loop
 }
 
@@ -1859,7 +1859,7 @@ repeatstat :: proc(ls: ^LexState, line: int) {
 exp1 :: proc(ls: ^LexState) {
 	e: Expdesc
 	expr(ls, &e)
-	luaK_exp2nextreg(ls.fs, &e)
+	code_exp2nextreg(ls.fs, &e)
 }
 
 // Fix the jump instruction at `pc` to target `dest` (relative; `back` for a
@@ -1872,7 +1872,7 @@ fixforjump :: proc(fs: ^FuncState, pc, dest: int, back: bool) {
 		offset = -offset
 	}
 	if offset > MAXARG_Bx {
-		luaX_syntaxerror(fs.ls, "control structure too long")
+		lex_syntaxerror(fs.ls, "control structure too long")
 	}
 	setarg_Bx(jmp, offset)
 }
@@ -1887,21 +1887,21 @@ forbody :: proc(ls: ^LexState, base, line, nvars: int, isgen: bool) {
 	fs := ls.fs
 	bl: BlockCnt
 	checknext(ls, TK_DO)
-	prep := luaK_codeABx(fs, forprep[sel], base, 0)
+	prep := code_codeABx(fs, forprep[sel], base, 0)
 	fs.freereg -= 1 // both 'forprep' opcodes pop one register
 	enterblock(fs, &bl, 0) // scope for the declared control variables
 	adjustlocalvars(ls, nvars)
-	luaK_reserveregs(fs, nvars)
+	code_reserveregs(fs, nvars)
 	block(ls)
 	leaveblock(fs)
-	fixforjump(fs, prep, luaK_getlabel(fs), false)
+	fixforjump(fs, prep, code_getlabel(fs), false)
 	if isgen { // generic for needs a TFORCALL before the loop test
-		luaK_codeABC(fs, .TFORCALL, base, 0, nvars)
-		luaK_fixline(fs, line)
+		code_codeABC(fs, .TFORCALL, base, 0, nvars)
+		code_fixline(fs, line)
 	}
-	endfor := luaK_codeABx(fs, forloop[sel], base, 0)
+	endfor := code_codeABx(fs, forloop[sel], base, 0)
 	fixforjump(fs, endfor, prep + 1, true)
-	luaK_fixline(fs, line)
+	code_fixline(fs, line)
 }
 
 // Parse a numeric `for NAME = e1, e2 [, e3] do ... end`. Reference `fornum`.
@@ -1919,8 +1919,8 @@ fornum :: proc(ls: ^LexState, varname: ^TString, line: int) {
 	if testnext(ls, ',') {
 		exp1(ls) // optional step
 	} else { // default step of 1
-		luaK_int(fs, fs.freereg, 1)
-		luaK_reserveregs(fs, 1)
+		code_int(fs, fs.freereg, 1)
+		code_reserveregs(fs, 1)
 	}
 	adjustlocalvars(ls, 2) // the two internal state variables
 	forbody(ls, base, line, 1, false)
@@ -1947,7 +1947,7 @@ forlist :: proc(ls: ^LexState, indexname: ^TString) {
 	adjust_assign(ls, 4, explist(ls, &e), &e)
 	adjustlocalvars(ls, 3) // the three internal state variables
 	marktobeclosed(fs) // the last internal variable must be closed
-	luaK_checkstack(fs, 2) // extra space to call the iterator
+	code_checkstack(fs, 2) // extra space to call the iterator
 	forbody(ls, base, line, nvars - 3, true)
 }
 
@@ -1958,7 +1958,7 @@ forstat :: proc(ls: ^LexState, line: int) {
 	fs := ls.fs
 	bl: BlockCnt
 	enterblock(fs, &bl, 1) // scope for the loop and control variables
-	luaX_next(ls) // skip 'for'
+	lex_next(ls) // skip 'for'
 	varname := str_checkname(ls) // first variable name
 	switch ls.t.token {
 	case '=':
@@ -1966,7 +1966,7 @@ forstat :: proc(ls: ^LexState, line: int) {
 	case ',', TK_IN:
 		forlist(ls, varname)
 	case:
-		luaX_syntaxerror(ls, "'=' or 'in' expected")
+		lex_syntaxerror(ls, "'=' or 'in' expected")
 	}
 	check_match(ls, TK_END, TK_FOR, line)
 	leaveblock(fs) // 'break' jumps here
@@ -1977,14 +1977,14 @@ forstat :: proc(ls: ^LexState, line: int) {
 @(private = "file")
 test_then_block :: proc(ls: ^LexState, escapelist: ^int) {
 	fs := ls.fs
-	luaX_next(ls) // skip IF or ELSEIF
+	lex_next(ls) // skip IF or ELSEIF
 	condtrue := cond(ls)
 	checknext(ls, TK_THEN)
 	block(ls) // the 'then' part
 	if ls.t.token == TK_ELSE || ls.t.token == TK_ELSEIF { // more parts follow?
-		luaK_concat(fs, escapelist, luaK_jump(fs)) // jump over them
+		code_concat(fs, escapelist, code_jump(fs)) // jump over them
 	}
-	luaK_patchtohere(fs, condtrue)
+	code_patchtohere(fs, condtrue)
 }
 
 // Parse a full `if ... [elseif ...] [else ...] end`. Reference `ifstat`.
@@ -2000,7 +2000,7 @@ ifstat :: proc(ls: ^LexState, line: int) {
 		block(ls) // ELSE block
 	}
 	check_match(ls, TK_END, TK_IF, line)
-	luaK_patchtohere(fs, escapelist)
+	code_patchtohere(fs, escapelist)
 }
 
 // Parse `local function NAME body`. Reference `localfunc`.
@@ -2029,7 +2029,7 @@ getvarattribute :: proc(ls: ^LexState, df: u8) -> u8 {
 		} else if attr == "close" {
 			return RDKTOCLOSE
 		} else {
-			luaK_semerror(ls, "unknown attribute '%s'", attr)
+			code_semerror(ls, "unknown attribute '%s'", attr)
 		}
 	}
 	return df
@@ -2041,7 +2041,7 @@ getvarattribute :: proc(ls: ^LexState, df: u8) -> u8 {
 checktoclose :: proc(fs: ^FuncState, level: int) {
 	if level != -1 {
 		marktobeclosed(fs)
-		luaK_codeABC(fs, .TBC, reglevel(fs, level), 0, 0)
+		code_codeABC(fs, .TBC, reglevel(fs, level), 0, 0)
 	}
 }
 
@@ -2061,7 +2061,7 @@ localstat :: proc(ls: ^LexState) {
 		vidx = new_varkind(ls, vname, kind)
 		if kind == RDKTOCLOSE {
 			if toclose != -1 {
-				luaK_semerror(ls, "multiple to-be-closed variables in local list")
+				code_semerror(ls, "multiple to-be-closed variables in local list")
 			}
 			toclose = int(fs.nactvar) + nvars
 		}
@@ -2077,7 +2077,7 @@ localstat :: proc(ls: ^LexState) {
 		nexps = 0
 	}
 	var := getlocalvardesc(fs, vidx) // the last variable
-	if nvars == nexps && var.kind == RDKCONST && luaK_exp2const(fs, &e, &var.k) {
+	if nvars == nexps && var.kind == RDKCONST && code_exp2const(fs, &e, &var.k) {
 		// A single `<const>` initialized by a compile-time constant folds away.
 		var.kind = RDKCTC // compile-time constant
 		adjustlocalvars(ls, nvars - 1) // all but the last
@@ -2096,7 +2096,7 @@ getglobalattribute :: proc(ls: ^LexState, df: u8) -> u8 {
 	kind := getvarattribute(ls, df)
 	switch kind {
 	case RDKTOCLOSE:
-		luaK_semerror(ls, "global variables cannot be to-be-closed")
+		code_semerror(ls, "global variables cannot be to-be-closed")
 		return kind
 	case RDKCONST:
 		return GDKCONST
@@ -2113,7 +2113,7 @@ checkglobal :: proc(ls: ^LexState, varname: ^TString, line: int) {
 	var: Expdesc
 	buildglobal(ls, varname, &var)
 	k := var.u.ind.keystr // index of the global's name constant
-	luaK_codecheckglobal(fs, &var, k, line)
+	code_codecheckglobal(fs, &var, k, line)
 }
 
 // Recursively build the target descriptors for a `global a, b = ...` list, then
@@ -2185,15 +2185,15 @@ globalfunc :: proc(ls: ^LexState, line: int) {
 	buildglobal(ls, fname, &var)
 	body(ls, &b, false, ls.linenumber)
 	checkglobal(ls, fname, line)
-	luaK_storevar(fs, &var, &b)
-	luaK_fixline(fs, line) // definition "happens" on the first line
+	code_storevar(fs, &var, &b)
+	code_fixline(fs, line) // definition "happens" on the first line
 }
 
 // Dispatch `global function ...` vs `global ...` declarations. Reference
 // `globalstatfunc`.
 @(private = "file")
 globalstatfunc :: proc(ls: ^LexState, line: int) {
-	luaX_next(ls) // skip 'global'
+	lex_next(ls) // skip 'global'
 	if testnext(ls, TK_FUNCTION) {
 		globalfunc(ls, line)
 	} else {
@@ -2221,12 +2221,12 @@ funcname :: proc(ls: ^LexState, v: ^Expdesc) -> bool {
 @(private = "file")
 funcstat :: proc(ls: ^LexState, line: int) {
 	v, b: Expdesc
-	luaX_next(ls) // skip FUNCTION
+	lex_next(ls) // skip FUNCTION
 	ismethod := funcname(ls, &v)
 	check_readonly(ls, &v)
 	body(ls, &b, ismethod, line)
-	luaK_storevar(ls.fs, &v, &b)
-	luaK_fixline(ls.fs, line) // definition "happens" on the first line
+	code_storevar(ls.fs, &v, &b)
+	code_fixline(ls.fs, line) // definition "happens" on the first line
 }
 
 // Parse an expression statement: either a function call or an assignment.
@@ -2241,7 +2241,7 @@ exprstat :: proc(ls: ^LexState) {
 		restassign(ls, &v, 1)
 	} else { // a call used as a statement
 		if v.v.k != .VCALL {
-			luaX_syntaxerror(ls, "syntax error")
+			lex_syntaxerror(ls, "syntax error")
 		}
 		inst := getinstruction(fs, &v.v)
 		setarg_C(inst, 1) // a statement call keeps no results
@@ -2253,27 +2253,27 @@ exprstat :: proc(ls: ^LexState) {
 retstat :: proc(ls: ^LexState) {
 	fs := ls.fs
 	e: Expdesc
-	first := luaY_nvarstack(fs) // first slot that will be returned
+	first := parse_nvarstack(fs) // first slot that will be returned
 	nret: int
 	if block_follow(ls, true) || ls.t.token == ';' {
 		nret = 0 // return no values
 	} else {
 		nret = explist(ls, &e) // the return values
 		if hasmultret(e.k) {
-			luaK_setreturns(fs, &e, LUA_MULTRET)
+			code_setreturns(fs, &e, MULTRET)
 			if e.k == .VCALL && nret == 1 && fs.bl.insidetbc == 0 { // tail call?
 				set_opcode(getinstruction(fs, &e), .TAILCALL)
 			}
-			nret = LUA_MULTRET // return all values
+			nret = MULTRET // return all values
 		} else {
 			if nret == 1 { // a single value can stay in its own slot
-				first = luaK_exp2anyreg(fs, &e)
+				first = code_exp2anyreg(fs, &e)
 			} else { // several values must sit at the top of the stack
-				luaK_exp2nextreg(fs, &e)
+				code_exp2nextreg(fs, &e)
 			}
 		}
 	}
-	luaK_ret(fs, first, nret)
+	code_ret(fs, first, nret)
 	testnext(ls, ';') // skip the optional semicolon
 }
 
@@ -2285,13 +2285,13 @@ statement :: proc(ls: ^LexState) {
 	enterlevel(ls)
 	switch ls.t.token {
 	case ';': // empty statement
-		luaX_next(ls)
+		lex_next(ls)
 	case TK_IF:
 		ifstat(ls, line)
 	case TK_WHILE:
 		whilestat(ls, line)
 	case TK_DO: // DO block END
-		luaX_next(ls)
+		lex_next(ls)
 		block(ls)
 		check_match(ls, TK_END, TK_DO, line)
 	case TK_FOR:
@@ -2301,7 +2301,7 @@ statement :: proc(ls: ^LexState) {
 	case TK_FUNCTION:
 		funcstat(ls, line)
 	case TK_LOCAL: // LOCAL function or LOCAL variable list
-		luaX_next(ls)
+		lex_next(ls)
 		if testnext(ls, TK_FUNCTION) {
 			localfunc(ls)
 		} else {
@@ -2310,23 +2310,23 @@ statement :: proc(ls: ^LexState) {
 	case TK_GLOBAL:
 		globalstatfunc(ls, line)
 	case TK_DBCOLON: // label
-		luaX_next(ls)
+		lex_next(ls)
 		labelstat(ls, str_checkname(ls), line)
 	case TK_RETURN:
-		luaX_next(ls)
+		lex_next(ls)
 		retstat(ls)
 	case TK_BREAK:
 		breakstat(ls, line)
 	case TK_GOTO:
-		luaX_next(ls)
+		lex_next(ls)
 		gotostat(ls, line)
 	case:
 		// A function call or assignment. In compatibility mode, "global" is not
 		// a reserved word, so recognize it as a keyword here when it is followed
 		// by something that begins a global declaration.
-		when LUA_COMPAT_GLOBAL {
+		when COMPAT_GLOBAL {
 			if ls.t.token == TK_NAME && ls.t.seminfo.ts == ls.glbn {
-				lk := luaX_lookahead(ls)
+				lk := lex_lookahead(ls)
 				if lk == '<' || lk == TK_NAME || lk == '*' || lk == TK_FUNCTION {
 					globalstatfunc(ls, line)
 					break
@@ -2337,7 +2337,7 @@ statement :: proc(ls: ^LexState) {
 	}
 	// Every statement must leave the register machine tidy: free the scratch
 	// registers, keeping only those holding live locals.
-	ls.fs.freereg = luaY_nvarstack(ls.fs)
+	ls.fs.freereg = parse_nvarstack(ls.fs)
 	leavelevel(ls)
 }
 
@@ -2357,8 +2357,8 @@ mainfunc :: proc(ls: ^LexState, fs: ^FuncState) {
 	env.idx = 0
 	env.kind = VDKREG
 	env.name = ls.envn
-	luaC_barrier(ls.L, obj2gco(fs.f), obj2gco(env.name))
-	luaX_next(ls) // read the first token
+	gc_barrier(ls.L, obj2gco(fs.f), obj2gco(env.name))
+	lex_next(ls) // read the first token
 	statlist(ls) // parse the body
 	check(ls, TK_EOS)
 	close_func(ls)
@@ -2368,8 +2368,8 @@ mainfunc :: proc(ls: ^LexState, fs: ^FuncState) {
 // reference Lua's `Proto` shape. Anchors the closure, scanner table, prototype,
 // and source string on the Lua stack across allocations. Reference
 // `luaY_parser`.
-luaY_parser :: proc(
-	L: ^Lua_State,
+parse_parser :: proc(
+	L: ^State,
 	z: ^Zio,
 	buff: ^Mbuffer,
 	dyd: ^Dyndata,
@@ -2378,23 +2378,23 @@ luaY_parser :: proc(
 ) -> ^LClosure {
 	lexstate: LexState
 	funcstate: FuncState
-	cl := luaF_newLclosure(L, 1) // the main closure (one upvalue: _ENV)
+	cl := func_newLclosure(L, 1) // the main closure (one upvalue: _ENV)
 	set_lua_closure(stack_value(L, L.top), cl) // anchor it against collection
 	inc_top(L)
-	lexstate.h = luaH_new(L) // scanner's string-anchoring table
+	lexstate.h = table_new(L) // scanner's string-anchoring table
 	set_gc(stack_value(L, L.top), obj2gco(lexstate.h)) // anchor it
 	inc_top(L)
-	funcstate.f = luaF_newproto(L)
+	funcstate.f = func_newproto(L)
 	cl.p = funcstate.f
-	luaC_barrier(L, obj2gco(cl), obj2gco(cl.p))
-	funcstate.f.source = luaS_new(L, name) // create and anchor the source name
-	luaC_barrier(L, obj2gco(funcstate.f), obj2gco(funcstate.f.source))
+	gc_barrier(L, obj2gco(cl), obj2gco(cl.p))
+	funcstate.f.source = string_new(L, name) // create and anchor the source name
+	gc_barrier(L, obj2gco(funcstate.f), obj2gco(funcstate.f.source))
 	lexstate.buff = buff
 	lexstate.dyd = dyd
 	dyd.actvar.n = 0
 	dyd.gt.n = 0
 	dyd.label.n = 0
-	luaX_setinput(L, &lexstate, z, funcstate.f.source, firstchar)
+	lex_setinput(L, &lexstate, z, funcstate.f.source, firstchar)
 	mainfunc(&lexstate, &funcstate)
 	L.top -= 1 // pop the scanner's table (closure stays on the stack)
 	return cl

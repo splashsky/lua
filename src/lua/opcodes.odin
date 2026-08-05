@@ -417,7 +417,7 @@ opmode :: #force_inline proc "contextless" (mm, ot, it, t, a: u32, m: Op_Mode) -
 // Not `@(rodata)`: each entry is produced by the `opmode` helper, so this is a
 // runtime (startup) initializer rather than a constant one. It is treated as
 // read-only by convention -- nothing ever writes to it after startup.
-luaP_opmodes := [NUM_OPCODES]Byte {
+opcode_opmodes := [NUM_OPCODES]Byte {
 	//     MM OT IT T  A  mode                         opcode
 	opmode(0, 0, 0, 0, 1, .iABC), // MOVE
 	opmode(0, 0, 0, 0, 1, .iAsBx), // LOADI
@@ -512,32 +512,32 @@ luaP_opmodes := [NUM_OPCODES]Byte {
 
 // The instruction format of an opcode (low 3 bits of its opmode byte).
 get_op_mode :: #force_inline proc "contextless" (o: Op_Code) -> Op_Mode {
-	return Op_Mode(luaP_opmodes[int(o)] & 7)
+	return Op_Mode(opcode_opmodes[int(o)] & 7)
 }
 
 // Does the opcode assign to register A? (bit 3)
 test_a_mode :: #force_inline proc "contextless" (o: Op_Code) -> bool {
-	return (luaP_opmodes[int(o)] & (1 << 3)) != 0
+	return (opcode_opmodes[int(o)] & (1 << 3)) != 0
 }
 
 // Is the opcode a test whose following instruction must be a jump? (bit 4)
 test_t_mode :: #force_inline proc "contextless" (o: Op_Code) -> bool {
-	return (luaP_opmodes[int(o)] & (1 << 4)) != 0
+	return (opcode_opmodes[int(o)] & (1 << 4)) != 0
 }
 
 // Does the opcode consume `L->top` set by the previous instruction? (bit 5)
 test_it_mode :: #force_inline proc "contextless" (o: Op_Code) -> bool {
-	return (luaP_opmodes[int(o)] & (1 << 5)) != 0
+	return (opcode_opmodes[int(o)] & (1 << 5)) != 0
 }
 
 // Does the opcode set `L->top` for the next instruction? (bit 6)
 test_ot_mode :: #force_inline proc "contextless" (o: Op_Code) -> bool {
-	return (luaP_opmodes[int(o)] & (1 << 6)) != 0
+	return (opcode_opmodes[int(o)] & (1 << 6)) != 0
 }
 
 // Is the opcode a metamethod (MMBIN*) instruction? (bit 7)
 test_mm_mode :: #force_inline proc "contextless" (o: Op_Code) -> bool {
-	return (luaP_opmodes[int(o)] & (1 << 7)) != 0
+	return (opcode_opmodes[int(o)] & (1 << 7)) != 0
 }
 
 // Whether an instruction *sets* top for the next one, i.e. produces a variable

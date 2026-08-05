@@ -17,7 +17,7 @@ linux_interrupt_handler :: proc "c" (signal: linux.Signal) {
 	action := linux.Sig_Action{}
 	action.special = .SIG_DFL
 	_ = linux.rt_sigaction(.SIGINT, &action, nil)
-	lua.lua_request_async_hook(&interrupt_request)
+	lua.api_request_async_hook(&interrupt_request)
 }
 
 platform_interrupt_init :: proc() {}

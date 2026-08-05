@@ -14,6 +14,6 @@ package main
 
 import posix "core:sys/posix"
 
-lua_stdin_is_tty :: proc() -> bool {
+stdin_is_tty :: proc() -> bool {
 	return bool(posix.isatty(posix.FD(0)))
 }

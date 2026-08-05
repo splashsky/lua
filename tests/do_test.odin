@@ -61,5 +61,5 @@ stack_in_use_reports_frame_extent :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 
 	// Base frame top is 1 + LUA_MINSTACK; in-use is that plus one slot.
-	testing.expect_value(t, lua.stack_in_use(L), 1 + lua.LUA_MINSTACK + 1)
+	testing.expect_value(t, lua.stack_in_use(L), 1 + lua.MINSTACK + 1)
 }

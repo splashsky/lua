@@ -21,10 +21,10 @@ package lua
 // sub-ABI as a compile-time constant. SysV is our bare-metal default. The build
 // wrappers set this one narrowly-scoped override for the two Win64-ABI target
 // triples; ordinary hosted builds and freestanding_amd64_sysv need no define.
-LUA_FREESTANDING_WIN64_ABI :: #config(LUA_FREESTANDING_WIN64_ABI, false)
+FREESTANDING_WIN64_ABI :: #config(FREESTANDING_WIN64_ABI, false)
 
 when ODIN_ARCH == .amd64 {
-	when ODIN_OS == .Windows || (ODIN_OS == .Freestanding && LUA_FREESTANDING_WIN64_ABI) {
+	when ODIN_OS == .Windows || (ODIN_OS == .Freestanding && FREESTANDING_WIN64_ABI) {
 		// Win64 preserves RBX, RBP, RDI, RSI, R12-R15 and XMM6-XMM15 across a
 		// call. This condition deliberately tests the ABI, not ODIN_OS: Odin's
 		// freestanding_amd64_win64 and freestanding_amd64_mingw targets are bare

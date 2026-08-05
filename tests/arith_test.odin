@@ -38,14 +38,14 @@ arithmetic_semantics_chunk :: proc(t: ^testing.T) {
 		return
 	}
 	defer lua.close_state(L)
-	aux.luaL_openlibs(L)
+	aux.aux_openlibs(L)
 
-	status := aux.luaL_loadfilex(L, "tests\\arithmetic_semantics.lua")
+	status := aux.aux_loadfilex(L, "tests\\arithmetic_semantics.lua")
 	if status == .Ok {
-		status = lua.lua_pcall(L, 0, 0, 0)
+		status = lua.api_pcall(L, 0, 0, 0)
 	}
 	if status != .Ok {
-		message, _ := lua.lua_tolstring(L, -1)
+		message, _ := lua.api_tolstring(L, -1)
 		testing.expectf(t, false, "arithmetic_semantics.lua failed: %s", message)
 	}
 }

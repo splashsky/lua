@@ -392,7 +392,7 @@ mainposition_i :: proc "contextless" (t: ^Table, key: ^TValue) -> int {
 	case VSHRSTR:
 		return hashstr_i(t, str_value(key))
 	case VLNGSTR:
-		return hashpow2_i(t, luaS_hashlongstr(str_value(key)))
+		return hashpow2_i(t, string_hashlongstr(str_value(key)))
 	case VFALSE:
 		return hashpow2_i(t, 0)
 	case VTRUE:
@@ -426,7 +426,7 @@ equalkey :: proc "contextless" (k1: ^TValue, n: ^Node, deadok: bool) -> bool {
 	if k1.tt_ != n.key_tt {
 		// Different variants can only match in two special cases.
 		if n.key_tt == KTT_SHRSTR && k1.tt_ == KTT_LNGSTR {
-			return luaS_eqstr(str_value(k1), (^TString)(n.key_val.gc))
+			return string_eqstr(str_value(k1), (^TString)(n.key_val.gc))
 		} else if deadok && n.key_tt == TDEADKEY && is_collectable(k1) {
 			return k1.value_.gc == n.key_val.gc
 		}
@@ -444,7 +444,7 @@ equalkey :: proc "contextless" (k1: ^TValue, n: ^Node, deadok: bool) -> bool {
 	case VLCF:
 		return k1.value_.f == n.key_val.f
 	case KTT_LNGSTR:
-		return luaS_eqstr(str_value(k1), (^TString)(n.key_val.gc))
+		return string_eqstr(str_value(k1), (^TString)(n.key_val.gc))
 	case:
 		// Everything else (short strings, tables, ...) is identity on the object.
 		return k1.value_.gc == n.key_val.gc
@@ -552,7 +552,7 @@ getintfromhash :: proc "contextless" (t: ^Table, key: Integer) -> ^TValue {
 // sole package-visible pointer-returning lookup: short-string keys only live in
 // hash nodes, and hash-node values remain contiguous TValues after the array is
 // split. Metamethod lookup needs this stable read-only pointer.
-luaH_Hgetshortstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
+table_Hgetshortstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
 	i := hashstr_i(t, key)
 	for {
 		n := &t.node[i]
@@ -573,7 +573,7 @@ luaH_Hgetshortstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
 @(private = "file")
 Hgetstr :: proc "contextless" (t: ^Table, key: ^TString) -> ^TValue {
 	if key.tt == VSHRSTR {
-		return luaH_Hgetshortstr(t, key)
+		return table_Hgetshortstr(t, key)
 	}
 	ko: TValue
 	set_string(&ko, key)
@@ -593,7 +593,7 @@ finishnodeget :: #force_inline proc "contextless" (slot: ^TValue, res: ^TValue) 
 // reference Lua's API shape, chosen because the forthcoming split array has no
 // contiguous TValue address to return. Callers must test the tag before reading
 // `res`; in particular, an empty result deliberately leaves `res` untouched.
-luaH_getint :: proc "contextless" (t: ^Table, key: Integer, res: ^TValue) -> Byte {
+table_getint :: proc "contextless" (t: ^Table, key: Integer, res: ^TValue) -> Byte {
 	k := ikeyinarray(t, key)
 	if k > 0 {
 		tag := arr_tag(t, k - 1)^
@@ -611,7 +611,7 @@ luaH_getint :: proc "contextless" (t: ^Table, key: Integer, res: ^TValue) -> Byt
 // integer read) is several times more expensive than the tag test and TValue
 // copy themselves. The unsigned subtraction deliberately mirrors the reference
 // macro too, making zero and negative keys miss the array with one bounds check.
-luaH_fastgeti :: #force_inline proc "contextless" (
+table_fastgeti :: #force_inline proc "contextless" (
 	t: ^Table,
 	key: Integer,
 	res: ^TValue,
@@ -625,29 +625,29 @@ luaH_fastgeti :: #force_inline proc "contextless" (
 		}
 		return with_variant(tag)
 	}
-	return luaH_getint(t, key, res)
+	return table_getint(t, key, res)
 }
 
-luaH_getshortstr :: proc "contextless" (t: ^Table, key: ^TString, res: ^TValue) -> Byte {
-	return finishnodeget(luaH_Hgetshortstr(t, key), res)
+table_getshortstr :: proc "contextless" (t: ^Table, key: ^TString, res: ^TValue) -> Byte {
+	return finishnodeget(table_Hgetshortstr(t, key), res)
 }
 
-luaH_getstr :: proc "contextless" (t: ^Table, key: ^TString, res: ^TValue) -> Byte {
+table_getstr :: proc "contextless" (t: ^Table, key: ^TString, res: ^TValue) -> Byte {
 	return finishnodeget(Hgetstr(t, key), res)
 }
 
-luaH_get :: proc "contextless" (t: ^Table, key: ^TValue, res: ^TValue) -> Byte {
+table_get :: proc "contextless" (t: ^Table, key: ^TValue, res: ^TValue) -> Byte {
 	switch type_tag(key) {
 	case VNUMINT:
-		return luaH_getint(t, int_value(key), res)
+		return table_getint(t, int_value(key), res)
 	case VSHRSTR:
-		return luaH_getshortstr(t, str_value(key), res)
+		return table_getshortstr(t, str_value(key), res)
 	case VNIL:
 		return VABSTKEY
 	case VNUMFLT:
 		k, ok := float_to_integer(flt_value(key), .Eq)
 		if ok {
-			return luaH_getint(t, k, res)
+			return table_getint(t, k, res)
 		}
 		return finishnodeget(getgeneric(t, key, false), res)
 	case:
@@ -660,18 +660,18 @@ luaH_get :: proc "contextless" (t: ^Table, key: ^TValue, res: ^TValue) -> Byte {
 // reference implementation uses macros around its exported table procedures:
 // integer array hits stay wholly inline, and interned-string keys skip an extra
 // general-dispatch call. Uncommon key types still use the canonical API.
-luaH_fastget :: #force_inline proc "contextless" (
+table_fastget :: #force_inline proc "contextless" (
 	t: ^Table,
 	key: ^TValue,
 	res: ^TValue,
 ) -> Byte {
 	switch type_tag(key) {
 	case VNUMINT:
-		return luaH_fastgeti(t, int_value(key), res)
+		return table_fastgeti(t, int_value(key), res)
 	case VSHRSTR:
-		return finishnodeget(luaH_Hgetshortstr(t, str_value(key)), res)
+		return finishnodeget(table_Hgetshortstr(t, str_value(key)), res)
 	case:
-		return luaH_get(t, key, res)
+		return table_get(t, key, res)
 	}
 }
 
@@ -772,7 +772,7 @@ newcheckedkey :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) {
 // retry. A new key can add a metamethod, so we invalidate the TM cache for string
 // keys, and we run the back barrier since a new reference just entered the table.
 @(private = "file")
-luaH_newkey :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, value: ^TValue) -> Thread_Status {
+table_newkey :: proc(L: ^State, t: ^Table, key: ^TValue, value: ^TValue) -> Thread_Status {
 	if is_nil(value) {
 		return .Ok // do not insert nil values
 	}
@@ -786,7 +786,7 @@ luaH_newkey :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, value: ^TValue) -> T
 	if no_variant(key.tt_) == TSTRING {
 		invalidateTMcache(t)
 	}
-	luaC_barrierback(L, obj2gco(t))
+	gc_barrierback(L, obj2gco(t))
 	return .Ok
 }
 
@@ -815,14 +815,14 @@ finishnodeset :: #force_inline proc "contextless" (t: ^Table, slot: ^TValue, val
 // return a location/status code instead of exposing a writable slot. The caller
 // can therefore decide whether `__newindex` applies, then pass the same code to
 // `luaH_finishset` without ever manufacturing a TValue pointer for an array slot.
-luaH_psetint :: proc "contextless" (t: ^Table, key: Integer, value: ^TValue) -> int {
+table_psetint :: proc "contextless" (t: ^Table, key: Integer, value: ^TValue) -> int {
 	return finishnodeset(t, getintfromhash(t, key), value)
 }
 
 // Like `luaH_fastgeti`, this mirrors a reference macro and must remain inline.
 // Keeping the array hit in the VM/API caller avoids paying for an Odin procedure
 // call around what is normally just a bounds check, tag check, and TValue copy.
-luaH_fastseti :: #force_inline proc "contextless" (
+table_fastseti :: #force_inline proc "contextless" (
 	t: ^Table,
 	key: Integer,
 	value: ^TValue,
@@ -839,27 +839,27 @@ luaH_fastseti :: #force_inline proc "contextless" (
 		}
 		return ~int(u)
 	}
-	return luaH_psetint(t, key, value)
+	return table_psetint(t, key, value)
 }
 
-luaH_psetshortstr :: proc "contextless" (t: ^Table, key: ^TString, value: ^TValue) -> int {
-	return finishnodeset(t, luaH_Hgetshortstr(t, key), value)
+table_psetshortstr :: proc "contextless" (t: ^Table, key: ^TString, value: ^TValue) -> int {
+	return finishnodeset(t, table_Hgetshortstr(t, key), value)
 }
 
-luaH_psetstr :: proc "contextless" (t: ^Table, key: ^TString, value: ^TValue) -> int {
+table_psetstr :: proc "contextless" (t: ^Table, key: ^TString, value: ^TValue) -> int {
 	return finishnodeset(t, Hgetstr(t, key), value)
 }
 
-luaH_pset :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) -> int {
+table_pset :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) -> int {
 	switch type_tag(key) {
 	case VNUMINT:
-		return luaH_fastseti(t, int_value(key), value)
+		return table_fastseti(t, int_value(key), value)
 	case VSHRSTR:
-		return luaH_psetshortstr(t, str_value(key), value)
+		return table_psetshortstr(t, str_value(key), value)
 	case VNUMFLT:
 		k, ok := float_to_integer(flt_value(key), .Eq)
 		if ok {
-			return luaH_fastseti(t, k, value)
+			return table_fastseti(t, k, value)
 		}
 	case VNIL:
 		return HNOTFOUND
@@ -871,23 +871,23 @@ luaH_pset :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) -> int
 // should pay for one hash-chain search, not a generic dispatcher plus the same
 // search. The returned location code is still consumed by `luaH_finishset`; no
 // writable array pointer escapes this helper.
-luaH_fastpset :: #force_inline proc "contextless" (
+table_fastpset :: #force_inline proc "contextless" (
 	t: ^Table,
 	key: ^TValue,
 	value: ^TValue,
 ) -> int {
 	switch type_tag(key) {
 	case VNUMINT:
-		return luaH_fastseti(t, int_value(key), value)
+		return table_fastseti(t, int_value(key), value)
 	case VSHRSTR:
-		return finishnodeset(t, luaH_Hgetshortstr(t, str_value(key)), value)
+		return finishnodeset(t, table_Hgetshortstr(t, str_value(key)), value)
 	case:
-		return luaH_pset(t, key, value)
+		return table_pset(t, key, value)
 	}
 }
 
-luaH_finishset :: proc(
-	L: ^Lua_State,
+table_finishset :: proc(
+	L: ^State,
 	t: ^Table,
 	key_in: ^TValue,
 	value: ^TValue,
@@ -910,7 +910,7 @@ luaH_finishset :: proc(
 				return throw(L, .Err_Run) // preserve the existing error path
 			}
 		}
-		return luaH_newkey(L, t, key, value)
+		return table_newkey(L, t, key, value)
 	}
 	if hres > 0 {
 		set_obj(node_val(&t.node[hres - HFIRSTNODE]), value)
@@ -923,28 +923,28 @@ luaH_finishset :: proc(
 
 // Raw setters are thin pset/finishset wrappers. They retain their existing
 // barrier behavior so this API-only refactor cannot change GC timing.
-luaH_set :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, value: ^TValue) -> Thread_Status {
-	hres := luaH_pset(t, key, value)
+table_set :: proc(L: ^State, t: ^Table, key: ^TValue, value: ^TValue) -> Thread_Status {
+	hres := table_pset(t, key, value)
 	st: Thread_Status = .Ok
 	if hres != HOK {
-		st = luaH_finishset(L, t, key, value, hres)
+		st = table_finishset(L, t, key, value, hres)
 	}
 	if st == .Ok && is_collectable(value) {
-		luaC_barrierback(L, obj2gco(t))
+		gc_barrierback(L, obj2gco(t))
 	}
 	return st
 }
 
-luaH_setint :: proc(L: ^Lua_State, t: ^Table, key: Integer, value: ^TValue) -> Thread_Status {
-	hres := luaH_fastseti(t, key, value)
+table_setint :: proc(L: ^State, t: ^Table, key: Integer, value: ^TValue) -> Thread_Status {
+	hres := table_fastseti(t, key, value)
 	st: Thread_Status = .Ok
 	if hres != HOK {
 		k: TValue
 		set_int(&k, key)
-		st = luaH_finishset(L, t, &k, value, hres)
+		st = table_finishset(L, t, &k, value, hres)
 	}
 	if st == .Ok && is_collectable(value) {
-		luaC_barrierback(L, obj2gco(t))
+		gc_barrierback(L, obj2gco(t))
 	}
 	return st
 }
@@ -1058,7 +1058,7 @@ numusehash :: proc "contextless" (t: ^Table, ct: ^Counters) {
 // Rehash the whole table: count keys, pick the best array size, and resize.
 // Reference Lua's `rehash`.
 @(private = "file")
-rehash :: proc(L: ^Lua_State, t: ^Table, ek: ^TValue) -> Thread_Status {
+rehash :: proc(L: ^State, t: ^Table, ek: ^TValue) -> Thread_Status {
 	ct: Counters
 	ct.na = 0
 	ct.deleted = false
@@ -1078,7 +1078,7 @@ rehash :: proc(L: ^Lua_State, t: ^Table, ek: ^TValue) -> Thread_Status {
 	if ct.deleted {
 		nsize += nsize >> 2 // slack, so churny insert/delete cycles don't thrash
 	}
-	return luaH_resize(L, t, asize, nsize)
+	return table_resize(L, t, asize, nsize)
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,7 +1100,7 @@ concretesize :: #force_inline proc "contextless" (size: u32) -> uint {
 // nonzero allocation fails.
 @(private = "file")
 array_resize :: proc(
-	L: ^Lua_State,
+	L: ^State,
 	t: ^Table,
 	oldasize: u32,
 	newasize: u32,
@@ -1143,7 +1143,7 @@ array_resize :: proc(
 // when `size == 0` -- reference Lua's `setnodevector`. Fresh slots start empty
 // with nil keys.
 @(private = "file")
-setnodevector :: proc(L: ^Lua_State, t: ^Table, size: u32) -> Thread_Status {
+setnodevector :: proc(L: ^State, t: ^Table, size: u32) -> Thread_Status {
 	if size == 0 {
 		t.node = dummy_ptr()
 		t.lsizenode = 0
@@ -1152,7 +1152,7 @@ setnodevector :: proc(L: ^Lua_State, t: ^Table, size: u32) -> Thread_Status {
 	}
 	lsize := ceil_log2(size)
 	if int(lsize) > MAXHBITS || uint(twoto(lsize)) > MAXHSIZE {
-		luaG_runerror(L, "table overflow")
+		debug_runerror(L, "table overflow")
 		return .Err_Run // unreachable: luaG_runerror throws
 	}
 	realsize := twoto(lsize)
@@ -1181,7 +1181,7 @@ setnodevector :: proc(L: ^Lua_State, t: ^Table, size: u32) -> Thread_Status {
 }
 
 @(private = "file")
-freehash :: proc(L: ^Lua_State, t: ^Table) {
+freehash :: proc(L: ^State, t: ^Table) {
 	if !is_dummy(t) {
 		// Hand back the block the allocator gave us -- the nodes backed up over
 		// the cursor box -- and the matching byte count, so memory accounting
@@ -1209,7 +1209,7 @@ exchangehashpart :: proc "contextless" (t1: ^Table, t2: ^Table) {
 // Re-insert every live key from an old hash part into `t`'s (new) parts --
 // reference Lua's `reinserthash`.
 @(private = "file")
-reinserthash :: proc(L: ^Lua_State, old: ^Table, t: ^Table) {
+reinserthash :: proc(L: ^State, old: ^Table, t: ^Table) {
 	size := sizenode(old)
 	for j in 0 ..< size {
 		o := &old.node[j]
@@ -1248,11 +1248,11 @@ clear_new_slice :: proc "contextless" (t: ^Table, oldasize: u32, newasize: u32) 
 // Resize a table to new array and hash sizes -- reference Lua's `luaH_resize`,
 // with its careful ordering so a mid-resize allocation failure leaves the table in
 // a consistent (original) state.
-luaH_resize :: proc(L: ^Lua_State, t: ^Table, newasize: u32, nhsize: u32) -> Thread_Status {
+table_resize :: proc(L: ^State, t: ^Table, newasize: u32, nhsize: u32) -> Thread_Status {
 	newt: Table // scratch table holding the new hash part
 	oldasize := t.asize
 	if newasize > MAXASIZE {
-		luaG_runerror(L, "table overflow")
+		debug_runerror(L, "table overflow")
 		return .Err_Run // unreachable: luaG_runerror throws
 	}
 	newt.flags = 0
@@ -1283,9 +1283,9 @@ luaH_resize :: proc(L: ^Lua_State, t: ^Table, newasize: u32, nhsize: u32) -> Thr
 	return .Ok
 }
 
-luaH_resizearray :: proc(L: ^Lua_State, t: ^Table, newasize: u32) -> Thread_Status {
+table_resizearray :: proc(L: ^State, t: ^Table, newasize: u32) -> Thread_Status {
 	nsize := is_dummy(t) ? u32(0) : u32(sizenode(t))
-	return luaH_resize(L, t, newasize, nsize)
+	return table_resize(L, t, newasize, nsize)
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,8 +1295,8 @@ luaH_resizearray :: proc(L: ^Lua_State, t: ^Table, newasize: u32) -> Thread_Stat
 // Allocate an empty table -- reference Lua's `luaH_new`. It starts with no array
 // part and the shared dummy hash part; both grow on first insertion. Returns nil
 // only if the object allocation fails.
-luaH_new :: proc(L: ^Lua_State) -> ^Table {
-	o := luaC_newobj(L, VTABLE, size_of(Table))
+table_new :: proc(L: ^State) -> ^Table {
+	o := gc_newobj(L, VTABLE, size_of(Table))
 	if o == nil {
 		return nil
 	}
@@ -1312,7 +1312,7 @@ luaH_new :: proc(L: ^Lua_State) -> ^Table {
 
 // Free a table and everything it owns -- reference Lua's `luaH_free`. Called only
 // by the GC's `freeobj`, so no error path is needed (frees don't fail).
-luaH_free :: proc(L: ^Lua_State, t: ^Table) {
+table_free :: proc(L: ^State, t: ^Table) {
 	freehash(L, t)
 	array_resize(L, t, t.asize, 0)
 	state_free(L, t, size_of(Table))
@@ -1325,7 +1325,7 @@ luaH_free :: proc(L: ^Lua_State, t: ^Table) {
 // Find the traversal index that follows `key` -- reference Lua's `findindex`.
 // Array keys are numbered first (1..asize), then hash slots. 0 starts a traversal.
 @(private = "file")
-findindex :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, asize: u32) -> u32 {
+findindex :: proc(L: ^State, t: ^Table, key: ^TValue, asize: u32) -> u32 {
 	if is_nil(key) {
 		return 0 // first iteration
 	}
@@ -1335,7 +1335,7 @@ findindex :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, asize: u32) -> u32 {
 	}
 	n := getgeneric(t, key, true)
 	if is_absent(n) {
-		luaG_runerror(L, "invalid key to 'next'") // reference: same message
+		debug_runerror(L, "invalid key to 'next'") // reference: same message
 		return 0
 	}
 	idx := u32(node_index(t, node_from_val(n)))
@@ -1345,7 +1345,7 @@ findindex :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, asize: u32) -> u32 {
 // Advance a table traversal -- reference Lua's `luaH_next`. Given the current
 // `key`, write the next key/value into `out_key`/`out_val` and return true, or
 // return false at the end. Passing a nil `key` starts the traversal.
-luaH_next :: proc(L: ^Lua_State, t: ^Table, key: ^TValue, out_key: ^TValue, out_val: ^TValue) -> bool {
+table_next :: proc(L: ^State, t: ^Table, key: ^TValue, out_key: ^TValue, out_val: ^TValue) -> bool {
 	asize := t.asize
 	i := findindex(L, t, key, asize)
 	for i < asize {
@@ -1400,7 +1400,7 @@ newhint :: #force_inline proc "contextless" (t: ^Table, hint: u32) -> Unsigned {
 // Lua's `hash_search`, seeded doubling and all (the seed thwarts a pathological
 // actor from constructing a table with a hugely inflated length).
 @(private = "file")
-hash_search :: proc(L: ^Lua_State, t: ^Table, asize: u32) -> Unsigned {
+hash_search :: proc(L: ^State, t: ^Table, asize: u32) -> Unsigned {
 	i: Unsigned = Unsigned(asize) + 1 // caller guarantees t[i] present
 	rnd := L.g.seed
 	n := asize > 0 ? int(ceil_log2(asize)) : 0
@@ -1435,7 +1435,7 @@ hash_search :: proc(L: ^Lua_State, t: ^Table, asize: u32) -> Unsigned {
 
 // A border of `t`: an index `n` with `t[n]` present and `t[n+1]` absent (the `#`
 // operator). Reference Lua's `luaH_getn`, hint-guided vicinity search included.
-luaH_getn :: proc(L: ^Lua_State, t: ^Table) -> Unsigned {
+table_getn :: proc(L: ^State, t: ^Table) -> Unsigned {
 	asize := t.asize
 	if asize > 0 {
 		maxvicinity :: 4

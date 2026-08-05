@@ -11,21 +11,21 @@ import "core:testing"
 import lua "luao:lua"
 import aux "luao:stdlib"
 
-corolib_state :: proc() -> ^lua.Lua_State {
+corolib_state :: proc() -> ^lua.State {
 	L := lua.new_state(lua.default_allocator())
-	lua.lua_pushcfunction(L, aux.luaopen_base)
-	lua.lua_call(L, 0, 0)
-	lua.lua_pushcfunction(L, aux.luaopen_coroutine)
-	lua.lua_call(L, 0, 1)
-	lua.lua_setglobal(L, "coroutine")
+	lua.api_pushcfunction(L, aux.open_base)
+	lua.api_call(L, 0, 0)
+	lua.api_pushcfunction(L, aux.open_coroutine)
+	lua.api_call(L, 0, 1)
+	lua.api_setglobal(L, "coroutine")
 	return L
 }
 
-corolib_run :: proc(L: ^lua.Lua_State, src: string) -> lua.Thread_Status {
-	if st := aux.luaL_loadstring(L, src); st != .Ok {
+corolib_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
+	if st := aux.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.lua_pcall(L, 0, lua.LUA_MULTRET, 0)
+	return lua.api_pcall(L, 0, lua.MULTRET, 0)
 }
 
 @(test)

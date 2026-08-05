@@ -13,23 +13,23 @@ import lua "luao:lua"
 import stdlib "luao:stdlib"
 
 @(export)
-luao_freestanding_newstate :: proc "c" (
+lang_freestanding_newstate :: proc "c" (
 	alloc: lua.Alloc_Proc,
 	ud: rawptr,
-) -> ^lua.Lua_State {
+) -> ^lua.State {
 	context = runtime.default_context()
 	if alloc == nil {
 		return nil
 	}
 	L := lua.new_state(lua.Allocator{alloc = alloc, ud = ud})
 	if L != nil {
-		stdlib.luaL_openlibs(L)
+		stdlib.aux_openlibs(L)
 	}
 	return L
 }
 
 @(export)
-luao_freestanding_close :: proc "c" (L: ^lua.Lua_State) {
+lang_freestanding_close :: proc "c" (L: ^lua.State) {
 	context = runtime.default_context()
 	if L != nil {
 		lua.close_state(L)

@@ -17,20 +17,20 @@ import lua "luao:lua"
 // sweepable object list, and its inline upvalue slots can be populated by
 // luaF_initupvals.
 @(test)
-lua_closure_allocation :: proc(t: ^testing.T) {
+api_closure_allocation :: proc(t: ^testing.T) {
 	L := lua.new_state(lua.default_allocator())
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
 	base := count_allgc(L)
-	cl := lua.luaF_newLclosure(L, 3)
+	cl := lua.func_newLclosure(L, 3)
 	testing.expect(t, cl != nil)
 	testing.expect_value(t, cl.nupvalues, u8(3))
 	testing.expect(t, cl.tt == lua.VLCL, "Lua closures carry the VLCL tag")
 	testing.expect_value(t, count_allgc(L), base + 1)
 
 	// Populate the upvalue objects; each is itself a fresh collectable object.
-	st := lua.luaF_initupvals(L, cl)
+	st := lua.func_initupvals(L, cl)
 	testing.expect(t, st == .Ok)
 	for i in 0 ..< 3 {
 		testing.expect(t, cl.upvals[i] != nil, "every upvalue slot must be filled")
@@ -46,7 +46,7 @@ c_closure_allocation :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	cl := lua.luaF_newCclosure(L, 2)
+	cl := lua.func_newCclosure(L, 2)
 	testing.expect(t, cl != nil)
 	testing.expect_value(t, cl.nupvalues, u8(2))
 	testing.expect(t, cl.tt == lua.VCCL, "C closures carry the VCCL tag")
@@ -68,7 +68,7 @@ proto_allocation_leaves_no_leak :: proc(t: ^testing.T) {
 	L := lua.new_state(alloc)
 	testing.expect(t, L != nil)
 
-	p := lua.luaF_newproto(L)
+	p := lua.func_newproto(L)
 	testing.expect(t, p != nil)
 	testing.expect(t, p.tt == lua.VPROTO, "prototypes carry the VPROTO tag")
 
@@ -92,8 +92,8 @@ open_upvalues_share_and_close :: proc(t: ^testing.T) {
 	L.top += 1
 
 	// Two finds for the same slot must return the identical shared upvalue.
-	uv1 := lua.luaF_findupval(L, slot)
-	uv2 := lua.luaF_findupval(L, slot)
+	uv1 := lua.func_findupval(L, slot)
+	uv2 := lua.func_findupval(L, slot)
 	testing.expect(t, uv1 != nil && uv2 != nil)
 	testing.expect(t, uv1 == uv2, "same slot must share one upvalue object")
 	testing.expect(t, uv1.open, "a capture of a live slot is open")
@@ -105,12 +105,12 @@ open_upvalues_share_and_close :: proc(t: ^testing.T) {
 	other_slot := L.top
 	lua.set_int(lua.stack_value(L, other_slot), 5678)
 	L.top += 1
-	uv_other := lua.luaF_findupval(L, other_slot)
+	uv_other := lua.func_findupval(L, other_slot)
 	testing.expect(t, uv_other != uv1, "different slots get different upvalues")
 
 	// Now close everything at or above `slot`. The upvalue must go closed, detach
 	// from the stack, and still yield the captured value from its own storage.
-	lua.luaF_closeupval(L, slot)
+	lua.func_closeupval(L, slot)
 	testing.expect(t, !uv1.open, "closing flips the upvalue to closed")
 	testing.expect_value(t, lua.int_value(lua.upval_value(uv1)), lua.Integer(1234))
 

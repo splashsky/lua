@@ -16,23 +16,23 @@ import aux "luao:stdlib"
 // Completion normally runs in a fully initialized interpreter, so each test
 // gets exactly that. Keeping the states separate also makes the little globals
 // installed by one scenario unable to make another scenario pass by accident.
-lineedit_test_state :: proc(t: ^testing.T) -> ^lua.Lua_State {
+lineedit_test_state :: proc(t: ^testing.T) -> ^lua.State {
 	L := lua.new_state(lua.default_allocator())
-	aux.luaL_openlibs(L)
-	testing.expect(t, lua.lua_checkstack(L, 4), "reserve completion stack")
+	aux.aux_openlibs(L)
+	testing.expect(t, lua.api_checkstack(L, 4), "reserve completion stack")
 	return L
 }
 
-lineedit_test_run :: proc(t: ^testing.T, L: ^lua.Lua_State, src: string) {
-	st := aux.luaL_loadstring(L, src)
+lineedit_test_run :: proc(t: ^testing.T, L: ^lua.State, src: string) {
+	st := aux.aux_loadstring(L, src)
 	testing.expect_value(t, st, lua.Thread_Status.Ok)
 	if st != .Ok {
 		return
 	}
-	testing.expect_value(t, lua.lua_pcall(L, 0, lua.LUA_MULTRET, 0), lua.Thread_Status.Ok)
+	testing.expect_value(t, lua.api_pcall(L, 0, lua.MULTRET, 0), lua.Thread_Status.Ok)
 }
 
-lineedit_test_candidates :: proc(L: ^lua.Lua_State, input: string) -> lineedit.Completion {
+lineedit_test_candidates :: proc(L: ^lua.State, input: string) -> lineedit.Completion {
 	return lineedit.completion_candidates(L, transmute([]u8)input, len(input))
 }
 
@@ -149,8 +149,8 @@ lineedit_completion_does_not_fire_index :: proc(t: ^testing.T) {
 	c := lineedit_test_candidates(L, "proxy.member.")
 	testing.expect_value(t, c.count, 0)
 	testing.expect_value(t, lineedit.completion_common_prefix(&c), 0)
-	testing.expect_value(t, lua.lua_getglobal(L, "hits"), lua.LUA_TNUMBER)
-	hits, ok := lua.lua_tointegerx(L, -1)
+	testing.expect_value(t, lua.api_getglobal(L, "hits"), lua.TNUMBER)
+	hits, ok := lua.api_tointegerx(L, -1)
 	testing.expect(t, ok && hits == 0, "completion must not consult __index")
-	lua.lua_pop(L, 1)
+	lua.api_pop(L, 1)
 }

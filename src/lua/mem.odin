@@ -178,7 +178,7 @@ gettotalbytes :: #force_inline proc "contextless" (g: ^Global_State) -> L_Mem {
 // Set the collector's debt to `debt`, keeping `GCtotalbytes = live + debt` --
 // reference Lua's `luaE_setdebt`. The debt is clamped so total bytes never
 // overflows `MAX_LMEM`. A negative-or-zero debt means "a collection is due".
-luaE_setdebt :: proc "contextless" (g: ^Global_State, debt: L_Mem) {
+state_setdebt :: proc "contextless" (g: ^Global_State, debt: L_Mem) {
 	tb := gettotalbytes(g)
 	d := debt
 	if d > MAX_LMEM - tb {
@@ -194,7 +194,7 @@ luaE_setdebt :: proc "contextless" (g: ^Global_State, debt: L_Mem) {
 // try an emergency collection (if one is safe right now) to reclaim memory, then
 // retry once. If it still fails we return nil *without* touching the debt, so the
 // caller can raise while the numbers stay consistent.
-state_realloc :: proc(L: ^Lua_State, block: rawptr, osize: uint, nsize: uint) -> rawptr {
+state_realloc :: proc(L: ^State, block: rawptr, osize: uint, nsize: uint) -> rawptr {
 	g := L.g
 	newblock := raw_realloc(g.alloc, block, osize, nsize)
 	if newblock == nil && nsize > 0 {
@@ -203,7 +203,7 @@ state_realloc :: proc(L: ^Lua_State, block: rawptr, osize: uint, nsize: uint) ->
 		// already inside an emergency step). Reference Lua's `cantryagain`:
 		// `completestate(g) && !g->gcstopem`.
 		if completestate(g) && g.gcstopem == 0 {
-			luaC_fullgc(L, true) // emergency: reclaim unreachable objects
+			gc_fullgc(L, true) // emergency: reclaim unreachable objects
 			newblock = raw_realloc(g.alloc, block, osize, nsize)
 		}
 		if newblock == nil {
@@ -224,7 +224,7 @@ state_realloc :: proc(L: ^Lua_State, block: rawptr, osize: uint, nsize: uint) ->
 
 // Free a block of `osize` bytes on behalf of state `L`, crediting the debt --
 // reference Lua's `luaM_free_`.
-state_free :: proc(L: ^Lua_State, block: rawptr, osize: uint) {
+state_free :: proc(L: ^State, block: rawptr, osize: uint) {
 	if block == nil {
 		return
 	}
@@ -253,7 +253,7 @@ state_free :: proc(L: ^Lua_State, block: rawptr, osize: uint) {
 // `arr^` and `size^` are updated; if even `limit` cannot hold one more element we
 // raise the same "too many X" error reference Lua's `luaM_growaux_` raises, and
 // an out-of-memory realloc raises `.Err_Mem` like `luaM_saferealloc_`.
-grow_vector :: proc(L: ^Lua_State, arr: ^[^]$T, nelems: int, size: ^int, limit: int, what: string) {
+grow_vector :: proc(L: ^State, arr: ^[^]$T, nelems: int, size: ^int, limit: int, what: string) {
 	if nelems + 1 <= size^ { 	// does one extra element still fit?
 		return // nothing to be done
 	}
@@ -263,7 +263,7 @@ grow_vector :: proc(L: ^Lua_State, arr: ^[^]$T, nelems: int, size: ^int, limit: 
 		// many locals/constants/opcodes/..." error. During parsing there is no
 		// running Lua frame, so this is exactly reference `luaG_runerror`'s
 		// no-source path: push the message and throw a runtime error.
-		luaO_pushfstring(L, "too many %s (limit is %d)", what, limit)
+		object_pushfstring(L, "too many %s (limit is %d)", what, limit)
 		throw(L, .Err_Run)
 	}
 	oldbytes := uint(size^) * size_of(T)
@@ -280,7 +280,7 @@ grow_vector :: proc(L: ^Lua_State, arr: ^[^]$T, nelems: int, size: ^int, limit: 
 // slack -- reference Lua's `luaM_shrinkvector_`. Prototypes reuse the size field
 // as the element count, so `close_func` trims each array to what it actually
 // used. A failed shrink (should never happen when shrinking) raises `.Err_Mem`.
-shrink_vector :: proc(L: ^Lua_State, arr: ^[^]$T, size: ^int, final_n: int) {
+shrink_vector :: proc(L: ^State, arr: ^[^]$T, size: ^int, final_n: int) {
 	oldbytes := uint(size^) * size_of(T)
 	newbytes := uint(final_n) * size_of(T)
 	newblock := state_realloc(L, arr^, oldbytes, newbytes)

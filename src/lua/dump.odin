@@ -26,20 +26,20 @@ package lua
 // handed each chunk of serialized bytes and returns 0 on success or a non-zero
 // status to abort the dump. It is a `"c"` proc so it can be a host callback; the
 // callback is responsible for establishing its own Odin `context` if it needs one.
-Lua_Writer :: #type proc "c" (L: rawptr, p: rawptr, sz: uint, ud: rawptr) -> i32
+Writer :: #type proc "c" (L: rawptr, p: rawptr, sz: uint, ud: rawptr) -> i32
 
 // Header constants, matching `lundump.h` exactly.
 //
 // `LUAC_VERSION` packs the major/minor version into one byte, one nibble each:
 // 5*16 + 5 == 0x55 == 85 for Lua 5.5.
-LUAC_VERSION :: VERSION_MAJOR_N * 16 + VERSION_MINOR_N
-LUAC_FORMAT :: 0 // the official format id
+HEADER_VERSION :: VERSION_MAJOR_N * 16 + VERSION_MINOR_N
+HEADER_FORMAT :: 0 // the official format id
 // The "data" signature: catches naive text-mode / endianness corruption. Bytes
 // are 0x19 0x93 '\r' '\n' 0x1a '\n'.
-LUAC_DATA :: "\x19\x93\r\n\x1a\n"
-LUAC_INT :: -0x5678 // sentinel integer, catches integer-format mismatch
-LUAC_INST :: 0x12345678 // sentinel instruction, catches endianness
-LUAC_NUM :: -370.5 // sentinel float, catches float-format mismatch
+HEADER_DATA :: "\x19\x93\r\n\x1a\n"
+HEADER_INT :: -0x5678 // sentinel integer, catches integer-format mismatch
+HEADER_INST :: 0x12345678 // sentinel instruction, catches endianness
+HEADER_NUM :: -370.5 // sentinel float, catches float-format mismatch
 
 // The number of bytes a 64-bit unsigned can occupy in the MSB varint encoding:
 // each byte carries 7 payload bits, so (64 + 6) / 7 == 10. Reference `DIBS`.
@@ -51,8 +51,8 @@ DIBS :: (64 + 6) / 7
 // auxiliary table mapping already-dumped strings to their 1-based reuse index,
 // and `nstr` counts how many strings have been saved into it.
 DumpState :: struct {
-	L:      ^Lua_State,
-	writer: Lua_Writer,
+	L:      ^State,
+	writer: Writer,
 	data:   rawptr, // opaque cookie handed back to the writer
 	offset: uint, // current position relative to the start of the dump
 	strip:  bool, // drop debug info?
@@ -168,7 +168,7 @@ dump_string :: proc(D: ^DumpState, ts: ^TString) {
 	}
 	// Have we dumped this exact string object already?
 	idx: TValue
-	luaH_getstr(D.h, ts, &idx)
+	table_getstr(D.h, ts, &idx)
 	if !is_nil(&idx) {
 		dump_varint(D, 0) // reuse a saved string ...
 		dump_varint(D, u64(int_value(&idx))) // ... at this index
@@ -183,7 +183,7 @@ dump_string :: proc(D: ^DumpState, ts: ^TString) {
 	value: TValue
 	set_string(&key, ts)
 	set_int(&value, Integer(D.nstr))
-	luaH_set(D.L, D.h, &key, &value) // h[ts] = nstr; integer value needs no barrier
+	table_set(D.L, D.h, &key, &value) // h[ts] = nstr; integer value needs no barrier
 }
 
 // Emit the bytecode: a count, alignment padding, then the raw instruction words.
@@ -309,14 +309,14 @@ dump_num_info :: proc(D: ^DumpState, v: $T) {
 // `int` is 32-bit, so a byte-faithful header must write size 4 and a 4-byte
 // value. The `lua_Integer` marker below uses the same sentinel value at 8 bytes.
 dump_header :: proc(D: ^DumpState) {
-	dump_literal(D, LUA_SIGNATURE)
-	dump_byte(D, LUAC_VERSION)
-	dump_byte(D, LUAC_FORMAT)
-	dump_literal(D, LUAC_DATA)
-	dump_num_info(D, i32(LUAC_INT)) // C int marker: 4 bytes
-	dump_num_info(D, Instruction(LUAC_INST)) // Instruction marker: 4 bytes
-	dump_num_info(D, Integer(LUAC_INT)) // lua_Integer marker: 8 bytes
-	dump_num_info(D, Number(LUAC_NUM)) // lua_Number marker: 8 bytes
+	dump_literal(D, SIGNATURE)
+	dump_byte(D, HEADER_VERSION)
+	dump_byte(D, HEADER_FORMAT)
+	dump_literal(D, HEADER_DATA)
+	dump_num_info(D, i32(HEADER_INT)) // C int marker: 4 bytes
+	dump_num_info(D, Instruction(HEADER_INST)) // Instruction marker: 4 bytes
+	dump_num_info(D, Integer(HEADER_INT)) // lua_Integer marker: 8 bytes
+	dump_num_info(D, Number(HEADER_NUM)) // lua_Number marker: 8 bytes
 }
 
 // luaU_dump serializes prototype `f` (and everything it references) through the
@@ -327,9 +327,9 @@ dump_header :: proc(D: ^DumpState) {
 // reference, leaves that slot in place on return: the caller (reference's
 // `lua_dump`) is responsible for restoring `L.top`. We keep that contract so the
 // emitted bytes -- and the stack discipline -- match reference precisely.
-luaU_dump :: proc(L: ^Lua_State, f: ^Proto, writer: Lua_Writer, data: rawptr, strip: bool) -> i32 {
+dump_chunk :: proc(L: ^State, f: ^Proto, writer: Writer, data: rawptr, strip: bool) -> i32 {
 	D: DumpState
-	D.h = luaH_new(L) // aux. table tracking strings already dumped
+	D.h = table_new(L) // aux. table tracking strings already dumped
 	set_gc(stack_value(L, L.top), obj2gco(D.h)) // anchor it against GC
 	inc_top(L)
 	D.L = L

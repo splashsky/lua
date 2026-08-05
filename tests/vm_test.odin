@@ -22,7 +22,7 @@ import lua "luao:lua"
 // ---------------------------------------------------------------------------
 
 VM_Fixture :: struct {
-	L:    ^lua.Lua_State,
+	L:    ^lua.State,
 	z:    lua.Zio,
 	buff: lua.Mbuffer,
 	dyd:  lua.Dyndata,
@@ -34,28 +34,28 @@ VM_Fixture :: struct {
 
 // The protected compile job: turn source into the main closure. `luaY_parser`
 // long-jumps on a syntax error, which `run_protected` turns into a status.
-vm_compile_job :: proc(L: ^lua.Lua_State, ud: rawptr) -> lua.Thread_Status {
+vm_compile_job :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	fx := (^VM_Fixture)(ud)
 	first := lua.zio_getc(&fx.z)
-	fx.cl = lua.luaY_parser(L, &fx.z, &fx.buff, &fx.dyd, "=vm", first)
+	fx.cl = lua.parse_parser(L, &fx.z, &fx.buff, &fx.dyd, "=vm", first)
 	return .Ok
 }
 
 // The protected run job: wire the main chunk's `_ENV` to the globals table, then
 // call it and record where the results landed and how many there were. Any runtime
 // error inside the chunk long-jumps back out to the surrounding `run_protected`.
-vm_run_job :: proc(L: ^lua.Lua_State, ud: rawptr) -> lua.Thread_Status {
+vm_run_job :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	fx := (^VM_Fixture)(ud)
 	cl := fx.cl
-	lua.luaF_initupvals(L, cl) // create the closed `_ENV` upvalue (starts nil)
+	lua.func_initupvals(L, cl) // create the closed `_ENV` upvalue (starts nil)
 	// Point `_ENV` at the real globals table so global reads/writes work.
 	regt := (^lua.Table)(lua.gc_value(&L.g.registry))
 	gtv: lua.TValue
-	lua.luaH_getint(regt, lua.LUA_RIDX_GLOBALS, &gtv)
+	lua.table_getint(regt, lua.RIDX_GLOBALS, &gtv)
 	lua.upval_value(cl.upvals[0])^ = gtv
 	funcidx := L.top - 1 // the closure sits on top of the stack
 	fx.base = funcidx
-	lua.luaD_call(L, funcidx, lua.LUA_MULTRET)
+	lua.do_call(L, funcidx, lua.MULTRET)
 	fx.nres = L.top - funcidx
 	return .Ok
 }

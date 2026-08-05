@@ -129,7 +129,7 @@ str_value :: #force_inline proc "contextless" (o: ^TValue) -> ^TString {
 // unsigned integers wraps modulo 2^32 (there is no overflow trap), which matches
 // C's unsigned overflow semantics exactly, so our hashes agree with reference Lua
 // bit-for-bit given the same seed.
-luaS_hash :: proc "contextless" (str: [^]u8, l: uint, seed: u32) -> u32 {
+string_hash :: proc "contextless" (str: [^]u8, l: uint, seed: u32) -> u32 {
 	h := seed ~ u32(l)
 	for i := l; i > 0; i -= 1 {
 		h ~= (h << 5) + (h >> 2) + u32(str[i - 1])
@@ -140,10 +140,10 @@ luaS_hash :: proc "contextless" (str: [^]u8, l: uint, seed: u32) -> u32 {
 // Ensure a long string's hash is computed, computing it on first request and
 // caching the result (flagged by `extra == 1`). Short strings never call this;
 // they're hashed eagerly at creation. Reference Lua's `luaS_hashlongstr`.
-luaS_hashlongstr :: proc "contextless" (ts: ^TString) -> u32 {
+string_hashlongstr :: proc "contextless" (ts: ^TString) -> u32 {
 	assert_contextless(ts.tt == VLNGSTR)
 	if ts.extra == 0 {
-		ts.hash = luaS_hash(str_bytes(ts), ts.len, ts.hash)
+		ts.hash = string_hash(str_bytes(ts), ts.len, ts.hash)
 		ts.extra = 1
 	}
 	return ts.hash
@@ -161,7 +161,7 @@ mem_eq :: #force_inline proc "contextless" (a: [^]u8, b: [^]u8, n: uint) -> bool
 
 // Equality of two long strings -- reference Lua's `luaS_eqlngstr`. Short-string
 // equality is just pointer identity (thanks to interning) and needs no helper.
-luaS_eqlngstr :: proc "contextless" (a: ^TString, b: ^TString) -> bool {
+string_eqlngstr :: proc "contextless" (a: ^TString, b: ^TString) -> bool {
 	assert_contextless(a.tt == VLNGSTR && b.tt == VLNGSTR)
 	return a == b || (a.len == b.len && mem_eq(str_bytes(a), str_bytes(b), a.len))
 }
@@ -170,14 +170,14 @@ luaS_eqlngstr :: proc "contextless" (a: ^TString, b: ^TString) -> bool {
 // kind are compared appropriately (short by identity, long by content); strings of
 // different kinds can never be equal in our world, where every short string is
 // interned (so a long string always exceeds the short-string length limit).
-luaS_eqstr :: proc "contextless" (a: ^TString, b: ^TString) -> bool {
+string_eqstr :: proc "contextless" (a: ^TString, b: ^TString) -> bool {
 	if a.tt != b.tt {
 		return false
 	}
 	if a.tt == VSHRSTR {
 		return a == b // interned: identity is equality
 	}
-	return luaS_eqlngstr(a, b)
+	return string_eqlngstr(a, b)
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +216,7 @@ tablerehash :: proc(vect: [^]^TString, osize: int, nsize: int) {
 // Lua's `luaS_resize`. A shrink depopulates the doomed tail *before* the realloc
 // (so no string is stranded); a grow rehashes *after*. A failed reallocation
 // leaves the table exactly as it was.
-luaS_resize :: proc(L: ^Lua_State, nsize: int) {
+string_resize :: proc(L: ^State, nsize: int) {
 	tb := &L.g.strt
 	osize := tb.size
 	if nsize < osize {
@@ -247,10 +247,10 @@ luaS_resize :: proc(L: ^Lua_State, nsize: int) {
 // strings" catastrophe by forcing a full GC; our MAXSTRTB cap makes that
 // unreachable in practice, and if we're truly at the cap we simply stop growing
 // and let chains lengthen, which is correct if slow.)
-growstrtab :: proc(L: ^Lua_State) {
+growstrtab :: proc(L: ^State) {
 	tb := &L.g.strt
 	if tb.size <= MAXSTRTB / 2 {
-		luaS_resize(L, tb.size * 2)
+		string_resize(L, tb.size * 2)
 	}
 }
 
@@ -262,8 +262,8 @@ growstrtab :: proc(L: ^Lua_State) {
 // the given tag and hash, with `len` characters -- reference Lua's `createstrobj`.
 // The caller fills in the actual bytes. Returns nil if the allocation fails, so
 // the caller can raise the memory error with proper unwinding context.
-createstrobj :: proc(L: ^Lua_State, l: uint, tag: Byte, h: u32) -> ^TString {
-	o := luaC_newobj(L, tag, sizelstring(l))
+createstrobj :: proc(L: ^State, l: uint, tag: Byte, h: u32) -> ^TString {
+	o := gc_newobj(L, tag, sizelstring(l))
 	if o == nil {
 		return nil
 	}
@@ -279,7 +279,7 @@ createstrobj :: proc(L: ^Lua_State, l: uint, tag: Byte, h: u32) -> ^TString {
 // Create a fresh long-string object of length `l` (bytes not yet filled) --
 // reference Lua's `luaS_createlngstrobj`. Its hash starts as the seed and is
 // finalized lazily by `luaS_hashlongstr`.
-luaS_createlngstrobj :: proc(L: ^Lua_State, l: uint) -> ^TString {
+string_createlngstrobj :: proc(L: ^State, l: uint) -> ^TString {
 	return createstrobj(L, l, VLNGSTR, L.g.seed)
 }
 
@@ -288,10 +288,10 @@ luaS_createlngstrobj :: proc(L: ^Lua_State, l: uint) -> ^TString {
 // exists but is a not-yet-collected corpse (dead white), we resurrect it by
 // flipping it to the current white rather than making a duplicate. Returns nil
 // only if a needed allocation fails.
-internshrstr :: proc(L: ^Lua_State, str: [^]u8, l: uint) -> ^TString {
+internshrstr :: proc(L: ^State, str: [^]u8, l: uint) -> ^TString {
 	g := L.g
 	tb := &g.strt
-	h := luaS_hash(str, l, g.seed)
+	h := string_hash(str, l, g.seed)
 	list := &tb.hash[str_mod(h, tb.size)]
 	for ts := list^; ts != nil; ts = ts.hnext {
 		if l == ts.len && mem_eq(str, str_bytes(ts), l) {
@@ -321,11 +321,11 @@ internshrstr :: proc(L: ^Lua_State, str: [^]u8, l: uint) -> ^TString {
 // Create a string from an explicit byte range, choosing short vs long by length
 // -- reference Lua's `luaS_newlstr`. Short strings are interned; long strings get
 // their own object with the bytes copied in.
-luaS_newlstr :: proc(L: ^Lua_State, str: [^]u8, l: uint) -> ^TString {
+string_newlstr :: proc(L: ^State, str: [^]u8, l: uint) -> ^TString {
 	if l <= MAXSHORTLEN {
 		return internshrstr(L, str, l)
 	}
-	ts := luaS_createlngstrobj(L, l)
+	ts := string_createlngstrobj(L, l)
 	if ts == nil {
 		return nil
 	}
@@ -335,8 +335,8 @@ luaS_newlstr :: proc(L: ^Lua_State, str: [^]u8, l: uint) -> ^TString {
 
 // Create a string from an Odin string value. Convenience wrapper over
 // `luaS_newlstr` used throughout the kernel where a length is already known.
-luaS_newlstr_str :: proc(L: ^Lua_State, s: string) -> ^TString {
-	return luaS_newlstr(L, raw_data(s), len(s))
+string_newlstr_str :: proc(L: ^State, s: string) -> ^TString {
+	return string_newlstr(L, raw_data(s), len(s))
 }
 
 // Create a string, consulting the tiny address-keyed cache first -- reference
@@ -348,7 +348,7 @@ luaS_newlstr_str :: proc(L: ^Lua_State, s: string) -> ^TString {
 // message, made in `luaS_init`) through here: the cache isn't populated yet, and
 // dereferencing an empty slot would be undefined. `luaS_init` calls `luaS_newlstr`
 // directly for that one string, then fills the cache, after which this is safe.
-luaS_new :: proc(L: ^Lua_State, s: string) -> ^TString {
+string_new :: proc(L: ^State, s: string) -> ^TString {
 	i := point2uint(raw_data(s)) % STRCACHE_N
 	row := &L.g.strcache[i]
 	for j in 0 ..< STRCACHE_M {
@@ -361,7 +361,7 @@ luaS_new :: proc(L: ^Lua_State, s: string) -> ^TString {
 	for j := STRCACHE_M - 1; j > 0; j -= 1 {
 		row[j] = row[j - 1]
 	}
-	row[0] = luaS_newlstr_str(L, s)
+	row[0] = string_newlstr_str(L, s)
 	return row[0]
 }
 
@@ -371,13 +371,13 @@ luaS_new :: proc(L: ^Lua_State, s: string) -> ^TString {
 // data bytes are left uninitialized (the host fills them); the metatable starts nil
 // and every user value starts nil so a GC that runs before the host populates them
 // never scans garbage. Returns nil on allocation failure (the caller raises).
-luaS_newudata :: proc(L: ^Lua_State, size: uint, nuvalue: int) -> ^Udata {
+string_newudata :: proc(L: ^State, size: uint, nuvalue: int) -> ^Udata {
 	// Guard the trailing-block arithmetic against wrapping past the address space --
 	// reference Lua's `luaM_toobig` check. `size_udata` would otherwise overflow.
 	if size > MAX_SIZE - size_udata(nuvalue, 0) {
-		luaG_runerror(L, "memory allocation error: block too big")
+		debug_runerror(L, "memory allocation error: block too big")
 	}
-	o := luaC_newobj(L, VUSERDATA, size_udata(nuvalue, size))
+	o := gc_newobj(L, VUSERDATA, size_udata(nuvalue, size))
 	if o == nil {
 		return nil
 	}
@@ -399,7 +399,7 @@ luaS_newudata :: proc(L: ^Lua_State, size: uint, nuvalue: int) -> ^Udata {
 // Unlink a short string from its intern-table bucket just before it's freed --
 // reference Lua's `luaS_remove`. Long strings are never in the table, so the GC
 // only calls this for short ones.
-luaS_remove :: proc(L: ^Lua_State, ts: ^TString) {
+string_remove :: proc(L: ^State, ts: ^TString) {
 	tb := &L.g.strt
 	p := &tb.hash[str_mod(ts.hash, tb.size)]
 	for p^ != ts {
@@ -412,7 +412,7 @@ luaS_remove :: proc(L: ^Lua_State, ts: ^TString) {
 // Drop any cache entries about to be collected -- reference Lua's
 // `luaS_clearcache`, run in the GC's atomic phase before sweeping. A white entry
 // would dangle after the sweep, so we replace it with the always-live memerrmsg.
-luaS_clearcache :: proc(g: ^Global_State) {
+string_clearcache :: proc(g: ^Global_State) {
 	for i in 0 ..< STRCACHE_N {
 		for j in 0 ..< STRCACHE_M {
 			p := g.strcache[i][j]
@@ -427,7 +427,7 @@ luaS_clearcache :: proc(g: ^Global_State) {
 // bucket array, creates and *fixes* the memory-error message (so it lives
 // forever and never needs allocation to report), then primes every cache slot
 // with that message so `luaS_new` can safely dereference any slot from now on.
-luaS_init :: proc(L: ^Lua_State) -> Thread_Status {
+string_init :: proc(L: ^State) -> Thread_Status {
 	g := L.g
 	tb := &g.strt
 	block := state_realloc(L, nil, 0, uint(MINSTRTABSIZE) * size_of(^TString))
@@ -440,11 +440,11 @@ luaS_init :: proc(L: ^Lua_State) -> Thread_Status {
 	tb.nuse = 0
 
 	// Create memerrmsg directly (bypassing the still-empty cache), then fix it.
-	g.memerrmsg = luaS_newlstr_str(L, MEMERRMSG)
+	g.memerrmsg = string_newlstr_str(L, MEMERRMSG)
 	if g.memerrmsg == nil {
 		return throw(L, .Err_Mem)
 	}
-	luaC_fix(L, obj2gco(g.memerrmsg))
+	gc_fix(L, obj2gco(g.memerrmsg))
 
 	for i in 0 ..< STRCACHE_N {
 		for j in 0 ..< STRCACHE_M {

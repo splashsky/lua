@@ -508,11 +508,11 @@ table_value :: #force_inline proc "contextless" (o: ^TValue) -> ^Table {
 	return (^Table)(o.value_.gc)
 }
 
-thread_value :: #force_inline proc "contextless" (o: ^TValue) -> ^Lua_State {
-	return (^Lua_State)(o.value_.gc)
+thread_value :: #force_inline proc "contextless" (o: ^TValue) -> ^State {
+	return (^State)(o.value_.gc)
 }
 
-lua_closure_value :: #force_inline proc "contextless" (o: ^TValue) -> ^LClosure {
+api_closure_value :: #force_inline proc "contextless" (o: ^TValue) -> ^LClosure {
 	return (^LClosure)(o.value_.gc)
 }
 
@@ -536,20 +536,20 @@ cfunction_value :: #force_inline proc "contextless" (o: ^TValue) -> C_Function {
 // how `"10" + 5` and userdata operators work), and on integer division/modulo by
 // zero we raise the same runtime error the VM does. `lua_arith` is the public
 // entry point that reaches this.
-luaO_arith :: proc(L: ^Lua_State, op: int, p1, p2: ^TValue, res: int) {
+object_arith :: proc(L: ^State, op: int, p1, p2: ^TValue, res: int) {
 	r, st := raw_arith(Arith_Op(op), p1, p2)
 	switch st {
 	case .Ok:
 		set_obj(stack_value(L, res), &r)
 	case .Div_By_Zero:
 		if Arith_Op(op) == .IDiv {
-			luaG_runerror(L, "attempt to perform 'n//0'")
+			debug_runerror(L, "attempt to perform 'n//0'")
 		} else {
-			luaG_runerror(L, "attempt to perform 'n%%0'")
+			debug_runerror(L, "attempt to perform 'n%%0'")
 		}
 	case .No_Number:
 		// Map the operator selector onto its metamethod event (they share order).
-		luaT_trybinTM(L, p1, p2, res, (op - LUA_OPADD) + TM_ADD)
+		tm_trybinTM(L, p1, p2, res, (op - OPADD) + TM_ADD)
 	}
 }
 
@@ -567,7 +567,7 @@ luaO_arith :: proc(L: ^Lua_State, op: int, p1, p2: ^TValue, res: int) {
 // pacing arithmetic matches bit for bit.
 
 // ceil(log2(x)): the smallest n with x <= (1 << n). Reference `luaO_ceillog2`.
-luaO_ceillog2 :: proc "contextless" (x: u32) -> u8 {
+object_ceillog2 :: proc "contextless" (x: u32) -> u8 {
 	// log_2[i-1] = ceil(log2(i)) for i in 1..256.
 	@(static, rodata)
 	log_2 := [256]u8 {
@@ -598,7 +598,7 @@ luaO_ceillog2 :: proc "contextless" (x: u32) -> u8 {
 }
 
 // Encode a value as a floating-point byte (eeeexxxx). Reference `luaO_codeparam`.
-luaO_codeparam :: proc "contextless" (p: uint) -> u8 {
+object_codeparam :: proc "contextless" (p: uint) -> u8 {
 	// The overflow ceiling from reference: 0x1F << (0xF - 7 - 1), times 100.
 	if p >= (uint(0x1F) << (0xF - 7 - 1)) * 100 {
 		return 0xFF // saturate to the maximum representable value
@@ -607,13 +607,13 @@ luaO_codeparam :: proc "contextless" (p: uint) -> u8 {
 	if q < 0x10 {
 		return u8(q) // subnormal: exponent bits already zero
 	}
-	log := u32(luaO_ceillog2(q + 1)) - 5 // q >= 0x10 => ceil(log2(q+1)) >= 5
+	log := u32(object_ceillog2(q + 1)) - 5 // q >= 0x10 => ceil(log2(q+1)) >= 5
 	return u8(((q >> log) - 0x10) | ((log + 1) << 4))
 }
 
 // Compute `p% * x` for a float-coded `p`, saturating at MAX_LMEM. Reference
 // `luaO_applyparam`.
-luaO_applyparam :: proc "contextless" (p: u8, x: L_Mem) -> L_Mem {
+object_applyparam :: proc "contextless" (p: u8, x: L_Mem) -> L_Mem {
 	m := L_Mem(p & 0xF) // mantissa
 	e := int(p >> 4) // exponent
 	if e > 0 { // normalized?
@@ -737,7 +737,7 @@ raw_equal :: proc "contextless" (t1, t2: ^TValue) -> bool {
 	case VNUMFLT:
 		return flt_value(t1) == flt_value(t2)
 	case VSHRSTR, VLNGSTR:
-		return luaS_eqstr(str_value(t1), str_value(t2))
+		return string_eqstr(str_value(t1), str_value(t2))
 	case:
 		// Tables, closures, userdata, threads: raw equality is pointer identity.
 		return t1.value_.gc == t2.value_.gc
@@ -995,7 +995,7 @@ strx_to_number :: proc(s: []byte) -> (Number, int, bool) {
 }
 
 // The pure-Odin runtime has no libc locale. This is intentionally the C locale.
-lua_getlocaledecpoint :: proc "contextless" () -> byte {
+api_getlocaledecpoint :: proc "contextless" () -> byte {
 	return '.'
 }
 
@@ -2911,7 +2911,7 @@ raw_arith :: #force_inline proc "contextless" (op: Arith_Op, p1, p2: ^TValue) ->
 // encoding with room to spare. Reference Lua's `UTF8BUFFSZ`.
 UTF8BUFFSZ :: 8
 
-luaO_utf8esc :: proc "contextless" (buff: []byte, x: u32) -> int {
+object_utf8esc :: proc "contextless" (buff: []byte, x: u32) -> int {
 	n := 1 // number of bytes emitted so far
 	if x < 0x80 {
 		// Plain ASCII: a single byte, dropped at the very end of the buffer.
@@ -2957,12 +2957,12 @@ luaO_utf8esc :: proc "contextless" (buff: []byte, x: u32) -> int {
 
 // The size of the on-stack scratch space inside `Buff_FS`. Reference Lua's
 // `BUFVFS = LUA_IDSIZE + N2S_BUFF_SZ + 95`.
-BUFVFS :: LUA_IDSIZE + N2S_BUFF_SZ + 95
+BUFVFS :: IDSIZE + N2S_BUFF_SZ + 95
 
 // The formatting buffer. It starts life pointing at its own inline `space`; only
 // if the result outgrows that does it switch to a heap block via the allocator.
 Buff_FS :: struct {
-	L:        ^Lua_State,
+	L:        ^State,
 	b:        [^]u8, // current buffer (either &space[0] or a heap block)
 	buffsize: uint, // capacity of `b`
 	blen:     uint, // bytes used so far
@@ -2971,7 +2971,7 @@ Buff_FS :: struct {
 }
 
 @(private = "file")
-buff_init :: proc(L: ^Lua_State, buff: ^Buff_FS) {
+buff_init :: proc(L: ^State, buff: ^Buff_FS) {
 	buff.L = L
 	buff.b = ([^]u8)(&buff.space[0])
 	buff.buffsize = BUFVFS
@@ -3041,7 +3041,7 @@ buff_add_num :: proc(buff: ^Buff_FS, o: ^TValue) {
 // and pushes it. It runs under `run_protected` because `luaS_newlstr` can raise on
 // OOM; catching it here lets `buff_clear` still free the dynamic buffer.
 @(private = "file")
-buff_push :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
+buff_push :: proc(L: ^State, ud: rawptr) -> Thread_Status {
 	buff := (^Buff_FS)(ud)
 	if buff.err == 1 {
 		// Allocation failed mid-format: surface a memory error to this boundary.
@@ -3053,7 +3053,7 @@ buff_push :: proc(L: ^Lua_State, ud: rawptr) -> Thread_Status {
 		dots := "..."
 		buff_add(buff, ([^]u8)(raw_data(dots)), 3)
 	}
-	ts := luaS_newlstr(L, buff.b, buff.blen)
+	ts := string_newlstr(L, buff.b, buff.blen)
 	set_string(stack_value(L, L.top), ts)
 	L.top += 1
 	return .Ok
@@ -3149,7 +3149,7 @@ fmt_arg_to_ptr :: proc(a: any) -> rawptr {
 
 // The formatter proper. Scans `fmt`, copying literal runs verbatim and expanding
 // each recognized `%` conversion by consuming the next positional argument.
-luaO_pushvfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> ^TString {
+object_pushvfstring :: proc(L: ^State, fmt: string, args: ..any) -> ^TString {
 	buff: Buff_FS
 	buff_init(L, &buff)
 	ai := 0 // next argument index
@@ -3198,7 +3198,7 @@ luaO_pushvfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> ^TString {
 		case 'U':
 			x := u32(fmt_arg_to_int(args[ai]));ai += 1
 			ubuf: [UTF8BUFFSZ]u8
-			ln := luaO_utf8esc(ubuf[:], x)
+			ln := object_utf8esc(ubuf[:], x)
 			buff_add(&buff, ([^]u8)(&ubuf[UTF8BUFFSZ - ln]), uint(ln))
 		case '%':
 			pct := [1]u8{'%'}
@@ -3218,8 +3218,8 @@ luaO_pushvfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> ^TString {
 // longjmp'd. Since our `luaO_pushvfstring` returns nil on a caught memory error, we
 // re-raise it to the enclosing boundary here so callers see faithful error
 // propagation.
-luaO_pushfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> ^TString {
-	ts := luaO_pushvfstring(L, fmt, ..args)
+object_pushfstring :: proc(L: ^State, fmt: string, args: ..any) -> ^TString {
+	ts := object_pushvfstring(L, fmt, ..args)
 	if ts == nil {
 		throw(L, .Err_Mem)
 	}
@@ -3237,7 +3237,7 @@ luaO_pushfstring :: proc(L: ^Lua_State, fmt: string, args: ..any) -> ^TString {
 //   else -> a literal chunk of source; shown as [string "first line..."]
 // It writes into `out` (capacity should be `LUA_IDSIZE`) and returns the number of
 // bytes written (no NUL is required by our callers, which slice by the return).
-luaO_chunkid :: proc(out: []u8, source: string) -> int {
+object_chunkid :: proc(out: []u8, source: string) -> int {
 	RETS :: "..."
 	PRE :: "[string \""
 	POS :: "\"]"

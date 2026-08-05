@@ -29,8 +29,8 @@ MSG_INVALID :: "invalid UTF-8 code"
 // The one-line contextless cast we reuse in every entry point, matching the
 // pattern established by the other stdlib files.
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
-	return (^lua.Lua_State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
+	return (^lua.State)(Lp)
 }
 
 // Is this byte a UTF-8 continuation byte (10xxxxxx)? Reference `iscont`.
@@ -124,30 +124,30 @@ utf8_decode :: proc "contextless" (s: []u8, start: int, strict: bool) -> (next: 
 utf8_len :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
+	s := transmute([]u8)aux_checklstring(L, 1)
 	ln := len(s)
-	posi := u_posrelat(luaL_optinteger(L, 2, 1), ln)
-	posj := u_posrelat(luaL_optinteger(L, 3, -1), ln)
-	lax := lua.lua_toboolean(L, 4)
+	posi := u_posrelat(aux_optinteger(L, 2, 1), ln)
+	posj := u_posrelat(aux_optinteger(L, 3, -1), ln)
+	lax := lua.api_toboolean(L, 4)
 	// Reference folds a `--posi` / `--posj` into these argument checks. We keep the
 	// same bounds but decrement explicitly so the byte indices below are 0-based.
-	luaL_argcheck(L, 1 <= posi, 2, "initial position out of bounds")
+	aux_argcheck(L, 1 <= posi, 2, "initial position out of bounds")
 	posi -= 1
-	luaL_argcheck(L, posi <= lua.Integer(ln), 2, "initial position out of bounds")
+	aux_argcheck(L, posi <= lua.Integer(ln), 2, "initial position out of bounds")
 	posj -= 1
-	luaL_argcheck(L, posj < lua.Integer(ln), 3, "final position out of bounds")
+	aux_argcheck(L, posj < lua.Integer(ln), 3, "final position out of bounds")
 	n: lua.Integer = 0
 	for posi <= posj {
 		next, _, ok := utf8_decode(s, int(posi), !lax)
 		if !ok {
-			luaL_pushfail(L) // return fail ...
-			lua.lua_pushinteger(L, posi + 1) // ... and the offending position
+			aux_pushfail(L) // return fail ...
+			lua.api_pushinteger(L, posi + 1) // ... and the offending position
 			return 2
 		}
 		posi = lua.Integer(next)
 		n += 1
 	}
-	lua.lua_pushinteger(L, n)
+	lua.api_pushinteger(L, n)
 	return 1
 }
 
@@ -157,30 +157,30 @@ utf8_len :: proc "c" (Lp: rawptr) -> i32 {
 utf8_codepoint :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
+	s := transmute([]u8)aux_checklstring(L, 1)
 	ln := len(s)
-	posi := u_posrelat(luaL_optinteger(L, 2, 1), ln)
-	pose := u_posrelat(luaL_optinteger(L, 3, posi), ln)
-	lax := lua.lua_toboolean(L, 4)
-	luaL_argcheck(L, posi >= 1, 2, "out of bounds")
-	luaL_argcheck(L, pose <= lua.Integer(ln), 3, "out of bounds")
+	posi := u_posrelat(aux_optinteger(L, 2, 1), ln)
+	pose := u_posrelat(aux_optinteger(L, 3, posi), ln)
+	lax := lua.api_toboolean(L, 4)
+	aux_argcheck(L, posi >= 1, 2, "out of bounds")
+	aux_argcheck(L, pose <= lua.Integer(ln), 3, "out of bounds")
 	if posi > pose {
 		return 0 // empty interval: return no values
 	}
 	if pose - posi >= lua.Integer(max(i32)) {
-		luaL_error(L, "string slice too long")
+		aux_error(L, "string slice too long")
 	}
 	n := int(pose - posi) + 1 // upper bound on the number of results
-	luaL_checkstack(L, n, "string slice too long")
+	aux_checkstack(L, n, "string slice too long")
 	n = 0
 	se := int(pose) // byte index just past the last character we consider
 	i := int(posi) - 1
 	for i < se {
 		next, code, ok := utf8_decode(s, i, !lax)
 		if !ok {
-			luaL_error(L, MSG_INVALID)
+			aux_error(L, MSG_INVALID)
 		}
-		lua.lua_pushinteger(L, lua.Integer(code))
+		lua.api_pushinteger(L, lua.Integer(code))
 		i = next
 		n += 1
 	}
@@ -190,10 +190,10 @@ utf8_codepoint :: proc "c" (Lp: rawptr) -> i32 {
 // Check argument `arg` is a valid code point and push it as its UTF-8 encoding.
 // Reference `pushutfchar`; the "%U" formatter does the actual UTF-8 escaping.
 @(private = "file")
-push_utf_char :: proc(L: ^lua.Lua_State, arg: int) {
-	code := lua.Unsigned(luaL_checkinteger(L, arg))
-	luaL_argcheck(L, code <= MAXUTF, arg, "value out of range")
-	lua.lua_pushfstring(L, "%U", i64(code))
+push_utf_char :: proc(L: ^lua.State, arg: int) {
+	code := lua.Unsigned(aux_checkinteger(L, arg))
+	aux_argcheck(L, code <= MAXUTF, arg, "value out of range")
+	lua.api_pushfstring(L, "%U", i64(code))
 }
 
 // utf8.char(n1, n2, ...) -> the concatenation of each argument's UTF-8 encoding.
@@ -202,18 +202,18 @@ push_utf_char :: proc(L: ^lua.Lua_State, arg: int) {
 utf8_char :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	n := lua.lua_gettop(L) // number of arguments
+	n := lua.api_gettop(L) // number of arguments
 	if n == 1 {
 		// Fast path for the common single-character case: push it directly.
 		push_utf_char(L, 1)
 	} else {
 		b: Buffer
-		luaL_buffinit(L, &b)
+		aux_buffinit(L, &b)
 		for i in 1 ..= n {
 			push_utf_char(L, i)
-			luaL_addvalue(&b)
+			aux_addvalue(&b)
 		}
-		luaL_pushresult(&b)
+		aux_pushresult(&b)
 	}
 	return 1
 }
@@ -225,16 +225,16 @@ utf8_char :: proc "c" (Lp: rawptr) -> i32 {
 utf8_offset :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
+	s := transmute([]u8)aux_checklstring(L, 1)
 	ln := len(s)
-	n := luaL_checkinteger(L, 2)
+	n := aux_checkinteger(L, 2)
 	// The default starting position depends on the search direction: forward
 	// searches start at the front, backward searches start just past the end.
 	default_posi: lua.Integer = n >= 0 ? 1 : lua.Integer(ln) + 1
-	posi := u_posrelat(luaL_optinteger(L, 3, default_posi), ln)
-	luaL_argcheck(L, 1 <= posi, 3, "position out of bounds")
+	posi := u_posrelat(aux_optinteger(L, 3, default_posi), ln)
+	aux_argcheck(L, 1 <= posi, 3, "position out of bounds")
 	posi -= 1
-	luaL_argcheck(L, posi <= lua.Integer(ln), 3, "position out of bounds")
+	aux_argcheck(L, posi <= lua.Integer(ln), 3, "position out of bounds")
 	if n == 0 {
 		// Walk back to the beginning of the byte sequence containing `posi`.
 		for posi > 0 && u_iscont(u_byte(s, int(posi))) {
@@ -242,7 +242,7 @@ utf8_offset :: proc "c" (Lp: rawptr) -> i32 {
 		}
 	} else {
 		if u_iscont(u_byte(s, int(posi))) {
-			luaL_error(L, "initial position is a continuation byte")
+			aux_error(L, "initial position is a continuation byte")
 		}
 		if n < 0 {
 			// Move backward over |n| character starts.
@@ -266,20 +266,20 @@ utf8_offset :: proc "c" (Lp: rawptr) -> i32 {
 	}
 	if n != 0 {
 		// We ran off an end before locating the requested character.
-		luaL_pushfail(L)
+		aux_pushfail(L)
 		return 1
 	}
-	lua.lua_pushinteger(L, posi + 1) // initial byte position (1-based)
+	lua.api_pushinteger(L, posi + 1) // initial byte position (1-based)
 	if (u_byte(s, int(posi)) & 0x80) != 0 {
 		// Multi-byte character: advance to its final continuation byte.
 		if u_iscont(u_byte(s, int(posi))) {
-			luaL_error(L, "initial position is a continuation byte")
+			aux_error(L, "initial position is a continuation byte")
 		}
 		for u_iscont(u_byte(s, int(posi) + 1)) {
 			posi += 1
 		}
 	}
-	lua.lua_pushinteger(L, posi + 1) // final byte position (1-based)
+	lua.api_pushinteger(L, posi + 1) // final byte position (1-based)
 	return 2
 }
 
@@ -287,10 +287,10 @@ utf8_offset :: proc "c" (Lp: rawptr) -> i32 {
 // position of the previous character, it advances to and decodes the next one.
 // Reference `iter_aux`.
 @(private = "file")
-iter_aux :: proc(L: ^lua.Lua_State, strict: bool) -> i32 {
-	s := transmute([]u8)luaL_checklstring(L, 1)
+iter_aux :: proc(L: ^lua.State, strict: bool) -> i32 {
+	s := transmute([]u8)aux_checklstring(L, 1)
 	ln := len(s)
-	n := lua.Unsigned(lua.lua_tointeger(L, 2))
+	n := lua.Unsigned(lua.api_tointeger(L, 2))
 	if n < lua.Unsigned(ln) {
 		// Skip past the continuation bytes of the character we just returned.
 		for u_iscont(u_byte(s, int(n))) {
@@ -303,10 +303,10 @@ iter_aux :: proc(L: ^lua.Lua_State, strict: bool) -> i32 {
 	}
 	next, code, ok := utf8_decode(s, int(n), strict)
 	if !ok || u_iscont(u_byte(s, next)) {
-		luaL_error(L, MSG_INVALID)
+		aux_error(L, MSG_INVALID)
 	}
-	lua.lua_pushinteger(L, lua.Integer(n + 1))
-	lua.lua_pushinteger(L, lua.Integer(code))
+	lua.api_pushinteger(L, lua.Integer(n + 1))
+	lua.api_pushinteger(L, lua.Integer(code))
 	return 2
 }
 
@@ -328,12 +328,12 @@ iter_auxlax :: proc "c" (Lp: rawptr) -> i32 {
 iter_codes :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lax := lua.lua_toboolean(L, 2)
-	s := transmute([]u8)luaL_checkstring(L, 1)
-	luaL_argcheck(L, !u_iscont(u_byte(s, 0)), 1, MSG_INVALID)
-	lua.lua_pushcfunction(L, lax ? iter_auxlax : iter_auxstrict)
-	lua.lua_pushvalue(L, 1)
-	lua.lua_pushinteger(L, 0)
+	lax := lua.api_toboolean(L, 2)
+	s := transmute([]u8)aux_checkstring(L, 1)
+	aux_argcheck(L, !u_iscont(u_byte(s, 0)), 1, MSG_INVALID)
+	lua.api_pushcfunction(L, lax ? iter_auxlax : iter_auxstrict)
+	lua.api_pushvalue(L, 1)
+	lua.api_pushinteger(L, 0)
 	return 3
 }
 
@@ -352,15 +352,15 @@ utf8_funcs := []Reg {
 // are `[\0-\x7F\xC2-\xFD][\x80-\xBF]*`: a lead byte (ASCII, or a real multi-byte
 // lead in 0xC2..0xFD) followed by any run of continuation bytes. It contains an
 // embedded NUL, so we build it as an explicit byte slice rather than a literal.
-luaopen_utf8 :: proc "c" (Lp: rawptr) -> i32 {
+open_utf8 :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	luaL_newlib(L, utf8_funcs)
+	aux_newlib(L, utf8_funcs)
 	charpattern := []u8 {
 		'[', 0x00, '-', 0x7F, 0xC2, '-', 0xFD, ']',
 		'[', 0x80, '-', 0xBF, ']', '*',
 	}
-	lua.lua_pushlstring(L, charpattern)
-	lua.lua_setfield(L, -2, "charpattern")
+	lua.api_pushlstring(L, charpattern)
+	lua.api_setfield(L, -2, "charpattern")
 	return 1
 }

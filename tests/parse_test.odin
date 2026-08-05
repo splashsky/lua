@@ -25,7 +25,7 @@ import lua "luao:lua"
 // ---------------------------------------------------------------------------
 
 Parse_Fixture :: struct {
-	L:    ^lua.Lua_State,
+	L:    ^lua.State,
 	z:    lua.Zio,
 	buff: lua.Mbuffer,
 	dyd:  lua.Dyndata,
@@ -41,10 +41,10 @@ Parse_Job :: struct {
 	first: int,
 }
 
-parse_job_run :: proc(L: ^lua.Lua_State, ud: rawptr) -> lua.Thread_Status {
+parse_job_run :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	job := (^Parse_Job)(ud)
 	fx := job.fx
-	fx.cl = lua.luaY_parser(L, &fx.z, &fx.buff, &fx.dyd, job.name, job.first)
+	fx.cl = lua.parse_parser(L, &fx.z, &fx.buff, &fx.dyd, job.name, job.first)
 	return .Ok
 }
 

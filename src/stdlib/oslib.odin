@@ -35,8 +35,8 @@ when ODIN_OS == .Windows {
 }
 
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
-	return (^lua.Lua_State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
+	return (^lua.State)(Lp)
 }
 
 // This is the exact option set selected by the vendored loslib.c on each host.
@@ -411,13 +411,13 @@ timestamp_from_local :: proc(wall: Civil_Time, nominal: i64, wanted_dst: int) ->
 }
 
 @(private = "file")
-setfield :: proc(L: ^lua.Lua_State, key: string, value: i64) {
-	lua.lua_pushinteger(L, lua.Integer(value))
-	lua.lua_setfield(L, -2, key)
+setfield :: proc(L: ^lua.State, key: string, value: i64) {
+	lua.api_pushinteger(L, lua.Integer(value))
+	lua.api_setfield(L, -2, key)
 }
 
 @(private = "file")
-setallfields :: proc(L: ^lua.Lua_State, c: Civil_Time) {
+setallfields :: proc(L: ^lua.State, c: Civil_Time) {
 	setfield(L, "year", c.year)
 	setfield(L, "month", i64(c.month))
 	setfield(L, "day", i64(c.day))
@@ -427,46 +427,46 @@ setallfields :: proc(L: ^lua.Lua_State, c: Civil_Time) {
 	setfield(L, "yday", i64(c.yday + 1))
 	setfield(L, "wday", i64(c.wday + 1))
 	if c.isdst >= 0 {
-		lua.lua_pushboolean(L, c.isdst != 0)
-		lua.lua_setfield(L, -2, "isdst")
+		lua.api_pushboolean(L, c.isdst != 0)
+		lua.api_setfield(L, -2, "isdst")
 	}
 }
 
 @(private = "file")
-getboolfield :: proc(L: ^lua.Lua_State, key: string) -> int {
+getboolfield :: proc(L: ^lua.State, key: string) -> int {
 	res := -1
-	if lua.lua_getfield(L, -1, key) != lua.LUA_TNIL {
-		res = lua.lua_toboolean(L, -1) ? 1 : 0
+	if lua.api_getfield(L, -1, key) != lua.TNIL {
+		res = lua.api_toboolean(L, -1) ? 1 : 0
 	}
-	lua.lua_pop(L, 1)
+	lua.api_pop(L, 1)
 	return res
 }
 
 @(private = "file")
-getfield :: proc(L: ^lua.Lua_State, key: string, d: int, delta: int) -> int {
-	tp := lua.lua_getfield(L, -1, key)
-	res, isnum := lua.lua_tointegerx(L, -1)
+getfield :: proc(L: ^lua.State, key: string, d: int, delta: int) -> int {
+	tp := lua.api_getfield(L, -1, key)
+	res, isnum := lua.api_tointegerx(L, -1)
 	if !isnum {
-		if tp != lua.LUA_TNIL {
-			luaL_error(L, "field '%s' is not an integer", key)
+		if tp != lua.TNIL {
+			aux_error(L, "field '%s' is not an integer", key)
 		} else if d < 0 {
-			luaL_error(L, "field '%s' missing in date table", key)
+			aux_error(L, "field '%s' missing in date table", key)
 		}
 		res = lua.Integer(d)
 	} else {
 		ok := res >= 0 ? res - lua.Integer(delta) <= lua.Integer(max(i32)) :
 			lua.Integer(min(i32)) + lua.Integer(delta) <= res
 		if !ok {
-			luaL_error(L, "field '%s' is out-of-bound", key)
+			aux_error(L, "field '%s' is out-of-bound", key)
 		}
 		res -= lua.Integer(delta)
 	}
-	lua.lua_pop(L, 1)
+	lua.api_pop(L, 1)
 	return int(res)
 }
 
 @(private = "file")
-checkoption :: proc(L: ^lua.Lua_State, conv: []u8) -> int {
+checkoption :: proc(L: ^lua.State, conv: []u8) -> int {
 	option := STRFTIME_OPTIONS
 	oplen := 1
 	oi := 0
@@ -478,7 +478,7 @@ checkoption :: proc(L: ^lua.Lua_State, conv: []u8) -> int {
 		}
 		oi += oplen
 	}
-	luaL_argerror(L, 1, lua.lua_pushfstring(L, "invalid conversion specifier '%%%s'", string(conv)))
+	aux_argerror(L, 1, lua.api_pushfstring(L, "invalid conversion specifier '%%%s'", string(conv)))
 }
 
 @(private = "file")
@@ -520,9 +520,9 @@ zone_name :: proc(c: Civil_Time, dst: bool, buf: []u8) -> string {
 @(private = "file")
 add_num :: proc(B: ^Buffer, value: i64, width: int, unpadded: bool = false) {
 	if unpadded {
-		luaL_addstring(B, fmt.tprintf("%d", value))
+		aux_addstring(B, fmt.tprintf("%d", value))
 	} else {
-		luaL_addstring(B, fmt.tprintf("%0*d", width, value))
+		aux_addstring(B, fmt.tprintf("%0*d", width, value))
 	}
 }
 
@@ -532,32 +532,32 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 	ch := op[len(op) - 1]
 	zone_buf: [128]u8
 	switch ch {
-	case '%': luaL_addchar(B, '%')
-	case 'a': luaL_addstring(B, WDAY_SHORT[c.wday])
-	case 'A': luaL_addstring(B, WDAY_LONG[c.wday])
-	case 'b', 'h': luaL_addstring(B, MONTH_SHORT[c.month - 1])
-	case 'B': luaL_addstring(B, MONTH_LONG[c.month - 1])
+	case '%': aux_addchar(B, '%')
+	case 'a': aux_addstring(B, WDAY_SHORT[c.wday])
+	case 'A': aux_addstring(B, WDAY_LONG[c.wday])
+	case 'b', 'h': aux_addstring(B, MONTH_SHORT[c.month - 1])
+	case 'B': aux_addstring(B, MONTH_LONG[c.month - 1])
 	case 'c':
 		if alternate && op[0] == '#' {
-			luaL_addstring(B, fmt.tprintf("%s, %s %02d, %04d %02d:%02d:%02d",
+			aux_addstring(B, fmt.tprintf("%s, %s %02d, %04d %02d:%02d:%02d",
 				WDAY_LONG[c.wday], MONTH_LONG[c.month - 1], c.day, c.year, c.hour, c.minute, c.second))
 		} else {
-			luaL_addstring(B, WDAY_SHORT[c.wday])
-			luaL_addchar(B, ' ')
-			luaL_addstring(B, MONTH_SHORT[c.month - 1])
-			luaL_addchar(B, ' ')
-			if c.day < 10 do luaL_addchar(B, ' ')
-			luaL_addstring(B, fmt.tprintf("%d %02d:%02d:%02d %04d",
+			aux_addstring(B, WDAY_SHORT[c.wday])
+			aux_addchar(B, ' ')
+			aux_addstring(B, MONTH_SHORT[c.month - 1])
+			aux_addchar(B, ' ')
+			if c.day < 10 do aux_addchar(B, ' ')
+			aux_addstring(B, fmt.tprintf("%d %02d:%02d:%02d %04d",
 				c.day, c.hour, c.minute, c.second, c.year))
 		}
 	case 'x':
 		if alternate && op[0] == '#' {
-			luaL_addstring(B, fmt.tprintf("%s, %s %02d, %04d",
+			aux_addstring(B, fmt.tprintf("%s, %s %02d, %04d",
 				WDAY_LONG[c.wday], MONTH_LONG[c.month - 1], c.day, c.year))
 		} else {
-			luaL_addstring(B, fmt.tprintf("%02d/%02d/%02d", c.month, c.day, floor_mod(c.year, 100)))
+			aux_addstring(B, fmt.tprintf("%02d/%02d/%02d", c.month, c.day, floor_mod(c.year, 100)))
 		}
-	case 'X': luaL_addstring(B, fmt.tprintf("%02d:%02d:%02d", c.hour, c.minute, c.second))
+	case 'X': aux_addstring(B, fmt.tprintf("%02d:%02d:%02d", c.hour, c.minute, c.second))
 	case 'd', 'e': add_num(B, i64(c.day), ch == 'e' ? 2 : 2, alternate || ch == 'e')
 	case 'H': add_num(B, i64(c.hour), 2, alternate)
 	case 'I':
@@ -567,7 +567,7 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 	case 'j': add_num(B, i64(c.yday + 1), 3, alternate)
 	case 'm': add_num(B, i64(c.month), 2, alternate)
 	case 'M': add_num(B, i64(c.minute), 2, alternate)
-	case 'p': luaL_addstring(B, c.hour < 12 ? "AM" : "PM")
+	case 'p': aux_addstring(B, c.hour < 12 ? "AM" : "PM")
 	case 'S': add_num(B, i64(c.second), 2, alternate)
 	case 'U': add_num(B, i64((c.yday + 7 - c.wday) / 7), 2, alternate)
 	case 'w': add_num(B, i64(c.wday), 1, true)
@@ -592,23 +592,23 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 			sign = "-"
 			off = -off
 		}
-		luaL_addstring(B, fmt.tprintf("%s%02d%02d", sign, off / 3600, off % 3600 / 60))
+		aux_addstring(B, fmt.tprintf("%s%02d%02d", sign, off / 3600, off % 3600 / 60))
 	case 'Z':
-		luaL_addstring(B, zone_name(c, !utc && c.isdst == 1, zone_buf[:]))
+		aux_addstring(B, zone_name(c, !utc && c.isdst == 1, zone_buf[:]))
 	case:
 		// C99 aliases admitted on non-Windows hosts.
 		switch ch {
 		case 'C': add_num(B, floor_div(c.year, 100), 2)
-		case 'D': luaL_addstring(B, fmt.tprintf("%02d/%02d/%02d", c.month, c.day, floor_mod(c.year, 100)))
-		case 'F': luaL_addstring(B, fmt.tprintf("%04d-%02d-%02d", c.year, c.month, c.day))
-		case 'n': luaL_addchar(B, '\n')
+		case 'D': aux_addstring(B, fmt.tprintf("%02d/%02d/%02d", c.month, c.day, floor_mod(c.year, 100)))
+		case 'F': aux_addstring(B, fmt.tprintf("%04d-%02d-%02d", c.year, c.month, c.day))
+		case 'n': aux_addchar(B, '\n')
 		case 'r':
 			h := c.hour % 12
 			if h == 0 do h = 12
-			luaL_addstring(B, fmt.tprintf("%02d:%02d:%02d %s", h, c.minute, c.second, c.hour < 12 ? "AM" : "PM"))
-		case 'R': luaL_addstring(B, fmt.tprintf("%02d:%02d", c.hour, c.minute))
-		case 't': luaL_addchar(B, '\t')
-		case 'T': luaL_addstring(B, fmt.tprintf("%02d:%02d:%02d", c.hour, c.minute, c.second))
+			aux_addstring(B, fmt.tprintf("%02d:%02d:%02d %s", h, c.minute, c.second, c.hour < 12 ? "AM" : "PM"))
+		case 'R': aux_addstring(B, fmt.tprintf("%02d:%02d", c.hour, c.minute))
+		case 't': aux_addchar(B, '\t')
+		case 'T': aux_addstring(B, fmt.tprintf("%02d:%02d:%02d", c.hour, c.minute, c.second))
 		case 'u': add_num(B, i64(c.wday == 0 ? 7 : c.wday), 1, true)
 		case 'V': add_num(B, i64((c.yday + 10 - (c.wday == 0 ? 7 : c.wday)) / 7), 2)
 		}
@@ -616,16 +616,16 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 }
 
 @(private = "file")
-l_checktime :: proc(L: ^lua.Lua_State, arg: int) -> i64 {
-	return i64(luaL_checkinteger(L, arg))
+l_checktime :: proc(L: ^lua.State, arg: int) -> i64 {
+	return i64(aux_checkinteger(L, arg))
 }
 
 @(private = "file")
 os_date :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_optlstring(L, 1, "%c")
-	t := lua.lua_isnoneornil(L, 2) ? time.to_unix_seconds(time.now()) : l_checktime(L, 2)
+	s := transmute([]u8)aux_optlstring(L, 1, "%c")
+	t := lua.api_isnoneornil(L, 2) ? time.to_unix_seconds(time.now()) : l_checktime(L, 2)
 	i := 0
 	utc := false
 	if len(s) > 0 && s[0] == '!' {
@@ -636,10 +636,10 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 		// UCRT's localtime rejects negative time_t values on this installation;
 		// gmtime accepts them. Preserve that asymmetric reference boundary.
 		if !utc && t < 0 {
-			luaL_error(L, "date result cannot be represented in this installation")
+			aux_error(L, "date result cannot be represented in this installation")
 		}
 		if utc && t < -43200 {
-			luaL_error(L, "date result cannot be represented in this installation")
+			aux_error(L, "date result cannot be represented in this installation")
 		}
 	}
 	c: Civil_Time
@@ -680,19 +680,19 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 		}
 	}
 	if !ok {
-		luaL_error(L, "date result cannot be represented in this installation")
+		aux_error(L, "date result cannot be represented in this installation")
 	}
 	rest := s[i:]
 	if string(rest) == "*t" {
-		lua.lua_createtable(L, 0, 9)
+		lua.api_createtable(L, 0, 9)
 		setallfields(L, c)
 		return 1
 	}
 	b: Buffer
-	luaL_buffinit(L, &b)
+	aux_buffinit(L, &b)
 	for p := 0; p < len(rest); {
 		if rest[p] != '%' {
-			luaL_addchar(&b, rest[p])
+			aux_addchar(&b, rest[p])
 			p += 1
 			continue
 		}
@@ -701,7 +701,7 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 		format_conversion(&b, string(rest[p:p + n]), c, utc)
 		p += n
 	}
-	luaL_pushresult(&b)
+	aux_pushresult(&b)
 	return 1
 }
 
@@ -710,11 +710,11 @@ os_time :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	t: i64
-	if lua.lua_isnoneornil(L, 1) {
+	if lua.api_isnoneornil(L, 1) {
 		t = time.to_unix_seconds(time.now())
 	} else {
-		luaL_checktype(L, 1, lua.LUA_TTABLE)
-		lua.lua_settop(L, 1)
+		aux_checktype(L, 1, lua.TTABLE)
+		lua.api_settop(L, 1)
 		year := i64(getfield(L, "year", -1, 1900) + 1900)
 		month := getfield(L, "month", -1, 1) + 1
 		day := getfield(L, "day", -1, 0)
@@ -727,19 +727,19 @@ os_time :: proc "c" (Lp: rawptr) -> i32 {
 		ok: bool
 		t, normalized, ok = timestamp_from_local(wall, nominal, wanted_dst)
 		if !ok {
-			luaL_error(L, "time result cannot be represented in this installation")
+			aux_error(L, "time result cannot be represented in this installation")
 		}
 		setallfields(L, normalized)
 	}
 	when ODIN_OS == .Windows {
 		if t < 0 {
-			luaL_error(L, "time result cannot be represented in this installation")
+			aux_error(L, "time result cannot be represented in this installation")
 		}
 	}
 	if t == -1 {
-		luaL_error(L, "time result cannot be represented in this installation")
+		aux_error(L, "time result cannot be represented in this installation")
 	}
-	lua.lua_pushinteger(L, lua.Integer(t))
+	lua.api_pushinteger(L, lua.Integer(t))
 	return 1
 }
 
@@ -747,7 +747,7 @@ os_time :: proc "c" (Lp: rawptr) -> i32 {
 os_difftime :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.lua_pushnumber(L, lua.Number(l_checktime(L, 1) - l_checktime(L, 2)))
+	lua.api_pushnumber(L, lua.Number(l_checktime(L, 1) - l_checktime(L, 2)))
 	return 1
 }
 
@@ -760,13 +760,13 @@ os_clock :: proc "c" (Lp: rawptr) -> i32 {
 		if win32.GetProcessTimes(win32.GetCurrentProcess(), &creation, &exiting, &kernel, &user) {
 			k := transmute(u64le)kernel
 			u := transmute(u64le)user
-			lua.lua_pushnumber(L, lua.Number(f64(k + u) / 10_000_000.0))
+			lua.api_pushnumber(L, lua.Number(f64(k + u) / 10_000_000.0))
 			return 1
 		}
 	}
 	// tick_now is elapsed rather than CPU time, but is a sane standard-library
 	// fallback on targets whose OS bindings expose no process accounting.
-	lua.lua_pushnumber(L, lua.Number(f64(time.tick_now()._nsec) / 1e9))
+	lua.api_pushnumber(L, lua.Number(f64(time.tick_now()._nsec) / 1e9))
 	return 1
 }
 
@@ -774,10 +774,10 @@ os_clock :: proc "c" (Lp: rawptr) -> i32 {
 os_getenv :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	name := luaL_checkstring(L, 1)
+	name := aux_checkstring(L, 1)
 	value, found := os.lookup_env(name, context.temp_allocator)
-	if found do lua.lua_pushstring(L, value)
-	else do lua.lua_pushnil(L)
+	if found do lua.api_pushstring(L, value)
+	else do lua.api_pushnil(L)
 	return 1
 }
 
@@ -785,17 +785,17 @@ os_getenv :: proc "c" (Lp: rawptr) -> i32 {
 os_remove :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	filename := luaL_checkstring(L, 1)
+	filename := aux_checkstring(L, 1)
 	err := os.remove(filename)
-	return luaL_fileresult(L, err == nil, filename, true, err)
+	return aux_fileresult(L, err == nil, filename, true, err)
 }
 
 @(private = "file")
 os_rename :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	err := os.rename(luaL_checkstring(L, 1), luaL_checkstring(L, 2))
-	return luaL_fileresult(L, err == nil, "", false, err)
+	err := os.rename(aux_checkstring(L, 1), aux_checkstring(L, 2))
+	return aux_fileresult(L, err == nil, "", false, err)
 }
 
 @(private = "file")
@@ -804,10 +804,10 @@ os_tmpname :: proc "c" (Lp: rawptr) -> i32 {
 	L := state(Lp)
 	f, err := os.create_temp_file("", "lua-*")
 	if err != nil {
-		luaL_error(L, "unable to generate a unique filename")
+		aux_error(L, "unable to generate a unique filename")
 	}
 	name := os.name(f)
-	lua.lua_pushstring(L, name)
+	lua.api_pushstring(L, name)
 	os.close(f)
 	when ODIN_OS == .Windows {
 		// core:os obtains a collision-free name by creating it. Windows Lua's
@@ -821,17 +821,17 @@ os_tmpname :: proc "c" (Lp: rawptr) -> i32 {
 os_execute :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.lua_isnoneornil(L, 1) {
+	if lua.api_isnoneornil(L, 1) {
 		when ODIN_OS == .Windows {
-			lua.lua_pushboolean(L, true) // cmd.exe is part of supported Windows.
+			lua.api_pushboolean(L, true) // cmd.exe is part of supported Windows.
 		} else {
 			f, err := os.open("/bin/sh")
-			lua.lua_pushboolean(L, err == nil)
+			lua.api_pushboolean(L, err == nil)
 			if f != nil do os.close(f)
 		}
 		return 1
 	}
-	cmd := luaL_checkstring(L, 1)
+	cmd := aux_checkstring(L, 1)
 	args := []string{"cmd.exe", "/c", cmd} if ODIN_OS == .Windows else []string{"/bin/sh", "-c", cmd}
 	desc := os.Process_Desc {
 		command = args,
@@ -841,13 +841,13 @@ os_execute :: proc "c" (Lp: rawptr) -> i32 {
 	}
 	p, err := os.process_start(desc)
 	if err != nil {
-		return luaL_execresult(L, -1, err)
+		return aux_execresult(L, -1, err)
 	}
 	result := shellproc.wait_process(p)
 	if result.err != nil {
-		return luaL_execresult(L, -1, result.err)
+		return aux_execresult(L, -1, result.err)
 	}
-	return luaL_execresult(L, result.code, nil, result.signaled)
+	return aux_execresult(L, result.code, nil, result.signaled)
 }
 
 @(private = "file")
@@ -857,16 +857,16 @@ locale_names := []string{"all", "collate", "ctype", "monetary", "numeric", "time
 os_setlocale :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	_ = luaL_checkoption(L, 2, "all", locale_names)
-	if lua.lua_isnoneornil(L, 1) {
-		lua.lua_pushstring(L, "C")
+	_ = aux_checkoption(L, 2, "all", locale_names)
+	if lua.api_isnoneornil(L, 1) {
+		lua.api_pushstring(L, "C")
 		return 1
 	}
-	requested := luaL_checkstring(L, 1)
+	requested := aux_checkstring(L, 1)
 	if requested == "" || requested == "C" || requested == "POSIX" {
-		lua.lua_pushstring(L, "C")
+		lua.api_pushstring(L, "C")
 	} else {
-		lua.lua_pushnil(L)
+		lua.api_pushnil(L)
 	}
 	return 1
 }
@@ -876,12 +876,12 @@ os_exit :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	status := 0
-	if lua.lua_isboolean(L, 1) {
-		status = lua.lua_toboolean(L, 1) ? 0 : 1
+	if lua.api_isboolean(L, 1) {
+		status = lua.api_toboolean(L, 1) ? 0 : 1
 	} else {
-		status = int(luaL_optinteger(L, 1, 0))
+		status = int(aux_optinteger(L, 1, 0))
 	}
-	if lua.lua_toboolean(L, 2) {
+	if lua.api_toboolean(L, 2) {
 		lua.close_state(L)
 	}
 	host.process_exit(status)
@@ -902,9 +902,9 @@ syslib := []Reg {
 	{"tmpname", os_tmpname},
 }
 
-luaopen_os :: proc "c" (Lp: rawptr) -> i32 {
+open_os :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	luaL_newlib(L, syslib)
+	aux_newlib(L, syslib)
 	return 1
 }

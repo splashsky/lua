@@ -81,7 +81,7 @@ new_state_baseline :: proc(t: ^testing.T) {
 	testing.expect_value(t, L.ci, 0)
 	base := L.frames[0]
 	testing.expect_value(t, base.func, 0)
-	testing.expect_value(t, base.top, 1 + lua.LUA_MINSTACK)
+	testing.expect_value(t, base.top, 1 + lua.MINSTACK)
 	testing.expect(t, (base.callstatus & lua.CIST_C) != 0, "base frame must be a C frame")
 }
 

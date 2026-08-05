@@ -17,5 +17,5 @@ make_seed :: proc(g: ^Global_State) -> u32 {
 	mem.copy(&buff[0], &p0, size_of(uintptr))
 	mem.copy(&buff[size_of(uintptr)], &p1, size_of(uintptr))
 	mem.copy(&buff[2 * size_of(uintptr)], &p2, size_of(uintptr))
-	return luaS_hash(&buff[0], len(buff), 0)
+	return string_hash(&buff[0], len(buff), 0)
 }

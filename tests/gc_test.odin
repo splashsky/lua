@@ -19,7 +19,7 @@ import lua "luao:lua"
 // Count the objects currently on the sweepable `allgc` list. This is the
 // population the collector reclaims from; fixed objects live on a separate list
 // and are intentionally not counted here.
-count_allgc :: proc(L: ^lua.Lua_State) -> int {
+count_allgc :: proc(L: ^lua.State) -> int {
 	n := 0
 	for o := L.g.allgc; o != nil; o = o.next {
 		n += 1
@@ -30,7 +30,7 @@ count_allgc :: proc(L: ^lua.Lua_State) -> int {
 // Push a collectable object onto the main thread's stack so the collector will
 // treat it as reachable. Returns the stack index used, so the caller can later
 // drop the root by popping.
-push_root :: proc(L: ^lua.Lua_State, o: ^lua.GCObject) -> int {
+push_root :: proc(L: ^lua.State, o: ^lua.GCObject) -> int {
 	idx := L.top
 	lua.set_gc(lua.stack_value(L, idx), o)
 	L.top += 1
@@ -39,7 +39,7 @@ push_root :: proc(L: ^lua.Lua_State, o: ^lua.GCObject) -> int {
 
 // Drop the topmost root pushed by `push_root`, clearing the slot so a later
 // collection can't still see it.
-pop_root :: proc(L: ^lua.Lua_State) {
+pop_root :: proc(L: ^lua.State) {
 	L.top -= 1
 	lua.set_nil(lua.stack_value(L, L.top))
 }
@@ -54,7 +54,7 @@ gc_collects_unreferenced :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 
 	base := count_allgc(L)
-	_ = lua.luaH_new(L) // created, never rooted
+	_ = lua.table_new(L) // created, never rooted
 	testing.expect_value(t, count_allgc(L), base + 1)
 
 	lua.gc_full(L, false)
@@ -72,7 +72,7 @@ gc_keeps_rooted :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 
 	base := count_allgc(L)
-	tbl := lua.luaH_new(L)
+	tbl := lua.table_new(L)
 	push_root(L, lua.obj2gco(tbl))
 
 	lua.gc_full(L, false)
@@ -94,20 +94,20 @@ gc_keeps_value_reachable_through_table :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	tbl := lua.luaH_new(L)
+	tbl := lua.table_new(L)
 	push_root(L, lua.obj2gco(tbl))
 
-	s := lua.luaS_new(L, "reachable-through-a-table-value")
+	s := lua.string_new(L, "reachable-through-a-table-value")
 	sv: lua.TValue
 	lua.set_gc(&sv, lua.obj2gco(s))
-	st := lua.luaH_setint(L, tbl, 1, &sv)
+	st := lua.table_setint(L, tbl, 1, &sv)
 	testing.expect(t, st == .Ok)
 
 	lua.gc_full(L, false)
 
 	// The string must still be retrievable and intact after collection.
 	res: lua.TValue
-	lua.luaH_getint(tbl, 1, &res)
+	lua.table_getint(tbl, 1, &res)
 	testing.expect(t, lua.is_collectable(&res), "value survived as a GC object")
 	got := lua.str_value(&res)
 	testing.expect_value(t, str_contents(got), "reachable-through-a-table-value")
@@ -133,6 +133,6 @@ gc_never_collects_fixed_strings :: proc(t: ^testing.T) {
 
 	// Still the same live object with the same content after collecting.
 	testing.expect_value(t, str_contents(fixed), "__index")
-	again := lua.luaS_new(L, "__index")
+	again := lua.string_new(L, "__index")
 	testing.expect(t, again == fixed, "fixed metamethod name stays interned")
 }

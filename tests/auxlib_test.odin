@@ -10,7 +10,7 @@ import "core:testing"
 import lua "luao:lua"
 import aux "luao:stdlib"
 
-aux_new :: proc() -> ^lua.Lua_State {
+aux_new :: proc() -> ^lua.State {
 	return lua.new_state(lua.default_allocator())
 }
 
@@ -21,31 +21,31 @@ aux_ref_freelist_reuse :: proc(t: ^testing.T) {
 	L := aux_new()
 	defer lua.close_state(L)
 
-	lua.lua_newtable(L) // the ref table lives at stack index 1
+	lua.api_newtable(L) // the ref table lives at stack index 1
 	tref := 1
 
-	lua.lua_pushstring(L, "hello")
-	r1 := aux.luaL_ref(L, tref)
-	lua.lua_pushinteger(L, 42)
-	r2 := aux.luaL_ref(L, tref)
+	lua.api_pushstring(L, "hello")
+	r1 := aux.aux_ref(L, tref)
+	lua.api_pushinteger(L, 42)
+	r2 := aux.aux_ref(L, tref)
 	testing.expect(t, r1 != r2, "distinct references must differ")
 
 	// Both values are retrievable through the table by their reference key.
-	lua.lua_rawgeti(L, tref, lua.Integer(r1))
-	s, _ := lua.lua_tolstring(L, -1)
+	lua.api_rawgeti(L, tref, lua.Integer(r1))
+	s, _ := lua.api_tolstring(L, -1)
 	testing.expect(t, s == "hello", "ref r1 must retrieve its value")
-	lua.lua_pop(L, 1)
+	lua.api_pop(L, 1)
 
 	// Free r1 and take a new reference: it must reuse r1's slot (freelist at t[1]).
-	aux.luaL_unref(L, tref, r1)
-	lua.lua_pushstring(L, "again")
-	r3 := aux.luaL_ref(L, tref)
+	aux.aux_unref(L, tref, r1)
+	lua.api_pushstring(L, "again")
+	r3 := aux.aux_ref(L, tref)
 	testing.expect(t, r3 == r1, "a fresh ref must reuse the freed slot")
 
 	// nil has the fixed REFNIL reference.
-	lua.lua_pushnil(L)
-	rn := aux.luaL_ref(L, tref)
-	testing.expect(t, rn == aux.LUA_REFNIL, "nil must map to LUA_REFNIL")
+	lua.api_pushnil(L)
+	rn := aux.aux_ref(L, tref)
+	testing.expect(t, rn == aux.REFNIL, "nil must map to REFNIL")
 }
 
 // The growable Buffer must produce the exact bytes fed to it, even well past the
@@ -56,14 +56,14 @@ aux_buffer_spills_correctly :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 
 	B: aux.Buffer
-	aux.luaL_buffinit(L, &B)
+	aux.aux_buffinit(L, &B)
 	N :: 5000 // comfortably larger than LUAL_BUFFERSIZE (1024)
 	for i in 0 ..< N {
-		aux.luaL_addchar(&B, u8('a' + u8(i % 26)))
+		aux.aux_addchar(&B, u8('a' + u8(i % 26)))
 	}
-	aux.luaL_pushresult(&B)
+	aux.aux_pushresult(&B)
 
-	s, ok := lua.lua_tolstring(L, -1)
+	s, ok := lua.api_tolstring(L, -1)
 	testing.expect(t, ok, "result must be a string")
 	testing.expect(t, len(s) == N, "length must match bytes added")
 	good := true
@@ -83,15 +83,15 @@ aux_udata_metatable_roundtrip :: proc(t: ^testing.T) {
 	L := aux_new()
 	defer lua.close_state(L)
 
-	p := lua.lua_newuserdatauv(L, 16, 0) // userdata on top
-	created := aux.luaL_newmetatable(L, "MyType") // metatable on top, userdata below
+	p := lua.api_newuserdatauv(L, 16, 0) // userdata on top
+	created := aux.aux_newmetatable(L, "MyType") // metatable on top, userdata below
 	testing.expect(t, created, "first newmetatable must create the table")
-	lua.lua_setmetatable(L, -2) // attach metatable to the userdata
+	lua.api_setmetatable(L, -2) // attach metatable to the userdata
 
-	got := aux.luaL_testudata(L, -1, "MyType")
+	got := aux.aux_testudata(L, -1, "MyType")
 	testing.expect(t, got == p, "matching type name must return the payload")
 
-	wrong := aux.luaL_testudata(L, -1, "OtherType")
+	wrong := aux.aux_testudata(L, -1, "OtherType")
 	testing.expect(t, wrong == nil, "mismatched type name must return nil")
 }
 
@@ -101,19 +101,19 @@ aux_loadstring_runs :: proc(t: ^testing.T) {
 	L := aux_new()
 	defer lua.close_state(L)
 
-	st := aux.luaL_loadstring(L, "return 3 + 4")
+	st := aux.aux_loadstring(L, "return 3 + 4")
 	testing.expect(t, st == .Ok, "chunk must compile")
-	call := lua.lua_pcall(L, 0, 1, 0)
+	call := lua.api_pcall(L, 0, 1, 0)
 	testing.expect(t, call == .Ok, "chunk must run")
-	n, ok := lua.lua_tointegerx(L, -1)
+	n, ok := lua.api_tointegerx(L, -1)
 	testing.expect(t, ok && n == 7, "3 + 4 must be 7")
 }
 
 // A trivial registered function is callable through a table built by newlib.
 aux_test_fn :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	L := (^lua.Lua_State)(Lp)
-	lua.lua_pushinteger(L, 99)
+	L := (^lua.State)(Lp)
+	lua.api_pushinteger(L, 99)
 	return 1
 }
 
@@ -123,9 +123,9 @@ aux_newlib_registers :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 
 	regs := []aux.Reg{{"f", aux_test_fn}}
-	aux.luaL_newlib(L, regs) // table with field f on top
-	lua.lua_getfield(L, -1, "f")
-	lua.lua_call(L, 0, 1)
-	n, ok := lua.lua_tointegerx(L, -1)
+	aux.aux_newlib(L, regs) // table with field f on top
+	lua.api_getfield(L, -1, "f")
+	lua.api_call(L, 0, 1)
+	n, ok := lua.api_tointegerx(L, -1)
 	testing.expect(t, ok && n == 99, "registered function must run")
 }

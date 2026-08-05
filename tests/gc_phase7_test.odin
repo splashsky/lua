@@ -26,11 +26,11 @@ gc_phase7_collect_reclaims_batch :: proc(t: ^testing.T) {
 
 	base := count_allgc(L)
 	for _ in 0 ..< 8 {
-		_ = lua.luaH_new(L) // created, never rooted
+		_ = lua.table_new(L) // created, never rooted
 	}
 	testing.expect(t, count_allgc(L) >= base + 8, "the batch is live before collecting")
 
-	lua.lua_gc(L, lua.LUA_GCCOLLECT)
+	lua.api_gc(L, lua.GCCOLLECT)
 	testing.expect_value(t, count_allgc(L), base)
 }
 
@@ -46,15 +46,15 @@ gc_phase7_api_count_and_running :: proc(t: ^testing.T) {
 
 	// A living state holds some bytes; COUNT is #bytes >> 10, so it is >= 0 and
 	// COUNTB (the low 10 bits) is always in range.
-	testing.expect(t, lua.lua_gc(L, lua.LUA_GCCOUNT) >= 0, "COUNT is non-negative")
-	countb := lua.lua_gc(L, lua.LUA_GCCOUNTB)
+	testing.expect(t, lua.api_gc(L, lua.GCCOUNT) >= 0, "COUNT is non-negative")
+	countb := lua.api_gc(L, lua.GCCOUNTB)
 	testing.expect(t, 0 <= countb && countb < 1024, "COUNTB is the low 10 bits")
 
-	testing.expect_value(t, lua.lua_gc(L, lua.LUA_GCISRUNNING), 1)
-	lua.lua_gc(L, lua.LUA_GCSTOP)
-	testing.expect_value(t, lua.lua_gc(L, lua.LUA_GCISRUNNING), 0)
-	lua.lua_gc(L, lua.LUA_GCRESTART)
-	testing.expect_value(t, lua.lua_gc(L, lua.LUA_GCISRUNNING), 1)
+	testing.expect_value(t, lua.api_gc(L, lua.GCISRUNNING), 1)
+	lua.api_gc(L, lua.GCSTOP)
+	testing.expect_value(t, lua.api_gc(L, lua.GCISRUNNING), 0)
+	lua.api_gc(L, lua.GCRESTART)
+	testing.expect_value(t, lua.api_gc(L, lua.GCISRUNNING), 1)
 }
 
 // Switching collection mode returns the *previous* mode and installs the new one,
@@ -68,11 +68,11 @@ gc_phase7_api_mode_switch :: proc(t: ^testing.T) {
 	defer lua.close_state(L)
 
 	// Fresh states run the incremental collector.
-	prev := lua.lua_gc(L, lua.LUA_GCGEN)
-	testing.expect_value(t, prev, lua.LUA_GCINC)
+	prev := lua.api_gc(L, lua.GCGEN)
+	testing.expect_value(t, prev, lua.GCINC)
 
-	prev2 := lua.lua_gc(L, lua.LUA_GCINC)
-	testing.expect_value(t, prev2, lua.LUA_GCGEN)
+	prev2 := lua.api_gc(L, lua.GCINC)
+	testing.expect_value(t, prev2, lua.GCGEN)
 }
 
 // A GC parameter must round-trip through `lua_gc` PARAM: reading returns the
@@ -88,8 +88,8 @@ gc_phase7_api_param_roundtrip :: proc(t: ^testing.T) {
 	// the coded value at 100%, recovering (approximately) what we stored; the
 	// float-coding is lossy at the low bits, so we assert it is in the right
 	// neighborhood rather than bit-exact.
-	_ = lua.lua_gc(L, lua.LUA_GCPARAM, lua.LUA_GCPPAUSE, 300)
-	got := lua.lua_gc(L, lua.LUA_GCPARAM, lua.LUA_GCPPAUSE, -1)
+	_ = lua.api_gc(L, lua.GCPARAM, lua.GCPPAUSE, 300)
+	got := lua.api_gc(L, lua.GCPARAM, lua.GCPPAUSE, -1)
 	testing.expect(t, 290 <= got && got <= 310, "the pause parameter round-trips")
 }
 
@@ -103,42 +103,42 @@ gc_phase7_weak_value_cleared :: proc(t: ^testing.T) {
 	testing.expect(t, L != nil)
 	defer lua.close_state(L)
 
-	weak := lua.luaH_new(L)
+	weak := lua.table_new(L)
 	push_root(L, lua.obj2gco(weak))
-	mt := lua.luaH_new(L)
+	mt := lua.table_new(L)
 	push_root(L, lua.obj2gco(mt))
 
 	// Install __mode = "v" on the weak table's metatable.
-	modekey := lua.luaS_new(L, "__mode")
+	modekey := lua.string_new(L, "__mode")
 	mk: lua.TValue
 	lua.set_string(&mk, modekey)
 	mv: lua.TValue
-	lua.set_string(&mv, lua.luaS_new(L, "v"))
-	testing.expect(t, lua.luaH_set(L, mt, &mk, &mv) == .Ok)
+	lua.set_string(&mv, lua.string_new(L, "v"))
+	testing.expect(t, lua.table_set(L, mt, &mk, &mv) == .Ok)
 	weak.metatable = mt
 
 	// key 1 -> a table nothing else references (weakly held, must be cleared).
-	orphan := lua.luaH_new(L)
+	orphan := lua.table_new(L)
 	ov: lua.TValue
 	lua.set_gc(&ov, lua.obj2gco(orphan))
-	testing.expect(t, lua.luaH_setint(L, weak, 1, &ov) == .Ok)
+	testing.expect(t, lua.table_setint(L, weak, 1, &ov) == .Ok)
 
 	// key 2 -> a string we root on the stack (strongly held, must survive).
-	kept := lua.luaS_new(L, "kept-weak-value")
+	kept := lua.string_new(L, "kept-weak-value")
 	push_root(L, lua.obj2gco(kept))
 	kv: lua.TValue
 	lua.set_string(&kv, kept)
-	testing.expect(t, lua.luaH_setint(L, weak, 2, &kv) == .Ok)
+	testing.expect(t, lua.table_setint(L, weak, 2, &kv) == .Ok)
 
-	lua.lua_gc(L, lua.LUA_GCCOLLECT)
+	lua.api_gc(L, lua.GCCOLLECT)
 
 	// The orphaned value is gone; the rooted value is intact.
 	r1: lua.TValue
-	lua.luaH_getint(weak, 1, &r1)
+	lua.table_getint(weak, 1, &r1)
 	testing.expect(t, lua.is_nil(&r1), "weak value with no other reference was cleared")
 
 	r2: lua.TValue
-	lua.luaH_getint(weak, 2, &r2)
+	lua.table_getint(weak, 2, &r2)
 	testing.expect(t, lua.is_collectable(&r2), "rooted weak value survived")
 	testing.expect_value(t, str_contents(lua.str_value(&r2)), "kept-weak-value")
 }
@@ -172,23 +172,23 @@ gc_phase7_finalizer_runs :: proc(t: ^testing.T) {
 
 	// Root the metatable for as long as we are wiring it up; the finalizable
 	// table itself is deliberately left unrooted.
-	mt := lua.luaH_new(L)
+	mt := lua.table_new(L)
 	push_root(L, lua.obj2gco(mt))
 
-	gckey := lua.luaS_new(L, "__gc")
+	gckey := lua.string_new(L, "__gc")
 	gk: lua.TValue
 	lua.set_string(&gk, gckey)
 	gv: lua.TValue
 	lua.set_c_function(&gv, phase7_finalizer)
-	testing.expect(t, lua.luaH_set(L, mt, &gk, &gv) == .Ok)
+	testing.expect(t, lua.table_set(L, mt, &gk, &gv) == .Ok)
 
-	victim := lua.luaH_new(L)
+	victim := lua.table_new(L)
 	victim.metatable = mt
-	lua.luaC_checkfinalizer(L, lua.obj2gco(victim), mt)
+	lua.gc_checkfinalizer(L, lua.obj2gco(victim), mt)
 
 	// The victim is unreachable: collecting must separate it, resurrect it for
 	// the finalizer, and run `__gc` once.
-	lua.lua_gc(L, lua.LUA_GCCOLLECT)
+	lua.api_gc(L, lua.GCCOLLECT)
 	testing.expect_value(t, phase7_final_count, 1)
 
 	pop_root(L) // drop the metatable root

@@ -31,7 +31,7 @@ Src_Reader :: struct {
 	done: bool,
 }
 
-src_read :: proc "c" (L: ^lua.Lua_State, data: rawptr, size: ^uint) -> [^]u8 {
+src_read :: proc "c" (L: ^lua.State, data: rawptr, size: ^uint) -> [^]u8 {
 	r := (^Src_Reader)(data)
 	if r.done {
 		size^ = 0
@@ -46,7 +46,7 @@ src_read :: proc "c" (L: ^lua.Lua_State, data: rawptr, size: ^uint) -> [^]u8 {
 // `buff`/`z`/`rd`, so this struct must outlive the scan (it lives on the test's
 // stack, which it does).
 Lexer_Fixture :: struct {
-	L:    ^lua.Lua_State,
+	L:    ^lua.State,
 	ls:   lua.LexState,
 	z:    lua.Zio,
 	buff: lua.Mbuffer,
@@ -61,13 +61,13 @@ setup_lexer :: proc(fx: ^Lexer_Fixture, source: string, chunkname: string) {
 	fx.L = L
 
 	// Source name, rooted on the stack.
-	srcname := lua.luaS_newlstr(L, ([^]u8)(raw_data(chunkname)), uint(len(chunkname)))
+	srcname := lua.string_newlstr(L, ([^]u8)(raw_data(chunkname)), uint(len(chunkname)))
 	sv := lua.stack_value(L, L.top)
 	lua.set_string(sv, srcname)
 	L.top += 1
 
 	// Anchor table, rooted on the stack.
-	h := lua.luaH_new(L)
+	h := lua.table_new(L)
 	hv := lua.stack_value(L, L.top)
 	lua.set_gc(hv, lua.obj2gco(h))
 	L.top += 1
@@ -83,7 +83,7 @@ setup_lexer :: proc(fx: ^Lexer_Fixture, source: string, chunkname: string) {
 	fx.ls.buff = &fx.buff
 	fx.ls.h = h
 	first := lua.zio_getc(&fx.z)
-	lua.luaX_setinput(L, &fx.ls, &fx.z, srcname, first)
+	lua.lex_setinput(L, &fx.ls, &fx.z, srcname, first)
 }
 
 // Release everything the fixture owns. `close_state` frees all remaining objects
@@ -95,7 +95,7 @@ teardown_lexer :: proc(fx: ^Lexer_Fixture) {
 
 // Pull the next token and hand back the whole Token (code + seminfo).
 scan :: proc(fx: ^Lexer_Fixture) -> lua.Token {
-	lua.luaX_next(&fx.ls)
+	lua.lex_next(&fx.ls)
 	return fx.ls.t
 }
 
@@ -403,7 +403,7 @@ lex_lookahead_does_not_consume :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	scan(&fx) // consume 'local' as the current token
-	ahead := lua.luaX_lookahead(&fx.ls)
+	ahead := lua.lex_lookahead(&fx.ls)
 	testing.expect_value(t, ahead, lua.TK_NAME)
 	// The following next() must return the same token the look-ahead peeked.
 	nxt := scan(&fx)
@@ -423,10 +423,10 @@ Lex_Job :: struct {
 	n:  int,
 }
 
-lex_job_run :: proc(L: ^lua.Lua_State, ud: rawptr) -> lua.Thread_Status {
+lex_job_run :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	job := (^Lex_Job)(ud)
 	for _ in 0 ..< job.n {
-		lua.luaX_next(job.ls)
+		lua.lex_next(job.ls)
 		if job.ls.t.token == lua.TK_EOS {
 			break
 		}
@@ -504,12 +504,12 @@ utf8esc_encodes_right_justified :: proc(t: ^testing.T) {
 	buff: [8]u8
 
 	// ASCII: one byte at the very end.
-	n := lua.luaO_utf8esc(buff[:], 0x48) // 'H'
+	n := lua.object_utf8esc(buff[:], 0x48) // 'H'
 	testing.expect_value(t, n, 1)
 	testing.expect_value(t, buff[8 - 1], 0x48)
 
 	// Euro sign U+20AC -> E2 82 AC, right-justified.
-	n = lua.luaO_utf8esc(buff[:], 0x20AC)
+	n = lua.object_utf8esc(buff[:], 0x20AC)
 	testing.expect_value(t, n, 3)
 	testing.expect_value(t, buff[8 - 3], 0xE2)
 	testing.expect_value(t, buff[8 - 2], 0x82)
@@ -526,30 +526,30 @@ pushfstring_formats_faithfully :: proc(t: ^testing.T) {
 		testing.expect_value(t, got, want)
 	}
 
-	check(t, lua.luaO_pushfstring(L, "%s=%d", "x", 42), "x=42")
-	check(t, lua.luaO_pushfstring(L, "%c%c", 65, 66), "AB")
-	check(t, lua.luaO_pushfstring(L, "100%%"), "100%")
-	check(t, lua.luaO_pushfstring(L, "U+%U", 0x48), "U+H")
-	check(t, lua.luaO_pushfstring(L, "%f", 1.5), "1.5")
+	check(t, lua.object_pushfstring(L, "%s=%d", "x", 42), "x=42")
+	check(t, lua.object_pushfstring(L, "%c%c", 65, 66), "AB")
+	check(t, lua.object_pushfstring(L, "100%%"), "100%")
+	check(t, lua.object_pushfstring(L, "U+%U", 0x48), "U+H")
+	check(t, lua.object_pushfstring(L, "%f", 1.5), "1.5")
 }
 
 @(test)
 chunkid_renders_markers :: proc(t: ^testing.T) {
-	out: [lua.LUA_IDSIZE]u8
+	out: [lua.IDSIZE]u8
 
 	// '=' : verbatim name.
-	w := lua.luaO_chunkid(out[:], "=stdin")
+	w := lua.object_chunkid(out[:], "=stdin")
 	testing.expect_value(t, string(out[:w]), "stdin")
 
 	// '@' : file name shown as-is when short.
-	w = lua.luaO_chunkid(out[:], "@main.lua")
+	w = lua.object_chunkid(out[:], "@main.lua")
 	testing.expect_value(t, string(out[:w]), "main.lua")
 
 	// literal source : wrapped as [string "..."].
-	w = lua.luaO_chunkid(out[:], "print(1)")
+	w = lua.object_chunkid(out[:], "print(1)")
 	testing.expect_value(t, string(out[:w]), "[string \"print(1)\"]")
 
 	// literal multi-line source : only the first line, then "...".
-	w = lua.luaO_chunkid(out[:], "line1\nline2")
+	w = lua.object_chunkid(out[:], "line1\nline2")
 	testing.expect_value(t, string(out[:w]), "[string \"line1...\"]")
 }

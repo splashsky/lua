@@ -41,8 +41,8 @@ import "core:math"
 import lua "luao:lua"
 
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.Lua_State {
-	return (^lua.Lua_State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
+	return (^lua.State)(Lp)
 }
 
 // ===========================================================================
@@ -90,8 +90,8 @@ posrelatI :: proc(pos: lua.Integer, l: int) -> int {
 // Optional *ending* position, defaulting to `def`, clipped into [0, len]. Reference
 // `getendpos`. Note the different clipping range from `posrelatI`.
 @(private = "file")
-getendpos :: proc(L: ^lua.Lua_State, arg: int, def: lua.Integer, l: int) -> int {
-	pos := luaL_optinteger(L, arg, def)
+getendpos :: proc(L: ^lua.State, arg: int, def: lua.Integer, l: int) -> int {
+	pos := aux_optinteger(L, arg, def)
 	if pos > lua.Integer(l) {
 		return l
 	} else if pos >= 0 {
@@ -107,8 +107,8 @@ getendpos :: proc(L: ^lua.Lua_State, arg: int, def: lua.Integer, l: int) -> int 
 str_len :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := luaL_checklstring(L, 1)
-	lua.lua_pushinteger(L, lua.Integer(len(s)))
+	s := aux_checklstring(L, 1)
+	lua.api_pushinteger(L, lua.Integer(len(s)))
 	return 1
 }
 
@@ -116,14 +116,14 @@ str_len :: proc "c" (Lp: rawptr) -> i32 {
 str_sub :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
+	s := transmute([]u8)aux_checklstring(L, 1)
 	l := len(s)
-	start := posrelatI(luaL_checkinteger(L, 2), l)
+	start := posrelatI(aux_checkinteger(L, 2), l)
 	end := getendpos(L, 3, -1, l)
 	if start <= end {
-		lua.lua_pushlstring(L, s[start - 1:end])
+		lua.api_pushlstring(L, s[start - 1:end])
 	} else {
-		lua.lua_pushstring(L, "")
+		lua.api_pushstring(L, "")
 	}
 	return 1
 }
@@ -132,14 +132,14 @@ str_sub :: proc "c" (Lp: rawptr) -> i32 {
 str_reverse :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
+	s := transmute([]u8)aux_checklstring(L, 1)
 	l := len(s)
 	b: Buffer
-	p := luaL_buffinitsize(L, &b, uint(l))
+	p := aux_buffinitsize(L, &b, uint(l))
 	for i in 0 ..< l {
 		p[i] = s[l - i - 1]
 	}
-	luaL_pushresultsize(&b, uint(l))
+	aux_pushresultsize(&b, uint(l))
 	return 1
 }
 
@@ -147,14 +147,14 @@ str_reverse :: proc "c" (Lp: rawptr) -> i32 {
 str_lower :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
+	s := transmute([]u8)aux_checklstring(L, 1)
 	l := len(s)
 	b: Buffer
-	p := luaL_buffinitsize(L, &b, uint(l))
+	p := aux_buffinitsize(L, &b, uint(l))
 	for i in 0 ..< l {
 		p[i] = u8(lua.to_lower(int(s[i])))
 	}
-	luaL_pushresultsize(&b, uint(l))
+	aux_pushresultsize(&b, uint(l))
 	return 1
 }
 
@@ -162,14 +162,14 @@ str_lower :: proc "c" (Lp: rawptr) -> i32 {
 str_upper :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
+	s := transmute([]u8)aux_checklstring(L, 1)
 	l := len(s)
 	b: Buffer
-	p := luaL_buffinitsize(L, &b, uint(l))
+	p := aux_buffinitsize(L, &b, uint(l))
 	for i in 0 ..< l {
 		p[i] = u8(lua.to_upper(int(s[i])))
 	}
-	luaL_pushresultsize(&b, uint(l))
+	aux_pushresultsize(&b, uint(l))
 	return 1
 }
 
@@ -177,21 +177,21 @@ str_upper :: proc "c" (Lp: rawptr) -> i32 {
 str_rep :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
-	n := luaL_checkinteger(L, 2)
-	sep := transmute([]u8)luaL_optlstring(L, 3, "")
+	s := transmute([]u8)aux_checklstring(L, 1)
+	n := aux_checkinteger(L, 2)
+	sep := transmute([]u8)aux_optlstring(L, 3, "")
 	length := uint(len(s))
 	lsep := uint(len(sep))
 	if n <= 0 {
-		lua.lua_pushstring(L, "")
+		lua.api_pushstring(L, "")
 	} else if length > lua.MAX_SIZE - lsep || (length + lsep) > lua.MAX_SIZE / uint(n) {
 		// The two-part test mirrors reference: first make sure `len + lsep` itself
 		// doesn't overflow, then make sure multiplying by `n` won't either.
-		luaL_error(L, "resulting string too large")
+		aux_error(L, "resulting string too large")
 	} else {
 		totallen := uint(n) * (length + lsep) - lsep
 		b: Buffer
-		p := luaL_buffinitsize(L, &b, totallen)
+		p := aux_buffinitsize(L, &b, totallen)
 		off := 0
 		// First n-1 copies each followed by the separator...
 		for k := n; k > 1; k -= 1 {
@@ -208,7 +208,7 @@ str_rep :: proc "c" (Lp: rawptr) -> i32 {
 		for j in 0 ..< len(s) {
 			p[off + j] = s[j]
 		}
-		luaL_pushresultsize(&b, totallen)
+		aux_pushresultsize(&b, totallen)
 	}
 	return 1
 }
@@ -217,18 +217,18 @@ str_rep :: proc "c" (Lp: rawptr) -> i32 {
 str_byte :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
+	s := transmute([]u8)aux_checklstring(L, 1)
 	l := len(s)
-	pi := luaL_optinteger(L, 2, 1)
+	pi := aux_optinteger(L, 2, 1)
 	posi := posrelatI(pi, l)
 	pose := getendpos(L, 3, pi, l)
 	if posi > pose {
 		return 0 // empty interval; return no values
 	}
 	n := pose - posi + 1
-	luaL_checkstack(L, n, "string slice too long")
+	aux_checkstack(L, n, "string slice too long")
 	for i in 0 ..< n {
-		lua.lua_pushinteger(L, lua.Integer(s[posi + i - 1]))
+		lua.api_pushinteger(L, lua.Integer(s[posi + i - 1]))
 	}
 	return i32(n)
 }
@@ -237,15 +237,15 @@ str_byte :: proc "c" (Lp: rawptr) -> i32 {
 str_char :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	n := lua.lua_gettop(L)
+	n := lua.api_gettop(L)
 	b: Buffer
-	p := luaL_buffinitsize(L, &b, uint(n))
+	p := aux_buffinitsize(L, &b, uint(n))
 	for i in 1 ..= n {
-		c := lua.Unsigned(luaL_checkinteger(L, i))
-		luaL_argcheck(L, c <= 255, i, "value out of range")
+		c := lua.Unsigned(aux_checkinteger(L, i))
+		aux_argcheck(L, c <= 255, i, "value out of range")
 		p[i - 1] = u8(c)
 	}
-	luaL_pushresultsize(&b, uint(n))
+	aux_pushresultsize(&b, uint(n))
 	return 1
 }
 
@@ -267,15 +267,15 @@ dump_writer :: proc "c" (Lp: rawptr, p: rawptr, sz: uint, ud: rawptr) -> i32 {
 	st := (^Str_Writer)(ud)
 	if !st.init {
 		st.init = true
-		luaL_buffinit(L, &st.B)
+		aux_buffinit(L, &st.B)
 	}
 	if p == nil {
 		// Finishing the dump: push the accumulated bytes and move them into the
 		// reserved slot 1.
-		luaL_pushresult(&st.B)
-		lua.lua_replace(L, 1)
+		aux_pushresult(&st.B)
+		lua.api_replace(L, 1)
 	} else {
-		luaL_addlstring(&st.B, (cast([^]u8)p)[:sz])
+		aux_addlstring(&st.B, (cast([^]u8)p)[:sz])
 	}
 	return 0
 }
@@ -285,18 +285,18 @@ str_dump :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	st: Str_Writer
-	strip := lua.lua_toboolean(L, 2)
-	luaL_argcheck(
+	strip := lua.api_toboolean(L, 2)
+	aux_argcheck(
 		L,
-		lua.lua_type(L, 1) == lua.LUA_TFUNCTION && !lua.lua_iscfunction(L, 1),
+		lua.api_type(L, 1) == lua.TFUNCTION && !lua.api_iscfunction(L, 1),
 		1,
 		"Lua function expected",
 	)
 	// Put the function on top and vacate slot 1 for the eventual result.
-	lua.lua_pushvalue(L, 1)
+	lua.api_pushvalue(L, 1)
 	st.init = false
-	lua.lua_dump(L, dump_writer, &st, strip)
-	lua.lua_settop(L, 1)
+	lua.api_dump(L, dump_writer, &st, strip)
+	lua.api_settop(L, 1)
 	return 1
 }
 
@@ -309,40 +309,40 @@ str_dump :: proc "c" (Lp: rawptr) -> i32 {
 // metamethod when coercion fails.
 
 @(private = "file")
-tonum :: proc(L: ^lua.Lua_State, arg: int) -> bool {
-	if lua.lua_type(L, arg) == lua.LUA_TNUMBER {
-		lua.lua_pushvalue(L, arg)
+tonum :: proc(L: ^lua.State, arg: int) -> bool {
+	if lua.api_type(L, arg) == lua.TNUMBER {
+		lua.api_pushvalue(L, arg)
 		return true
 	} else {
-		s, ok := lua.lua_tolstring(L, arg)
+		s, ok := lua.api_tolstring(L, arg)
 		if !ok {
 			return false
 		}
 		// `lua_stringtonumber` returns len+1 on a fully-consumed numeric string.
-		return lua.lua_stringtonumber(L, s) == uint(len(s)) + 1
+		return lua.api_stringtonumber(L, s) == uint(len(s)) + 1
 	}
 }
 
 @(private = "file")
-trymt :: proc(L: ^lua.Lua_State, mtkey: string, opname: string) {
-	lua.lua_settop(L, 2) // back to the original two arguments
-	if lua.lua_type(L, 2) == lua.LUA_TSTRING || luaL_getmetafield(L, 2, mtkey) == lua.LUA_TNIL {
-		luaL_error(
+trymt :: proc(L: ^lua.State, mtkey: string, opname: string) {
+	lua.api_settop(L, 2) // back to the original two arguments
+	if lua.api_type(L, 2) == lua.TSTRING || aux_getmetafield(L, 2, mtkey) == lua.TNIL {
+		aux_error(
 			L,
 			"attempt to %s a '%s' with a '%s'",
 			opname,
-			luaL_typename(L, -2),
-			luaL_typename(L, -1),
+			aux_typename(L, -2),
+			aux_typename(L, -1),
 		)
 	}
-	lua.lua_insert(L, -3) // put the metamethod before its arguments
-	lua.lua_call(L, 2, 1)
+	lua.api_insert(L, -3) // put the metamethod before its arguments
+	lua.api_call(L, 2, 1)
 }
 
 @(private = "file")
-arith :: proc(L: ^lua.Lua_State, op: int, mtname: string, opname: string) -> i32 {
+arith :: proc(L: ^lua.State, op: int, mtname: string, opname: string) -> i32 {
 	if tonum(L, 1) && tonum(L, 2) {
-		lua.lua_arith(L, op) // result ends up on top
+		lua.api_arith(L, op) // result ends up on top
 	} else {
 		trymt(L, mtname, opname)
 	}
@@ -352,42 +352,42 @@ arith :: proc(L: ^lua.Lua_State, op: int, mtname: string, opname: string) -> i32
 @(private = "file")
 arith_add :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	return arith(state(Lp), lua.LUA_OPADD, "__add", "add")
+	return arith(state(Lp), lua.OPADD, "__add", "add")
 }
 @(private = "file")
 arith_sub :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	return arith(state(Lp), lua.LUA_OPSUB, "__sub", "sub")
+	return arith(state(Lp), lua.OPSUB, "__sub", "sub")
 }
 @(private = "file")
 arith_mul :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	return arith(state(Lp), lua.LUA_OPMUL, "__mul", "mul")
+	return arith(state(Lp), lua.OPMUL, "__mul", "mul")
 }
 @(private = "file")
 arith_mod :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	return arith(state(Lp), lua.LUA_OPMOD, "__mod", "mod")
+	return arith(state(Lp), lua.OPMOD, "__mod", "mod")
 }
 @(private = "file")
 arith_pow :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	return arith(state(Lp), lua.LUA_OPPOW, "__pow", "pow")
+	return arith(state(Lp), lua.OPPOW, "__pow", "pow")
 }
 @(private = "file")
 arith_div :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	return arith(state(Lp), lua.LUA_OPDIV, "__div", "div")
+	return arith(state(Lp), lua.OPDIV, "__div", "div")
 }
 @(private = "file")
 arith_idiv :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	return arith(state(Lp), lua.LUA_OPIDIV, "__idiv", "idiv")
+	return arith(state(Lp), lua.OPIDIV, "__idiv", "idiv")
 }
 @(private = "file")
 arith_unm :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	return arith(state(Lp), lua.LUA_OPUNM, "__unm", "unm")
+	return arith(state(Lp), lua.OPUNM, "__unm", "unm")
 }
 
 @(private = "file")
@@ -408,7 +408,7 @@ stringmetamethods := []Reg {
 // ===========================================================================
 
 @(private = "file")
-LUA_MAXCAPTURES :: 32
+MAXCAPTURES :: 32
 @(private = "file")
 MAXCCALLS :: 200
 @(private = "file")
@@ -432,12 +432,12 @@ Capture :: struct {
 
 @(private = "file")
 Match_State :: struct {
-	L:          ^lua.Lua_State,
+	L:          ^lua.State,
 	src:        []u8, // subject bytes
 	pat:        []u8, // pattern bytes
 	matchdepth: int, // remaining recursion budget (guards against pathological patterns)
 	level:      int, // number of captures opened so far
-	capture:    [LUA_MAXCAPTURES]Capture,
+	capture:    [MAXCAPTURES]Capture,
 }
 
 // Pattern byte / subject byte with a virtual trailing NUL. Reference Lua reads the
@@ -458,7 +458,7 @@ sb :: #force_inline proc "contextless" (ms: ^Match_State, i: int) -> u8 {
 check_capture :: proc(ms: ^Match_State, ll: int) -> int {
 	l := ll - '1'
 	if l < 0 || l >= ms.level || ms.capture[l].len == CAP_UNFINISHED {
-		luaL_error(ms.L, "invalid capture index %%%d", l + 1)
+		aux_error(ms.L, "invalid capture index %%%d", l + 1)
 	}
 	return l
 }
@@ -470,7 +470,7 @@ capture_to_close :: proc(ms: ^Match_State) -> int {
 			return level
 		}
 	}
-	luaL_error(ms.L, "invalid pattern capture")
+	aux_error(ms.L, "invalid pattern capture")
 }
 
 // Given `p` at the start of a pattern *class* (a literal, `%x`, or `[...]`), return
@@ -483,7 +483,7 @@ classend :: proc(ms: ^Match_State, p_in: int) -> int {
 	switch c {
 	case L_ESC:
 		if p == len(ms.pat) {
-			luaL_error(ms.L, "malformed pattern (ends with '%%')")
+			aux_error(ms.L, "malformed pattern (ends with '%%')")
 		}
 		return p + 1
 	case '[':
@@ -493,7 +493,7 @@ classend :: proc(ms: ^Match_State, p_in: int) -> int {
 		// Scan for the closing ']'. `%]` and friends are skipped as escapes.
 		for {
 			if p == len(ms.pat) {
-				luaL_error(ms.L, "malformed pattern (missing ']')")
+				aux_error(ms.L, "malformed pattern (missing ']')")
 			}
 			cc := ms.pat[p]
 			p += 1
@@ -604,7 +604,7 @@ singlematch :: proc(ms: ^Match_State, s: int, p: int, ep: int) -> bool {
 @(private = "file")
 matchbalance :: proc(ms: ^Match_State, s_in: int, p: int) -> (int, bool) {
 	if p >= len(ms.pat) - 1 {
-		luaL_error(ms.L, "malformed pattern (missing arguments to '%%b')")
+		aux_error(ms.L, "malformed pattern (missing arguments to '%%b')")
 	}
 	if sb(ms, s_in) != ms.pat[p] {
 		return NO_MATCH, false
@@ -668,8 +668,8 @@ min_expand :: proc(ms: ^Match_State, s_in: int, p: int, ep: int) -> (int, bool) 
 @(private = "file")
 start_capture :: proc(ms: ^Match_State, s: int, p: int, what: int) -> (int, bool) {
 	level := ms.level
-	if level >= LUA_MAXCAPTURES {
-		luaL_error(ms.L, "too many captures")
+	if level >= MAXCAPTURES {
+		aux_error(ms.L, "too many captures")
 	}
 	ms.capture[level].init = s
 	ms.capture[level].len = what
@@ -767,7 +767,7 @@ match_default :: proc(ms: ^Match_State, s: ^int, p: ^int) -> bool {
 @(private = "file")
 match :: proc(ms: ^Match_State, s_in: int, p_in: int) -> (int, bool) {
 	if ms.matchdepth == 0 {
-		luaL_error(ms.L, "pattern too complex")
+		aux_error(ms.L, "pattern too complex")
 	}
 	ms.matchdepth -= 1
 	s := s_in
@@ -811,7 +811,7 @@ match :: proc(ms: ^Match_State, s_in: int, p_in: int) -> (int, bool) {
 			case 'f':
 				p += 2
 				if pb(ms, p) != '[' {
-					luaL_error(ms.L, "missing '[' after '%%f' in pattern")
+					aux_error(ms.L, "missing '[' after '%%f' in pattern")
 				}
 				ep := classend(ms, p)
 				prev := (s == 0) ? u8(0) : ms.src[s - 1]
@@ -890,16 +890,16 @@ lmemfind :: proc(s: []u8, p: []u8) -> int {
 get_onecapture :: proc(ms: ^Match_State, i: int, s: int, e: int) -> (int, int) {
 	if i >= ms.level {
 		if i != 0 {
-			luaL_error(ms.L, "invalid capture index %%%d", i + 1)
+			aux_error(ms.L, "invalid capture index %%%d", i + 1)
 		}
 		return e - s, s
 	} else {
 		capl := ms.capture[i].len
 		cap_i := ms.capture[i].init
 		if capl == CAP_UNFINISHED {
-			luaL_error(ms.L, "unfinished capture")
+			aux_error(ms.L, "unfinished capture")
 		} else if capl == CAP_POSITION {
-			lua.lua_pushinteger(ms.L, lua.Integer(ms.capture[i].init) + 1)
+			lua.api_pushinteger(ms.L, lua.Integer(ms.capture[i].init) + 1)
 		}
 		return capl, cap_i
 	}
@@ -909,7 +909,7 @@ get_onecapture :: proc(ms: ^Match_State, i: int, s: int, e: int) -> (int, int) {
 push_onecapture :: proc(ms: ^Match_State, i: int, s: int, e: int) {
 	l, cap_i := get_onecapture(ms, i, s, e)
 	if l != CAP_POSITION {
-		lua.lua_pushlstring(ms.L, ms.src[cap_i:cap_i + l])
+		lua.api_pushlstring(ms.L, ms.src[cap_i:cap_i + l])
 	}
 	// else: a position was already pushed by get_onecapture
 }
@@ -920,7 +920,7 @@ push_onecapture :: proc(ms: ^Match_State, i: int, s: int, e: int) {
 @(private = "file")
 push_captures :: proc(ms: ^Match_State, s: int, e: int, has_s: bool) -> int {
 	nlevels := (ms.level == 0 && has_s) ? 1 : ms.level
-	luaL_checkstack(ms.L, nlevels, "too many captures")
+	aux_checkstack(ms.L, nlevels, "too many captures")
 	for i in 0 ..< nlevels {
 		push_onecapture(ms, i, s, e)
 	}
@@ -949,22 +949,22 @@ nospecials :: proc(p: []u8) -> bool {
 }
 
 @(private = "file")
-str_find_aux :: proc(L: ^lua.Lua_State, find: bool) -> i32 {
-	s := transmute([]u8)luaL_checklstring(L, 1)
-	p := transmute([]u8)luaL_checklstring(L, 2)
+str_find_aux :: proc(L: ^lua.State, find: bool) -> i32 {
+	s := transmute([]u8)aux_checklstring(L, 1)
+	p := transmute([]u8)aux_checklstring(L, 2)
 	ls := len(s)
-	init := posrelatI(luaL_optinteger(L, 3, 1), ls) - 1 // 0-based start
+	init := posrelatI(aux_optinteger(L, 3, 1), ls) - 1 // 0-based start
 	if init > ls {
-		luaL_pushfail(L) // start past the end: nothing to find
+		aux_pushfail(L) // start past the end: nothing to find
 		return 1
 	}
 	// Plain search when explicitly requested (find + a truthy 4th arg) or when the
 	// pattern has no magic characters.
-	if find && (lua.lua_toboolean(L, 4) || nospecials(p)) {
+	if find && (lua.api_toboolean(L, 4) || nospecials(p)) {
 		pos := lmemfind(s[init:], p)
 		if pos >= 0 {
-			lua.lua_pushinteger(L, lua.Integer(init + pos) + 1)
-			lua.lua_pushinteger(L, lua.Integer(init + pos + len(p)))
+			lua.api_pushinteger(L, lua.Integer(init + pos) + 1)
+			lua.api_pushinteger(L, lua.Integer(init + pos + len(p)))
 			return 2
 		}
 	} else {
@@ -984,8 +984,8 @@ str_find_aux :: proc(L: ^lua.Lua_State, find: bool) -> i32 {
 			res, ok := match(&ms, s1, 0)
 			if ok {
 				if find {
-					lua.lua_pushinteger(L, lua.Integer(s1) + 1) // start
-					lua.lua_pushinteger(L, lua.Integer(res)) // end
+					lua.api_pushinteger(L, lua.Integer(s1) + 1) // start
+					lua.api_pushinteger(L, lua.Integer(res)) // end
 					return i32(push_captures(&ms, 0, 0, false) + 2)
 				} else {
 					return i32(push_captures(&ms, s1, res, true))
@@ -1000,7 +1000,7 @@ str_find_aux :: proc(L: ^lua.Lua_State, find: bool) -> i32 {
 			}
 		}
 	}
-	luaL_pushfail(L)
+	aux_pushfail(L)
 	return 1
 }
 
@@ -1030,7 +1030,7 @@ GMatch_State :: struct {
 gmatch_aux :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	gm := (^GMatch_State)(lua.lua_touserdata(L, lua.lua_upvalueindex(3)))
+	gm := (^GMatch_State)(lua.api_touserdata(L, lua.upvalueindex(3)))
 	ms: Match_State
 	ms.L = L
 	ms.src = gm.src
@@ -1053,11 +1053,11 @@ gmatch_aux :: proc "c" (Lp: rawptr) -> i32 {
 gmatch :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)luaL_checklstring(L, 1)
-	p := transmute([]u8)luaL_checklstring(L, 2)
-	init := posrelatI(luaL_optinteger(L, 3, 1), len(s)) - 1
-	lua.lua_settop(L, 2) // keep the strings as upvalues so they aren't collected
-	gm := (^GMatch_State)(lua.lua_newuserdatauv(L, size_of(GMatch_State), 0))
+	s := transmute([]u8)aux_checklstring(L, 1)
+	p := transmute([]u8)aux_checklstring(L, 2)
+	init := posrelatI(aux_optinteger(L, 3, 1), len(s)) - 1
+	lua.api_settop(L, 2) // keep the strings as upvalues so they aren't collected
+	gm := (^GMatch_State)(lua.api_newuserdatauv(L, size_of(GMatch_State), 0))
 	if init > len(s) {
 		init = len(s) + 1 // clamp so `pos` can't run off the end
 	}
@@ -1065,7 +1065,7 @@ gmatch :: proc "c" (Lp: rawptr) -> i32 {
 	gm.pat = p
 	gm.pos = init
 	gm.lastmatch = NO_MATCH
-	lua.lua_pushcclosure(L, gmatch_aux, 3)
+	lua.api_pushcclosure(L, gmatch_aux, 3)
 	return 1
 }
 
@@ -1076,33 +1076,33 @@ gmatch :: proc "c" (Lp: rawptr) -> i32 {
 @(private = "file")
 add_s :: proc(ms: ^Match_State, b: ^Buffer, s: int, e: int) {
 	L := ms.L
-	news, _ := lua.lua_tolstring(L, 3)
+	news, _ := lua.api_tolstring(L, 3)
 	nb := transmute([]u8)news
 	i := 0
 	for i < len(nb) {
 		if nb[i] != L_ESC {
-			luaL_addchar(b, nb[i])
+			aux_addchar(b, nb[i])
 			i += 1
 			continue
 		}
 		i += 1 // skip the ESC
 		if i >= len(nb) {
-			luaL_error(L, "invalid use of '%c' in replacement string", int(L_ESC))
+			aux_error(L, "invalid use of '%c' in replacement string", int(L_ESC))
 		}
 		c := nb[i]
 		if c == L_ESC {
-			luaL_addchar(b, c)
+			aux_addchar(b, c)
 		} else if c == '0' {
-			luaL_addlstring(b, ms.src[s:e])
+			aux_addlstring(b, ms.src[s:e])
 		} else if lua.is_digit(int(c)) {
 			resl, cap_i := get_onecapture(ms, int(c) - '1', s, e)
 			if resl == CAP_POSITION {
-				luaL_addvalue(b) // position was pushed; fold it in
+				aux_addvalue(b) // position was pushed; fold it in
 			} else {
-				luaL_addlstring(b, ms.src[cap_i:cap_i + resl])
+				aux_addlstring(b, ms.src[cap_i:cap_i + resl])
 			}
 		} else {
-			luaL_error(L, "invalid use of '%c' in replacement string", int(L_ESC))
+			aux_error(L, "invalid use of '%c' in replacement string", int(L_ESC))
 		}
 		i += 1
 	}
@@ -1115,25 +1115,25 @@ add_s :: proc(ms: ^Match_State, b: ^Buffer, s: int, e: int) {
 add_value :: proc(ms: ^Match_State, b: ^Buffer, s: int, e: int, tr: int) -> bool {
 	L := ms.L
 	switch tr {
-	case lua.LUA_TFUNCTION:
-		lua.lua_pushvalue(L, 3)
+	case lua.TFUNCTION:
+		lua.api_pushvalue(L, 3)
 		nn := push_captures(ms, s, e, true)
-		lua.lua_call(L, nn, 1)
-	case lua.LUA_TTABLE:
+		lua.api_call(L, nn, 1)
+	case lua.TTABLE:
 		push_onecapture(ms, 0, s, e)
-		lua.lua_gettable(L, 3)
+		lua.api_gettable(L, 3)
 	case:
 		add_s(ms, b, s, e)
 		return true
 	}
-	if !lua.lua_toboolean(L, -1) {
-		lua.lua_pop(L, 1)
-		luaL_addlstring(b, ms.src[s:e]) // keep the original text
+	if !lua.api_toboolean(L, -1) {
+		lua.api_pop(L, 1)
+		aux_addlstring(b, ms.src[s:e]) // keep the original text
 		return false
-	} else if !lua.lua_isstring(L, -1) {
-		luaL_error(L, "invalid replacement value (a %s)", luaL_typename(L, -1))
+	} else if !lua.api_isstring(L, -1) {
+		aux_error(L, "invalid replacement value (a %s)", aux_typename(L, -1))
 	} else {
-		luaL_addvalue(b)
+		aux_addvalue(b)
 	}
 	return true
 }
@@ -1142,22 +1142,22 @@ add_value :: proc(ms: ^Match_State, b: ^Buffer, s: int, e: int, tr: int) -> bool
 str_gsub :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	src := transmute([]u8)luaL_checklstring(L, 1)
-	p := transmute([]u8)luaL_checklstring(L, 2)
-	tr := lua.lua_type(L, 3)
-	max_s := luaL_optinteger(L, 4, lua.Integer(len(src)) + 1)
+	src := transmute([]u8)aux_checklstring(L, 1)
+	p := transmute([]u8)aux_checklstring(L, 2)
+	tr := lua.api_type(L, 3)
+	max_s := aux_optinteger(L, 4, lua.Integer(len(src)) + 1)
 	anchor := len(p) > 0 && p[0] == '^'
-	luaL_argexpected(
+	aux_argexpected(
 		L,
-		tr == lua.LUA_TNUMBER ||
-		tr == lua.LUA_TSTRING ||
-		tr == lua.LUA_TFUNCTION ||
-		tr == lua.LUA_TTABLE,
+		tr == lua.TNUMBER ||
+		tr == lua.TSTRING ||
+		tr == lua.TFUNCTION ||
+		tr == lua.TTABLE,
 		3,
 		"string/function/table",
 	)
 	b: Buffer
-	luaL_buffinit(L, &b)
+	aux_buffinit(L, &b)
 	pp := p
 	if anchor {
 		pp = p[1:]
@@ -1181,7 +1181,7 @@ str_gsub :: proc "c" (Lp: rawptr) -> i32 {
 			srcpos = e
 			lastmatch = e
 		} else if srcpos < len(ms.src) {
-			luaL_addchar(&b, ms.src[srcpos]) // no match here: copy one char
+			aux_addchar(&b, ms.src[srcpos]) // no match here: copy one char
 			srcpos += 1
 		} else {
 			break
@@ -1191,12 +1191,12 @@ str_gsub :: proc "c" (Lp: rawptr) -> i32 {
 		}
 	}
 	if !changed {
-		lua.lua_pushvalue(L, 1) // return the original string unchanged
+		lua.api_pushvalue(L, 1) // return the original string unchanged
 	} else {
-		luaL_addlstring(&b, ms.src[srcpos:])
-		luaL_pushresult(&b)
+		aux_addlstring(&b, ms.src[srcpos:])
+		aux_pushresult(&b)
 	}
-	lua.lua_pushinteger(L, n)
+	lua.api_pushinteger(L, n)
 	return 2
 }
 
@@ -1249,11 +1249,11 @@ strspn :: proc(buf: []u8, start: int, set: string) -> int {
 // Copy one conversion specification out of the format string into `form` (as
 // "%...spec\0"). Returns the index of the specifier byte in the source.
 @(private = "file")
-getformat :: proc(L: ^lua.Lua_State, sf: []u8, start: int, form: []u8) -> int {
+getformat :: proc(L: ^lua.State, sf: []u8, start: int, form: []u8) -> int {
 	span := strspn(sf, start, FMT_SPAN)
 	total := span + 1 // include the following character (the specifier)
 	if total >= MAX_FORMAT - 10 {
-		luaL_error(L, "invalid format (too long)")
+		aux_error(L, "invalid format (too long)")
 	}
 	form[0] = '%'
 	avail := len(sf) - start
@@ -1281,7 +1281,7 @@ get2digits :: proc(form: []u8, s_in: int) -> int {
 // Validate a conversion spec: allowed flags, an optional two-digit width, and an
 // optional two-digit precision (only when `precision`), ending in a letter.
 @(private = "file")
-checkformat :: proc(L: ^lua.Lua_State, form: []u8, flags: string, precision: bool) {
+checkformat :: proc(L: ^lua.State, form: []u8, flags: string, precision: bool) {
 	spec := 1 // skip '%'
 	spec += strspn(form, spec, flags)
 	if form[spec] != '0' { // a width cannot start with '0'
@@ -1292,7 +1292,7 @@ checkformat :: proc(L: ^lua.Lua_State, form: []u8, flags: string, precision: boo
 		}
 	}
 	if !lua.is_alpha(int(form[spec])) {
-		luaL_error(L, "invalid conversion specification: '%s'", string(form[:c_strlen(form)]))
+		aux_error(L, "invalid conversion specification: '%s'", string(form[:c_strlen(form)]))
 	}
 }
 
@@ -1300,12 +1300,12 @@ checkformat :: proc(L: ^lua.Lua_State, form: []u8, flags: string, precision: boo
 
 @(private = "file")
 addquoted :: proc(b: ^Buffer, s: []u8) {
-	luaL_addchar(b, '"')
+	aux_addchar(b, '"')
 	for i in 0 ..< len(s) {
 		c := s[i]
 		if c == '"' || c == '\\' || c == '\n' {
-			luaL_addchar(b, '\\')
-			luaL_addchar(b, c)
+			aux_addchar(b, '\\')
+			aux_addchar(b, c)
 		} else if lua.is_cntrl(int(c)) {
 			buf: [10]u8
 			// A following digit forces three-digit escaping so it can't merge with
@@ -1331,12 +1331,12 @@ addquoted :: proc(b: ^Buffer, s: []u8) {
 				buf[n + 2] = '0' + c % 10
 				n += 3
 			}
-			luaL_addlstring(b, buf[:n])
+			aux_addlstring(b, buf[:n])
 		} else {
-			luaL_addchar(b, c)
+			aux_addchar(b, c)
 		}
 	}
-	luaL_addchar(b, '"')
+	aux_addchar(b, '"')
 }
 
 // Serialise a float so Lua can read it back exactly. inf/-inf/NaN have no numeral,
@@ -1827,25 +1827,25 @@ format_pointer :: proc "contextless" (buf, form: []u8, p: rawptr) -> int {
 }
 
 @(private = "file")
-addliteral :: proc(L: ^lua.Lua_State, b: ^Buffer, arg: int) {
-	switch lua.lua_type(L, arg) {
-	case lua.LUA_TSTRING:
-		s, _ := lua.lua_tolstring(L, arg)
+addliteral :: proc(L: ^lua.State, b: ^Buffer, arg: int) {
+	switch lua.api_type(L, arg) {
+	case lua.TSTRING:
+		s, _ := lua.api_tolstring(L, arg)
 		addquoted(b, transmute([]u8)s)
-	case lua.LUA_TNUMBER:
-		buff := luaL_prepbuffsize(b, MAX_ITEM)
+	case lua.TNUMBER:
+		buff := aux_prepbuffsize(b, MAX_ITEM)
 		nb := 0
-		if !lua.lua_isinteger(L, arg) {
-			nb = quotefloat(buff, lua.lua_tonumber(L, arg))
+		if !lua.api_isinteger(L, arg) {
+			nb = quotefloat(buff, lua.api_tonumber(L, arg))
 		} else {
-			nb = literal_integer(buff[:MAX_ITEM], lua.lua_tointeger(L, arg))
+			nb = literal_integer(buff[:MAX_ITEM], lua.api_tointeger(L, arg))
 		}
-		luaL_addsize(b, uint(nb))
-	case lua.LUA_TNIL, lua.LUA_TBOOLEAN:
-		luaL_tolstring(L, arg)
-		luaL_addvalue(b)
+		aux_addsize(b, uint(nb))
+	case lua.TNIL, lua.TBOOLEAN:
+		aux_tolstring(L, arg)
+		aux_addvalue(b)
 	case:
-		luaL_argerror(L, arg, "value has no literal form")
+		aux_argerror(L, arg, "value has no literal form")
 	}
 }
 
@@ -1853,32 +1853,32 @@ addliteral :: proc(L: ^lua.Lua_State, b: ^Buffer, arg: int) {
 str_format :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	top := lua.lua_gettop(L)
+	top := lua.api_gettop(L)
 	arg := 1
-	sf := transmute([]u8)luaL_checklstring(L, 1)
+	sf := transmute([]u8)aux_checklstring(L, 1)
 	b: Buffer
-	luaL_buffinit(L, &b)
+	aux_buffinit(L, &b)
 	i := 0
 	for i < len(sf) {
 		if sf[i] != L_ESC {
-			luaL_addchar(&b, sf[i])
+			aux_addchar(&b, sf[i])
 			i += 1
 			continue
 		}
 		i += 1
 		if i < len(sf) && sf[i] == L_ESC {
-			luaL_addchar(&b, L_ESC) // %%
+			aux_addchar(&b, L_ESC) // %%
 			i += 1
 			continue
 		}
 		// A real format item.
 		form: [MAX_FORMAT]u8
 		maxitem: uint = MAX_ITEM
-		buff := luaL_prepbuffsize(&b, maxitem)
+		buff := aux_prepbuffsize(&b, maxitem)
 		nb := 0
 		arg += 1
 		if arg > top {
-			luaL_argerror(L, arg, "no value")
+			aux_argerror(L, arg, "no value")
 		}
 		i = getformat(L, sf, i, form[:])
 		spec := i < len(sf) ? sf[i] : 0
@@ -1886,17 +1886,17 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 		switch spec {
 		case 'c':
 			checkformat(L, form[:], FMTFLAGS_C, false)
-			nb = format_char(buff[:maxitem], form[:], luaL_checkinteger(L, arg))
+			nb = format_char(buff[:maxitem], form[:], aux_checkinteger(L, arg))
 		case 'd', 'i':
-			n := luaL_checkinteger(L, arg)
+			n := aux_checkinteger(L, arg)
 			checkformat(L, form[:], FMTFLAGS_I, true)
 			nb = format_integer(buff[:maxitem], form[:], n)
 		case 'u':
-			n := luaL_checkinteger(L, arg)
+			n := aux_checkinteger(L, arg)
 			checkformat(L, form[:], FMTFLAGS_U, true)
 			nb = format_integer(buff[:maxitem], form[:], n)
 		case 'o', 'x', 'X':
-			n := luaL_checkinteger(L, arg)
+			n := aux_checkinteger(L, arg)
 			checkformat(L, form[:], FMTFLAGS_X, true)
 			nb = format_integer(buff[:maxitem], form[:], n)
 		case 'a', 'A':
@@ -1908,33 +1908,33 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 			// deliberately rejects every such modifier, so byte-faithful behavior
 			// requires us to reject them too.
 			if form[1] != spec {
-				luaL_error(L, "modifiers for format '%%a'/'%%A' not implemented")
+				aux_error(L, "modifiers for format '%%a'/'%%A' not implemented")
 			}
-			nb = format_float(buff[:maxitem], form[:], luaL_checknumber(L, arg))
+			nb = format_float(buff[:maxitem], form[:], aux_checknumber(L, arg))
 		case 'f':
 			maxitem = MAX_ITEMF // %f may need a lot of room
-			buff = luaL_prepbuffsize(&b, maxitem)
+			buff = aux_prepbuffsize(&b, maxitem)
 			fallthrough
 		case 'e', 'E', 'g', 'G':
-			n := luaL_checknumber(L, arg)
+			n := aux_checknumber(L, arg)
 			checkformat(L, form[:], FMTFLAGS_F, true)
 			nb = format_float(buff[:maxitem], form[:], n)
 		case 'p':
-			pptr := lua.lua_topointer(L, arg)
+			pptr := lua.api_topointer(L, arg)
 			checkformat(L, form[:], FMTFLAGS_C, false)
 			nb = format_pointer(buff[:maxitem], form[:], pptr)
 		case 'q':
 			if form[2] != 0 {
-				luaL_error(L, "specifier '%%q' cannot have modifiers")
+				aux_error(L, "specifier '%%q' cannot have modifiers")
 			}
 			addliteral(L, &b, arg)
 		case 's':
-			ss := luaL_tolstring(L, arg)
+			ss := aux_tolstring(L, arg)
 			if form[2] == 0 {
-				luaL_addvalue(&b) // no modifiers: keep the whole string
+				aux_addvalue(&b) // no modifiers: keep the whole string
 			} else {
 				sbytes := transmute([]u8)ss
-				luaL_argcheck(L, len(ss) == c_strlen(sbytes), arg, "string contains zeros")
+				aux_argcheck(L, len(ss) == c_strlen(sbytes), arg, "string contains zeros")
 				checkformat(L, form[:], FMTFLAGS_C, true)
 				has_dot := false
 				for k in 0 ..< c_strlen(form[:]) {
@@ -1944,18 +1944,18 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 					}
 				}
 				if !has_dot && len(ss) >= 100 {
-					luaL_addvalue(&b) // too long and no precision: keep whole string
+					aux_addvalue(&b) // too long and no precision: keep whole string
 				} else {
 					nb = format_string(buff[:maxitem], form[:], sbytes)
-					lua.lua_pop(L, 1) // drop the luaL_tolstring result
+					lua.api_pop(L, 1) // drop the luaL_tolstring result
 				}
 			}
 		case:
-			luaL_error(L, "invalid conversion '%s' to 'format'", string(form[:c_strlen(form[:])]))
+			aux_error(L, "invalid conversion '%s' to 'format'", string(form[:c_strlen(form[:])]))
 		}
-		luaL_addsize(&b, uint(nb))
+		aux_addsize(&b, uint(nb))
 	}
-	luaL_pushresult(&b)
+	aux_pushresult(&b)
 	return 1
 }
 
@@ -1964,7 +1964,7 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 // ===========================================================================
 
 @(private = "file")
-LUAL_PACKPADBYTE :: 0x00
+PACKPADBYTE :: 0x00
 @(private = "file")
 MAXINTSIZE :: 16
 @(private = "file")
@@ -1997,13 +1997,13 @@ KOption :: enum {
 
 @(private = "file")
 Header :: struct {
-	L:        ^lua.Lua_State,
+	L:        ^lua.State,
 	islittle: bool,
 	maxalign: uint,
 }
 
 @(private = "file")
-initheader :: proc(L: ^lua.Lua_State, h: ^Header) {
+initheader :: proc(L: ^lua.State, h: ^Header) {
 	h.L = L
 	h.islittle = NATIVE_LITTLE
 	h.maxalign = 1
@@ -2034,7 +2034,7 @@ getnum :: proc(fmt: []u8, pos: ^int, df: uint) -> uint {
 getnumlimit :: proc(h: ^Header, fmt: []u8, pos: ^int, df: uint) -> uint {
 	sz := getnum(fmt, pos, df)
 	if (sz - 1) >= MAXINTSIZE {
-		luaL_error(h.L, "integral size (%d) out of limits [1,%d]", int(sz), MAXINTSIZE)
+		aux_error(h.L, "integral size (%d) out of limits [1,%d]", int(sz), MAXINTSIZE)
 	}
 	return sz
 }
@@ -2079,7 +2079,7 @@ getoption :: proc(h: ^Header, fmt: []u8, pos: ^int, size: ^uint) -> KOption {
 	case 'c':
 		size^ = getnum(fmt, pos, ~uint(0))
 		if size^ == ~uint(0) {
-			luaL_error(h.L, "missing size for format option 'c'")
+			aux_error(h.L, "missing size for format option 'c'")
 		}
 		return .Char
 	case 'z':
@@ -2099,7 +2099,7 @@ getoption :: proc(h: ^Header, fmt: []u8, pos: ^int, size: ^uint) -> KOption {
 	case '!':
 		h.maxalign = getnumlimit(h, fmt, pos, NATIVE_MAXALIGN)
 	case:
-		luaL_error(h.L, "invalid format option '%c'", int(opt))
+		aux_error(h.L, "invalid format option '%c'", int(opt))
 	}
 	return .Nop
 }
@@ -2120,7 +2120,7 @@ getdetails :: proc(
 		// 'X' borrows the alignment of the following option.
 		dummy: uint
 		if pos^ >= len(fmt) || getoption(h, fmt, pos, &dummy) == .Char || dummy == 0 {
-			luaL_argerror(h.L, 1, "invalid next option for option 'X'")
+			aux_argerror(h.L, 1, "invalid next option for option 'X'")
 		}
 		align = dummy
 	}
@@ -2132,7 +2132,7 @@ getdetails :: proc(
 		}
 		if !is_pow2(align) {
 			ntoalign^ = 0
-			luaL_argerror(h.L, 1, "format asks for alignment not power of 2")
+			aux_argerror(h.L, 1, "format asks for alignment not power of 2")
 		}
 		szmoda := totalsize & (align - 1)
 		ntoalign^ = (align - szmoda) & (align - 1)
@@ -2144,7 +2144,7 @@ getdetails :: proc(
 // if `neg` and `size` exceeds a Lua integer.
 @(private = "file")
 packint :: proc(b: ^Buffer, n: lua.Unsigned, islittle: bool, size: uint, neg: bool) {
-	buff := luaL_prepbuffsize(b, size)
+	buff := aux_prepbuffsize(b, size)
 	v := n
 	buff[islittle ? 0 : int(size) - 1] = u8(v & MC)
 	for i: uint = 1; i < size; i += 1 {
@@ -2156,7 +2156,7 @@ packint :: proc(b: ^Buffer, n: lua.Unsigned, islittle: bool, size: uint, neg: bo
 			buff[islittle ? int(i) : int(size) - 1 - int(i)] = u8(MC)
 		}
 	}
-	luaL_addsize(b, size)
+	aux_addsize(b, size)
 }
 
 // Copy `size` bytes from `src` to `dest`, reversing if the requested endianness
@@ -2178,40 +2178,40 @@ copywithendian :: proc(dest: [^]u8, src: []u8, size: uint, islittle: bool) {
 str_pack :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	fmt_str := luaL_checkstring(L, 1)
+	fmt_str := aux_checkstring(L, 1)
 	fmt := transmute([]u8)fmt_str
 	flen := c_strlen(fmt) // pack formats are NUL-terminated
 	h: Header
 	initheader(L, &h)
 	arg := 1
 	totalsize: uint = 0
-	lua.lua_pushnil(L) // separate arguments from the buffer
+	lua.api_pushnil(L) // separate arguments from the buffer
 	b: Buffer
-	luaL_buffinit(L, &b)
+	aux_buffinit(L, &b)
 	pos := 0
 	for pos < flen {
 		ntoalign: uint
 		size: uint
 		opt := getdetails(&h, totalsize, fmt[:flen], &pos, &size, &ntoalign)
-		luaL_argcheck(L, size + ntoalign <= lua.MAX_SIZE - totalsize, arg, "result too long")
+		aux_argcheck(L, size + ntoalign <= lua.MAX_SIZE - totalsize, arg, "result too long")
 		totalsize += ntoalign + size
 		for ntoalign > 0 {
-			luaL_addchar(&b, LUAL_PACKPADBYTE)
+			aux_addchar(&b, PACKPADBYTE)
 			ntoalign -= 1
 		}
 		arg += 1
 		switch opt {
 		case .Int:
-			n := luaL_checkinteger(L, arg)
+			n := aux_checkinteger(L, arg)
 			if size < SZINT {
 				lim := lua.Integer(1) << uint(size * NB - 1)
-				luaL_argcheck(L, -lim <= n && n < lim, arg, "integer overflow")
+				aux_argcheck(L, -lim <= n && n < lim, arg, "integer overflow")
 			}
 			packint(&b, lua.Unsigned(n), h.islittle, size, n < 0)
 		case .Uint:
-			n := luaL_checkinteger(L, arg)
+			n := aux_checkinteger(L, arg)
 			if size < SZINT {
-				luaL_argcheck(
+				aux_argcheck(
 					L,
 					lua.Unsigned(n) < (lua.Unsigned(1) << uint(size * NB)),
 					arg,
@@ -2220,60 +2220,60 @@ str_pack :: proc "c" (Lp: rawptr) -> i32 {
 			}
 			packint(&b, lua.Unsigned(n), h.islittle, size, false)
 		case .Float:
-			f := f32(luaL_checknumber(L, arg))
+			f := f32(aux_checknumber(L, arg))
 			raw := transmute([size_of(f32)]u8)f
-			buff := luaL_prepbuffsize(&b, size_of(f32))
+			buff := aux_prepbuffsize(&b, size_of(f32))
 			copywithendian(buff, raw[:], size, h.islittle)
-			luaL_addsize(&b, size)
+			aux_addsize(&b, size)
 		case .Number:
-			f := lua.Number(luaL_checknumber(L, arg))
+			f := lua.Number(aux_checknumber(L, arg))
 			raw := transmute([size_of(lua.Number)]u8)f
-			buff := luaL_prepbuffsize(&b, size_of(lua.Number))
+			buff := aux_prepbuffsize(&b, size_of(lua.Number))
 			copywithendian(buff, raw[:], size, h.islittle)
-			luaL_addsize(&b, size)
+			aux_addsize(&b, size)
 		case .Double:
-			f := f64(luaL_checknumber(L, arg))
+			f := f64(aux_checknumber(L, arg))
 			raw := transmute([size_of(f64)]u8)f
-			buff := luaL_prepbuffsize(&b, size_of(f64))
+			buff := aux_prepbuffsize(&b, size_of(f64))
 			copywithendian(buff, raw[:], size, h.islittle)
-			luaL_addsize(&b, size)
+			aux_addsize(&b, size)
 		case .Char:
-			s := transmute([]u8)luaL_checklstring(L, arg)
-			luaL_argcheck(L, uint(len(s)) <= size, arg, "string longer than given size")
-			luaL_addlstring(&b, s)
+			s := transmute([]u8)aux_checklstring(L, arg)
+			aux_argcheck(L, uint(len(s)) <= size, arg, "string longer than given size")
+			aux_addlstring(&b, s)
 			if uint(len(s)) < size {
 				psize := size - uint(len(s))
-				buff := luaL_prepbuffsize(&b, psize)
+				buff := aux_prepbuffsize(&b, psize)
 				for k in 0 ..< int(psize) {
-					buff[k] = LUAL_PACKPADBYTE
+					buff[k] = PACKPADBYTE
 				}
-				luaL_addsize(&b, psize)
+				aux_addsize(&b, psize)
 			}
 		case .String:
-			s := transmute([]u8)luaL_checklstring(L, arg)
-			luaL_argcheck(
+			s := transmute([]u8)aux_checklstring(L, arg)
+			aux_argcheck(
 				L,
 				size >= size_of(lua.Unsigned) || uint(len(s)) < (uint(1) << uint(size * NB)),
 				arg,
 				"string length does not fit in given size",
 			)
 			packint(&b, lua.Unsigned(len(s)), h.islittle, size, false)
-			luaL_addlstring(&b, s)
+			aux_addlstring(&b, s)
 			totalsize += uint(len(s))
 		case .Zstr:
-			s := transmute([]u8)luaL_checklstring(L, arg)
-			luaL_argcheck(L, c_strlen(s) == len(s), arg, "string contains zeros")
-			luaL_addlstring(&b, s)
-			luaL_addchar(&b, 0)
+			s := transmute([]u8)aux_checklstring(L, arg)
+			aux_argcheck(L, c_strlen(s) == len(s), arg, "string contains zeros")
+			aux_addlstring(&b, s)
+			aux_addchar(&b, 0)
 			totalsize += uint(len(s)) + 1
 		case .Padding:
-			luaL_addchar(&b, LUAL_PACKPADBYTE)
+			aux_addchar(&b, PACKPADBYTE)
 			arg -= 1 // consumes no argument
 		case .Paddalign, .Nop:
 			arg -= 1 // consumes no argument
 		}
 	}
-	luaL_pushresult(&b)
+	aux_pushresult(&b)
 	return 1
 }
 
@@ -2281,7 +2281,7 @@ str_pack :: proc "c" (Lp: rawptr) -> i32 {
 str_packsize :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	fmt := transmute([]u8)luaL_checkstring(L, 1)
+	fmt := transmute([]u8)aux_checkstring(L, 1)
 	flen := c_strlen(fmt)
 	h: Header
 	initheader(L, &h)
@@ -2291,12 +2291,12 @@ str_packsize :: proc "c" (Lp: rawptr) -> i32 {
 		ntoalign: uint
 		size: uint
 		opt := getdetails(&h, totalsize, fmt[:flen], &pos, &size, &ntoalign)
-		luaL_argcheck(L, opt != .String && opt != .Zstr, 1, "variable-length format")
+		aux_argcheck(L, opt != .String && opt != .Zstr, 1, "variable-length format")
 		size += ntoalign
-		luaL_argcheck(L, totalsize <= uint(lua.MAX_INTEGER) - size, 1, "format result too large")
+		aux_argcheck(L, totalsize <= uint(lua.MAX_INTEGER) - size, 1, "format result too large")
 		totalsize += size
 	}
-	lua.lua_pushinteger(L, lua.Integer(totalsize))
+	lua.api_pushinteger(L, lua.Integer(totalsize))
 	return 1
 }
 
@@ -2304,7 +2304,7 @@ str_packsize :: proc "c" (Lp: rawptr) -> i32 {
 // than a Lua integer) or an overflow check (if wider).
 @(private = "file")
 unpackint :: proc(
-	L: ^lua.Lua_State,
+	L: ^lua.State,
 	str: []u8,
 	islittle: bool,
 	size: int,
@@ -2325,7 +2325,7 @@ unpackint :: proc(
 		mask := (!issigned || lua.Integer(res) >= 0) ? 0 : MC
 		for i := limit; i < size; i += 1 {
 			if int(str[islittle ? i : size - 1 - i]) != mask {
-				luaL_error(L, "%d-byte integer does not fit into Lua Integer", size)
+				aux_error(L, "%d-byte integer does not fit into Lua Integer", size)
 			}
 		}
 	}
@@ -2336,13 +2336,13 @@ unpackint :: proc(
 str_unpack :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	fmt := transmute([]u8)luaL_checkstring(L, 1)
+	fmt := transmute([]u8)aux_checkstring(L, 1)
 	flen := c_strlen(fmt)
-	data := transmute([]u8)luaL_checklstring(L, 2)
+	data := transmute([]u8)aux_checklstring(L, 2)
 	ld := uint(len(data))
-	pos := uint(posrelatI(luaL_optinteger(L, 3, 1), len(data)) - 1)
+	pos := uint(posrelatI(aux_optinteger(L, 3, 1), len(data)) - 1)
 	n := 0
-	luaL_argcheck(L, pos <= ld, 3, "initial position out of string")
+	aux_argcheck(L, pos <= ld, 3, "initial position out of string")
 	h: Header
 	initheader(L, &h)
 	fpos := 0
@@ -2351,47 +2351,47 @@ str_unpack :: proc "c" (Lp: rawptr) -> i32 {
 		size: uint
 		opt := getdetails(&h, pos, fmt[:flen], &fpos, &size, &ntoalign)
 		// Ordered so the subtraction can't underflow: pos <= ld already holds.
-		luaL_argcheck(L, ntoalign + size <= ld - pos, 2, "data string too short")
+		aux_argcheck(L, ntoalign + size <= ld - pos, 2, "data string too short")
 		pos += ntoalign
-		luaL_checkstack(L, 2, "too many results")
+		aux_checkstack(L, 2, "too many results")
 		n += 1
 		switch opt {
 		case .Int, .Uint:
 			res := unpackint(L, data[pos:], h.islittle, int(size), opt == .Int)
-			lua.lua_pushinteger(L, res)
+			lua.api_pushinteger(L, res)
 		case .Float:
 			raw: [size_of(f32)]u8
 			copywithendian(raw_data(raw[:]), data[pos:], size_of(f32), h.islittle)
 			f := transmute(f32)raw
-			lua.lua_pushnumber(L, lua.Number(f))
+			lua.api_pushnumber(L, lua.Number(f))
 		case .Number:
 			raw: [size_of(lua.Number)]u8
 			copywithendian(raw_data(raw[:]), data[pos:], size_of(lua.Number), h.islittle)
 			f := transmute(lua.Number)raw
-			lua.lua_pushnumber(L, f)
+			lua.api_pushnumber(L, f)
 		case .Double:
 			raw: [size_of(f64)]u8
 			copywithendian(raw_data(raw[:]), data[pos:], size_of(f64), h.islittle)
 			f := transmute(f64)raw
-			lua.lua_pushnumber(L, lua.Number(f))
+			lua.api_pushnumber(L, lua.Number(f))
 		case .Char:
-			lua.lua_pushlstring(L, data[pos:pos + size])
+			lua.api_pushlstring(L, data[pos:pos + size])
 		case .String:
 			length := lua.Unsigned(unpackint(L, data[pos:], h.islittle, int(size), false))
-			luaL_argcheck(L, uint(length) <= ld - pos - size, 2, "data string too short")
-			lua.lua_pushlstring(L, data[pos + size:pos + size + uint(length)])
+			aux_argcheck(L, uint(length) <= ld - pos - size, 2, "data string too short")
+			lua.api_pushlstring(L, data[pos + size:pos + size + uint(length)])
 			pos += uint(length)
 		case .Zstr:
 			length := uint(c_strlen(data[pos:]))
-			luaL_argcheck(L, pos + length < ld, 2, "unfinished string for format 'z'")
-			lua.lua_pushlstring(L, data[pos:pos + length])
+			aux_argcheck(L, pos + length < ld, 2, "unfinished string for format 'z'")
+			lua.api_pushlstring(L, data[pos:pos + length])
 			pos += length + 1
 		case .Paddalign, .Padding, .Nop:
 			n -= 1 // produced no value
 		}
 		pos += size
 	}
-	lua.lua_pushinteger(L, lua.Integer(pos) + 1) // next position
+	lua.api_pushinteger(L, lua.Integer(pos) + 1) // next position
 	return i32(n + 1)
 }
 
@@ -2423,21 +2423,21 @@ strlib := []Reg {
 // Build the shared metatable for all strings so `("x"):upper()` works and the
 // arithmetic metamethods are in place. `__index` points at the library table.
 @(private = "file")
-createmetatable :: proc(L: ^lua.Lua_State) {
-	luaL_newlib(L, stringmetamethods) // table with the arithmetic metamethods
-	lua.lua_pushstring(L, "") // a dummy string...
-	lua.lua_pushvalue(L, -2) // ...and a copy of the metatable
-	lua.lua_setmetatable(L, -2) // set it as the metatable for all strings
-	lua.lua_pop(L, 1) // drop the dummy string
-	lua.lua_pushvalue(L, -2) // the string library table
-	lua.lua_setfield(L, -2, "__index") // metatable.__index = string
-	lua.lua_pop(L, 1) // drop the metatable
+createmetatable :: proc(L: ^lua.State) {
+	aux_newlib(L, stringmetamethods) // table with the arithmetic metamethods
+	lua.api_pushstring(L, "") // a dummy string...
+	lua.api_pushvalue(L, -2) // ...and a copy of the metatable
+	lua.api_setmetatable(L, -2) // set it as the metatable for all strings
+	lua.api_pop(L, 1) // drop the dummy string
+	lua.api_pushvalue(L, -2) // the string library table
+	lua.api_setfield(L, -2, "__index") // metatable.__index = string
+	lua.api_pop(L, 1) // drop the metatable
 }
 
-luaopen_string :: proc "c" (Lp: rawptr) -> i32 {
+open_string :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	luaL_newlib(L, strlib)
+	aux_newlib(L, strlib)
 	createmetatable(L)
 	return 1
 }

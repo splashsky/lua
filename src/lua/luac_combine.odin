@@ -22,18 +22,18 @@ package lua
 // call it" pair; N copies compile to N such pairs, giving us N nested prototypes
 // to overwrite. Reference luac.c FUNCTION.
 @(private = "file")
-LUAC_COMBINE_FUNCTION : string : "(function()end)();\n"
+COMBINE_FUNCTION : string : "(function()end)();\n"
 
 // The reader handed to `lua_load`: it returns the wrapper text once per remaining
 // count and then signals end-of-input. `data` points at an `int` countdown that
 // starts at N (the number of input files). Reference luac.c reader.
 @(private = "file")
-luac_combine_reader :: proc "c" (L: ^Lua_State, data: rawptr, size: ^uint) -> [^]u8 {
+combine_reader :: proc "c" (L: ^State, data: rawptr, size: ^uint) -> [^]u8 {
 	remaining := (^int)(data)
 	if remaining^ > 0 {
 		remaining^ -= 1
-		size^ = uint(len(LUAC_COMBINE_FUNCTION))
-		return raw_data(LUAC_COMBINE_FUNCTION)
+		size^ = uint(len(COMBINE_FUNCTION))
+		return raw_data(COMBINE_FUNCTION)
 	}
 	size^ = 0
 	return nil
@@ -50,22 +50,22 @@ luac_combine_reader :: proc "c" (L: ^Lua_State, data: rawptr, size: ^uint) -> [^
 // On failure (only possible for `n > 1`, if the internally generated wrapper
 // somehow fails to compile) this returns `nil` and leaves the error message on
 // top of the stack for the caller to report. Reference luac.c combine.
-luac_combine :: proc(L: ^Lua_State, n: int) -> ^Proto {
+combine :: proc(L: ^State, n: int) -> ^Proto {
 	if n == 1 {
-		return lua_closure_value(stack_value(L, L.top - 1)).p
+		return api_closure_value(stack_value(L, L.top - 1)).p
 	}
 	// Compile the N-times-repeated wrapper. Reference names it "=(luac)".
 	counter := n
-	status := lua_load(L, luac_combine_reader, &counter, "=(luac)", "")
+	status := api_load(L, combine_reader, &counter, "=(luac)", "")
 	if status != .Ok {
 		return nil
 	}
-	wrapper := lua_closure_value(stack_value(L, L.top - 1)).p
+	wrapper := api_closure_value(stack_value(L, L.top - 1)).p
 	// The wrapper we just pushed sits on top; the N inputs are directly beneath
 	// it. Overwrite each placeholder child prototype with a real input prototype,
 	// preserving input order.
 	for i in 0 ..< n {
-		child := lua_closure_value(stack_value(L, L.top - 1 - n + i)).p
+		child := api_closure_value(stack_value(L, L.top - 1 - n + i)).p
 		wrapper.p[i] = child
 		// A main chunk's first upvalue is _ENV. As a standalone chunk it reads
 		// _ENV from a stack slot (`instack == 1`); nested under the wrapper it
