@@ -52,8 +52,7 @@ Makefile text eol=lf
 *.pdb    binary
 
 # --- Linguist hints ---------------------------------------------------------
-# The reference C source under lua/ is vendored for reference and differential
-# testing, not authored here -- mark it so it doesn't skew language stats, and
-# so it's collapsed as "vendored" in diffs.
-lua/**    linguist-vendored
+# The PUC-Rio test suite under tests/puc/ is vendored verbatim, not authored here
+# -- mark it so it doesn't skew language stats, and so it's collapsed as
+# "vendored" in diffs.
 tests/puc/** linguist-vendored

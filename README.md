@@ -8,8 +8,11 @@ reference Lua as closely as we can make it — same language semantics, same gar
 collection behavior (incremental + generational), and byte-compatible bytecode.
 Performance work comes later, once correct is locked in.
 
-The pristine reference C source for Lua 5.5.0 lives under [`lua/`](lua/) and is used
-only for reference and for *differential testing* — we never link against it.
+The implementation is self-contained: no C source is vendored and we never link
+against reference Lua. Correctness is proved against the official PUC-Rio 5.5 test
+suite under [`tests/puc/`](tests/puc/), run verbatim. Differential and benchmark
+comparisons against a reference `lua`/`luac` binary are still supported — you point
+the scripts at a build of your own (see [BUILDING.md](BUILDING.md)).
 
 ## Status
 
@@ -20,13 +23,12 @@ truthfully prove correctness (no tests fitted to pass).
 ## Layout
 
 ```
-lua/        Vendored reference C source of Lua 5.5.0 (reference + differential tests).
 src/        Our Odin implementation.
   lua/      The kernel: one Odin package (Lua's core is mutually recursive).
   stdlib/   Standard libraries, written against the public embedding API.
   luac/     The `luac` bytecode compiler/dumper (package main).
   main.odin The standalone `lua` interpreter/REPL (package main).
-tests/      Odin unit tests + (later) the vendored PUC-Rio 5.5 suite under tests/puc.
+tests/      Odin unit tests, plus the vendored PUC-Rio 5.5 suite under tests/puc.
 build/      Build/test scripts (tracked) and build output (ignored).
 docs/       Architecture and design notes.
 ```
@@ -178,5 +180,6 @@ suite itself handles. Both are covered in `tests/puc/README.md`.
 
 ## License
 
-The reference Lua source under `lua/` is distributed under Lua's MIT license (see
-`lua/doc/readme.html`). This reimplementation's license is TBD.
+The PUC-Rio Lua test suite vendored under `tests/puc/` is distributed under Lua's
+MIT license; the full notice is reproduced in `tests/puc/README.md`. This
+reimplementation's license is TBD.

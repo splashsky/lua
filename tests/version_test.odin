@@ -7,7 +7,7 @@ package tests
 // version numbers are part of Lua's observable identity (they appear in the
 // banner, the `_VERSION` global, and the bytecode header), and reference Lua
 // derives its combined numeric forms with a specific formula. We verify:
-//   1. the major/minor/release match Lua 5.5.0 (as declared in lua/src/lua.h),
+//   1. the major/minor/release match Lua 5.5.0 (as declared in reference `lua.h`),
 //   2. the combined VERSION_NUM / VERSION_RELEASE_NUM are computed the same way,
 //   3. the human-facing RELEASE string is assembled correctly.
 // If any of these drift, something that must agree with reference Lua has broken.

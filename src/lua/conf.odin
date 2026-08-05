@@ -12,7 +12,7 @@ package lua
 // global, and the bytecode header all agree on exactly one source of truth.
 
 // The Lua version we are faithfully reimplementing. These mirror the numbers in
-// lua/src/lua.h for Lua 5.5.0 -- do not drift them independently.
+// reference Lua 5.5.0's `lua.h` -- do not drift them independently.
 VERSION_MAJOR_N :: 5
 VERSION_MINOR_N :: 5
 VERSION_RELEASE_N :: 0

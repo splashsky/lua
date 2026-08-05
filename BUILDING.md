@@ -12,8 +12,9 @@
     "Linker-free verification" below.
   - **macOS:** the Xcode command-line tools (`xcode-select --install`).
   - **Linux:** a working `cc`/`clang` and libc.
-- (Optional, for differential tests) a C toolchain to build the reference Lua under
-  `lua/` — `make` on macOS/Linux, or MSVC/clang on Windows.
+- (Optional, for differential tests) a reference `lua`/`luac` built from the official
+  Lua 5.5.0 sources from [lua.org](https://www.lua.org/ftp/) — see "Comparing against
+  reference Lua" below.
 
 ## Linker-free verification
 
@@ -135,13 +136,33 @@ under the hood.
 > directory (`%TEMP%\luao-tests`). If you invoke `odin test` by hand from such a path,
 > pass `-out:` to a space-free location yourself.
 
-## Building the reference Lua (for differential tests)
+## Comparing against reference Lua (differential tests & benchmarks)
 
-The vendored source under `lua/` builds with its own Makefile:
+We do not vendor the reference C source: the project is self-contained, and the
+PUC-Rio test suite under `tests/puc/` is the correctness oracle. When you want a
+head-to-head comparison anyway, build a reference interpreter yourself from the
+official 5.5.0 tarball at <https://www.lua.org/ftp/>:
 
 ```sh
-cd lua && make            # produces lua/src/lua and lua/src/luac
+curl -R -O https://www.lua.org/ftp/lua-5.5.0.tar.gz
+tar zxf lua-5.5.0.tar.gz
+cd lua-5.5.0 && make            # produces src/lua and src/luac
 ```
 
-These reference binaries are used by differential tests to compare our output and
-bytecode byte-for-byte. Their build artifacts are git-ignored.
+Then point the scripts at those binaries — nothing is read from inside this repo:
+
+```powershell
+# Windows: benchmark ours against the reference build.
+.\build\bench.ps1 -Reference C:\path\to\lua.exe
+
+# Windows: enable the luac byte-compatibility check in clitest.ps1 by placing
+# the reference luac at %TEMP%\refluabuild\refluac.exe.
+```
+
+```bash
+# macOS / Linux
+REFLUA=/path/to/lua ./build/bench.sh
+REFLUAC=/path/to/luac ./build/clitest.sh
+```
+
+Both checks are skipped cleanly when no reference binary is provided.

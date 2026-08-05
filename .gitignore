@@ -33,14 +33,6 @@
 /luac
 luac.out
 
-# --- Reference Lua build artifacts under lua/ -------------------------------
-# We keep the pristine reference C SOURCE, but its Makefile produces objects and
-# binaries we never want to track. These are used only for differential testing.
-/lua/src/lua
-/lua/src/luac
-/lua/src/liblua.a
-/lua/src/*.o
-
 # --- Odin-native dynamic modules built for `require` testing ----------------
 # Our package library loads Odin-built shared modules (a documented deviation
 # from reference Lua's C modules); those compiled modules are artifacts too.
