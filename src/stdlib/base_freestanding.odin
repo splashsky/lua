@@ -9,7 +9,7 @@ package stdlib
 // ABI (`proc "c" (L: rawptr) -> i32`) and lean on the auxiliary library above.
 
 import "base:runtime"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // The name under which the global table is itself exposed (`_G`) -- reference
 // `LUA_GNAME`.
@@ -19,8 +19,8 @@ G_NAME :: "_G"
 // the typed state pointer from the raw ABI pointer. Kept as a tiny helper so each
 // function body reads like its C original.
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
-	return (^lua.State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^kernel.State {
+	return (^kernel.State)(Lp)
 }
 
 // print is intentionally absent: bare metal has no standard output.
@@ -31,17 +31,17 @@ state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
 base_warn :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	n := lua.api_gettop(L)
+	n := kernel.api_gettop(L)
 	aux_checkstring(L, 1)
 	for i in 2 ..= n {
 		aux_checkstring(L, i)
 	}
 	for i in 1 ..< n {
-		s, _ := lua.api_tostring(L, i)
-		lua.api_warning(L, cstring(raw_data(s)), true) // fragment: continued
+		s, _ := kernel.api_tostring(L, i)
+		kernel.api_warning(L, cstring(raw_data(s)), true) // fragment: continued
 	}
-	last, _ := lua.api_tostring(L, n)
-	lua.api_warning(L, cstring(raw_data(last)), false) // final fragment
+	last, _ := kernel.api_tostring(L, n)
+	kernel.api_warning(L, cstring(raw_data(last)), false) // final fragment
 	return 0
 }
 
@@ -53,7 +53,7 @@ base_warn :: proc "c" (Lp: rawptr) -> i32 {
 // `b_str2int`. Returns the parsed value and whether the *entire* string was a valid
 // numeral (leading/trailing spaces allowed).
 @(private = "file")
-b_str2int :: proc(s: string, base: int) -> (n: lua.Integer, ok: bool) {
+b_str2int :: proc(s: string, base: int) -> (n: kernel.Integer, ok: bool) {
 	i := 0
 	m := len(s)
 	is_space :: proc(c: u8) -> bool {
@@ -67,7 +67,7 @@ b_str2int :: proc(s: string, base: int) -> (n: lua.Integer, ok: bool) {
 		neg = s[i] == '-'
 		i += 1
 	}
-	acc: lua.Unsigned = 0
+	acc: kernel.Unsigned = 0
 	digits := 0
 	for i < m {
 		c := s[i]
@@ -86,7 +86,7 @@ b_str2int :: proc(s: string, base: int) -> (n: lua.Integer, ok: bool) {
 		if d >= base {
 			return 0, false
 		}
-		acc = acc * lua.Unsigned(base) + lua.Unsigned(d)
+		acc = acc * kernel.Unsigned(base) + kernel.Unsigned(d)
 		digits += 1
 		i += 1
 	}
@@ -99,7 +99,7 @@ b_str2int :: proc(s: string, base: int) -> (n: lua.Integer, ok: bool) {
 	if i != m {
 		return 0, false // trailing garbage
 	}
-	v := lua.Integer(acc)
+	v := kernel.Integer(acc)
 	if neg {
 		v = -v
 	}
@@ -110,28 +110,28 @@ b_str2int :: proc(s: string, base: int) -> (n: lua.Integer, ok: bool) {
 base_tonumber :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.api_isnoneornil(L, 2) {
+	if kernel.api_isnoneornil(L, 2) {
 		// Standard conversion (no explicit base).
-		if lua.api_type(L, 1) == lua.TNUMBER {
-			lua.api_settop(L, 1) // already a number: return it unchanged
+		if kernel.api_type(L, 1) == kernel.TNUMBER {
+			kernel.api_settop(L, 1) // already a number: return it unchanged
 			return 1
 		}
-		s, ok := lua.api_tolstring(L, 1)
-		if ok && lua.api_stringtonumber(L, s) == uint(len(s)) + 1 {
+		s, ok := kernel.api_tolstring(L, 1)
+		if ok && kernel.api_stringtonumber(L, s) == uint(len(s)) + 1 {
 			return 1 // parsed a full numeral (pushed by lua_stringtonumber)
 		}
 		aux_checkany(L, 1) // there must be *some* argument
 	} else {
 		base := aux_checkinteger(L, 2)
-		aux_checktype(L, 1, lua.TSTRING) // base form requires a string
+		aux_checktype(L, 1, kernel.TSTRING) // base form requires a string
 		s := aux_checkstring(L, 1)
 		aux_argcheck(L, 2 <= base && base <= 36, 2, "base out of range")
 		if v, ok := b_str2int(s, int(base)); ok {
-			lua.api_pushinteger(L, v)
+			kernel.api_pushinteger(L, v)
 			return 1
 		}
 	}
-	lua.api_pushnil(L) // fail == nil
+	kernel.api_pushnil(L) // fail == nil
 	return 1
 }
 
@@ -139,9 +139,9 @@ base_tonumber :: proc "c" (Lp: rawptr) -> i32 {
 base_type :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	tt := lua.api_type(L, 1)
-	aux_argcheck(L, tt != lua.TNONE, 1, "value expected")
-	lua.api_pushstring(L, lua.api_typename(L, tt))
+	tt := kernel.api_type(L, 1)
+	aux_argcheck(L, tt != kernel.TNONE, 1, "value expected")
+	kernel.api_pushstring(L, kernel.api_typename(L, tt))
 	return 1
 }
 
@@ -164,13 +164,13 @@ base_error :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	level := aux_optinteger(L, 2, 1)
-	lua.api_settop(L, 1)
-	if lua.api_type(L, 1) == lua.TSTRING && level > 0 {
+	kernel.api_settop(L, 1)
+	if kernel.api_type(L, 1) == kernel.TSTRING && level > 0 {
 		aux_where(L, int(level))
-		lua.api_pushvalue(L, 1)
-		lua.api_concat(L, 2)
+		kernel.api_pushvalue(L, 1)
+		kernel.api_concat(L, 2)
 	}
-	lua.api_error(L)
+	kernel.api_error(L)
 }
 
 // `assert(v, ...)` -- reference `luaB_assert`. Returns all arguments on truth,
@@ -178,13 +178,13 @@ base_error :: proc "c" (Lp: rawptr) -> i32 {
 base_assert :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.api_toboolean(L, 1) {
-		return i32(lua.api_gettop(L)) // pass through every argument
+	if kernel.api_toboolean(L, 1) {
+		return i32(kernel.api_gettop(L)) // pass through every argument
 	}
 	aux_checkany(L, 1) // there must be a condition
-	lua.api_remove(L, 1) // drop the (false) condition
-	lua.api_pushstring(L, "assertion failed!")
-	lua.api_settop(L, 1) // keep only the message (default unless one was given)
+	kernel.api_remove(L, 1) // drop the (false) condition
+	kernel.api_pushstring(L, "assertion failed!")
+	kernel.api_settop(L, 1) // keep only the message (default unless one was given)
 	return base_error(Lp) // delegate to error()
 }
 
@@ -197,22 +197,22 @@ base_assert :: proc "c" (Lp: rawptr) -> i32 {
 base_select :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	n := lua.api_gettop(L)
-	if lua.api_type(L, 1) == lua.TSTRING {
-		s, _ := lua.api_tostring(L, 1)
+	n := kernel.api_gettop(L)
+	if kernel.api_type(L, 1) == kernel.TSTRING {
+		s, _ := kernel.api_tostring(L, 1)
 		if len(s) > 0 && s[0] == '#' {
-			lua.api_pushinteger(L, lua.Integer(n - 1))
+			kernel.api_pushinteger(L, kernel.Integer(n - 1))
 			return 1
 		}
 	}
 	i := aux_checkinteger(L, 1)
 	if i < 0 {
-		i = lua.Integer(n) + i
-	} else if i > lua.Integer(n) {
-		i = lua.Integer(n)
+		i = kernel.Integer(n) + i
+	} else if i > kernel.Integer(n) {
+		i = kernel.Integer(n)
 	}
 	aux_argcheck(L, 1 <= i, 1, "index out of range")
-	return i32(lua.Integer(n) - i)
+	return i32(kernel.Integer(n) - i)
 }
 
 // --------------------------------------------------------------------------------
@@ -224,37 +224,37 @@ base_rawequal :: proc "c" (Lp: rawptr) -> i32 {
 	L := state(Lp)
 	aux_checkany(L, 1)
 	aux_checkany(L, 2)
-	lua.api_pushboolean(L, lua.api_rawequal(L, 1, 2))
+	kernel.api_pushboolean(L, kernel.api_rawequal(L, 1, 2))
 	return 1
 }
 
 base_rawlen :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	tt := lua.api_type(L, 1)
-	aux_argexpected(L, tt == lua.TTABLE || tt == lua.TSTRING, 1, "table or string")
-	lua.api_pushinteger(L, lua.Integer(lua.api_rawlen(L, 1)))
+	tt := kernel.api_type(L, 1)
+	aux_argexpected(L, tt == kernel.TTABLE || tt == kernel.TSTRING, 1, "table or string")
+	kernel.api_pushinteger(L, kernel.Integer(kernel.api_rawlen(L, 1)))
 	return 1
 }
 
 base_rawget :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	aux_checktype(L, 1, lua.TTABLE)
+	aux_checktype(L, 1, kernel.TTABLE)
 	aux_checkany(L, 2)
-	lua.api_settop(L, 2)
-	lua.api_rawget(L, 1)
+	kernel.api_settop(L, 2)
+	kernel.api_rawget(L, 1)
 	return 1
 }
 
 base_rawset :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	aux_checktype(L, 1, lua.TTABLE)
+	aux_checktype(L, 1, kernel.TTABLE)
 	aux_checkany(L, 2)
 	aux_checkany(L, 3)
-	lua.api_settop(L, 3)
-	lua.api_rawset(L, 1)
+	kernel.api_settop(L, 3)
+	kernel.api_rawset(L, 1)
 	return 1
 }
 
@@ -262,8 +262,8 @@ base_getmetatable :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	aux_checkany(L, 1)
-	if !lua.api_getmetatable(L, 1) {
-		lua.api_pushnil(L)
+	if !kernel.api_getmetatable(L, 1) {
+		kernel.api_pushnil(L)
 		return 1 // no metatable
 	}
 	aux_getmetafield(L, 1, "__metatable") // protected view if present
@@ -273,14 +273,14 @@ base_getmetatable :: proc "c" (Lp: rawptr) -> i32 {
 base_setmetatable :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	tt := lua.api_type(L, 2)
-	aux_checktype(L, 1, lua.TTABLE)
-	aux_argexpected(L, tt == lua.TNIL || tt == lua.TTABLE, 2, "nil or table")
-	if aux_getmetafield(L, 1, "__metatable") != lua.TNIL {
+	tt := kernel.api_type(L, 2)
+	aux_checktype(L, 1, kernel.TTABLE)
+	aux_argexpected(L, tt == kernel.TNIL || tt == kernel.TTABLE, 2, "nil or table")
+	if aux_getmetafield(L, 1, "__metatable") != kernel.TNIL {
 		aux_error(L, "cannot change a protected metatable")
 	}
-	lua.api_settop(L, 2)
-	lua.api_setmetatable(L, 1)
+	kernel.api_settop(L, 2)
+	kernel.api_setmetatable(L, 1)
 	return 1
 }
 
@@ -289,11 +289,11 @@ base_setmetatable :: proc "c" (Lp: rawptr) -> i32 {
 // --------------------------------------------------------------------------------
 
 @(private = "file")
-pushmode :: proc(L: ^lua.State, oldmode: int) -> i32 {
+pushmode :: proc(L: ^kernel.State, oldmode: int) -> i32 {
 	if oldmode == -1 {
-		lua.api_pushnil(L) // invalid call (inside a finalizer)
+		kernel.api_pushnil(L) // invalid call (inside a finalizer)
 	} else {
-		lua.api_pushstring(L, oldmode == lua.GCINC ? "incremental" : "generational")
+		kernel.api_pushstring(L, oldmode == kernel.GCINC ? "incremental" : "generational")
 	}
 	return 1
 }
@@ -314,68 +314,68 @@ base_collectgarbage :: proc "c" (Lp: rawptr) -> i32 {
 		"param",
 	}
 	optsnum := []int {
-		lua.GCSTOP,
-		lua.GCRESTART,
-		lua.GCCOLLECT,
-		lua.GCCOUNT,
-		lua.GCSTEP,
-		lua.GCISRUNNING,
-		lua.GCGEN,
-		lua.GCINC,
-		lua.GCPARAM,
+		kernel.GCSTOP,
+		kernel.GCRESTART,
+		kernel.GCCOLLECT,
+		kernel.GCCOUNT,
+		kernel.GCSTEP,
+		kernel.GCISRUNNING,
+		kernel.GCGEN,
+		kernel.GCINC,
+		kernel.GCPARAM,
 	}
 	o := optsnum[aux_checkoption(L, 1, "collect", opts)]
 	switch o {
-	case lua.GCCOUNT:
-		k := lua.api_gc(L, o)
-		b := lua.api_gc(L, lua.GCCOUNTB)
+	case kernel.GCCOUNT:
+		k := kernel.api_gc(L, o)
+		b := kernel.api_gc(L, kernel.GCCOUNTB)
 		if k == -1 {
 			break
 		}
-		lua.api_pushnumber(L, lua.Number(k) + lua.Number(b) / 1024)
+		kernel.api_pushnumber(L, kernel.Number(k) + kernel.Number(b) / 1024)
 		return 1
-	case lua.GCSTEP:
+	case kernel.GCSTEP:
 		n := aux_optinteger(L, 2, 0)
-		res := lua.api_gc(L, o, int(n))
+		res := kernel.api_gc(L, o, int(n))
 		if res == -1 {
 			break
 		}
-		lua.api_pushboolean(L, res != 0)
+		kernel.api_pushboolean(L, res != 0)
 		return 1
-	case lua.GCISRUNNING:
-		res := lua.api_gc(L, o)
+	case kernel.GCISRUNNING:
+		res := kernel.api_gc(L, o)
 		if res == -1 {
 			break
 		}
-		lua.api_pushboolean(L, res != 0)
+		kernel.api_pushboolean(L, res != 0)
 		return 1
-	case lua.GCGEN:
-		return pushmode(L, lua.api_gc(L, o))
-	case lua.GCINC:
-		return pushmode(L, lua.api_gc(L, o))
-	case lua.GCPARAM:
+	case kernel.GCGEN:
+		return pushmode(L, kernel.api_gc(L, o))
+	case kernel.GCINC:
+		return pushmode(L, kernel.api_gc(L, o))
+	case kernel.GCPARAM:
 		params := []string{"minormul", "majorminor", "minormajor", "pause", "stepmul", "stepsize"}
 		pnum := []int {
-			lua.GCPMINORMUL,
-			lua.GCPMAJORMINOR,
-			lua.GCPMINORMAJOR,
-			lua.GCPPAUSE,
-			lua.GCPSTEPMUL,
-			lua.GCPSTEPSIZE,
+			kernel.GCPMINORMUL,
+			kernel.GCPMAJORMINOR,
+			kernel.GCPMINORMAJOR,
+			kernel.GCPPAUSE,
+			kernel.GCPSTEPMUL,
+			kernel.GCPSTEPSIZE,
 		}
 		p := pnum[aux_checkoption(L, 2, "", params)]
 		value := aux_optinteger(L, 3, -1)
-		lua.api_pushinteger(L, lua.Integer(lua.api_gc(L, o, p, int(value))))
+		kernel.api_pushinteger(L, kernel.Integer(kernel.api_gc(L, o, p, int(value))))
 		return 1
 	case:
-		res := lua.api_gc(L, o)
+		res := kernel.api_gc(L, o)
 		if res == -1 {
 			break
 		}
-		lua.api_pushinteger(L, lua.Integer(res))
+		kernel.api_pushinteger(L, kernel.Integer(res))
 		return 1
 	}
-	lua.api_pushnil(L) // invalid call (inside a finalizer)
+	kernel.api_pushnil(L) // invalid call (inside a finalizer)
 	return 1
 }
 
@@ -386,18 +386,18 @@ base_collectgarbage :: proc "c" (Lp: rawptr) -> i32 {
 base_next :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	aux_checktype(L, 1, lua.TTABLE)
-	lua.api_settop(L, 2) // ensure there is a (possibly nil) key argument
-	if lua.api_next(L, 1) {
+	aux_checktype(L, 1, kernel.TTABLE)
+	kernel.api_settop(L, 2) // ensure there is a (possibly nil) key argument
+	if kernel.api_next(L, 1) {
 		return 2
 	}
-	lua.api_pushnil(L)
+	kernel.api_pushnil(L)
 	return 1
 }
 
 // `__pairs` continuation: it already produced the four results -- reference
 // `pairscont`.
-pairscont :: proc "c" (Lp: rawptr, status: i32, ctx: lua.K_Context) -> i32 {
+pairscont :: proc "c" (Lp: rawptr, status: i32, ctx: kernel.K_Context) -> i32 {
 	return 4
 }
 
@@ -407,14 +407,14 @@ base_pairs :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	aux_checkany(L, 1)
-	if aux_getmetafield(L, 1, "__pairs") == lua.TNIL {
-		lua.api_pushcfunction(L, base_next) // iterator
-		lua.api_pushvalue(L, 1) // state
-		lua.api_pushnil(L) // initial control value
-		lua.api_pushnil(L) // to-be-closed slot
+	if aux_getmetafield(L, 1, "__pairs") == kernel.TNIL {
+		kernel.api_pushcfunction(L, base_next) // iterator
+		kernel.api_pushvalue(L, 1) // state
+		kernel.api_pushnil(L) // initial control value
+		kernel.api_pushnil(L) // to-be-closed slot
 	} else {
-		lua.api_pushvalue(L, 1) // self
-		lua.api_callk(L, 1, 4, 0, pairscont) // __pairs returns four values
+		kernel.api_pushvalue(L, 1) // self
+		kernel.api_callk(L, 1, 4, 0, pairscont) // __pairs returns four values
 	}
 	return 4
 }
@@ -424,8 +424,8 @@ ipairsaux :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	i := aux_checkinteger(L, 2) + 1
-	lua.api_pushinteger(L, i)
-	return lua.api_geti(L, 1, i) == lua.TNIL ? 1 : 2
+	kernel.api_pushinteger(L, i)
+	return kernel.api_geti(L, 1, i) == kernel.TNIL ? 1 : 2
 }
 
 // `ipairs(t)` -- reference `luaB_ipairs`. Returns (iterator, t, 0).
@@ -433,9 +433,9 @@ base_ipairs :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	aux_checkany(L, 1)
-	lua.api_pushcfunction(L, ipairsaux)
-	lua.api_pushvalue(L, 1)
-	lua.api_pushinteger(L, 0)
+	kernel.api_pushcfunction(L, ipairsaux)
+	kernel.api_pushvalue(L, 1)
+	kernel.api_pushinteger(L, 0)
 	return 3
 }
 
@@ -446,25 +446,25 @@ base_ipairs :: proc "c" (Lp: rawptr) -> i32 {
 // Shared tail for `load`/`loadfile`: on success optionally install the `env`
 // upvalue; on error return `fail, message` -- reference `load_aux`.
 @(private = "file")
-load_aux :: proc(L: ^lua.State, status: lua.Thread_Status, envidx: int) -> i32 {
+load_aux :: proc(L: ^kernel.State, status: kernel.Thread_Status, envidx: int) -> i32 {
 	if status == .Ok {
 		if envidx != 0 {
-			lua.api_pushvalue(L, envidx)
-			if _, ok := lua.api_setupvalue(L, -2, 1); !ok {
-				lua.api_pop(L, 1) // env unused by the chunk: drop it
+			kernel.api_pushvalue(L, envidx)
+			if _, ok := kernel.api_setupvalue(L, -2, 1); !ok {
+				kernel.api_pop(L, 1) // env unused by the chunk: drop it
 			}
 		}
 		return 1
 	}
-	lua.api_pushnil(L) // fail
-	lua.api_insert(L, -2) // put it before the error message
+	kernel.api_pushnil(L) // fail
+	kernel.api_insert(L, -2) // put it before the error message
 	return 2
 }
 
 // Validate and return a load mode, rejecting the fixed-buffer 'B' flag from Lua --
 // reference `getMode`.
 @(private = "file")
-getMode :: proc(L: ^lua.State, idx: int) -> string {
+getMode :: proc(L: ^kernel.State, idx: int) -> string {
 	mode := aux_optstring(L, idx, "bt")
 	for c in transmute([]u8)mode {
 		if c == 'B' {
@@ -482,21 +482,21 @@ getMode :: proc(L: ^lua.State, idx: int) -> string {
 RESERVEDSLOT :: 5
 
 // Reader for `load(f)` where `f` is a function -- reference `generic_reader`.
-generic_reader :: proc "c" (L: ^lua.State, ud: rawptr, size: ^uint) -> [^]u8 {
+generic_reader :: proc "c" (L: ^kernel.State, ud: rawptr, size: ^uint) -> [^]u8 {
 	context = runtime.default_context()
 	aux_checkstack(L, 2, "too many nested functions")
-	lua.api_pushvalue(L, 1) // the reader function
-	lua.api_call(L, 0, 1) // call it for the next piece
-	if lua.api_isnil(L, -1) {
-		lua.api_pop(L, 1)
+	kernel.api_pushvalue(L, 1) // the reader function
+	kernel.api_call(L, 0, 1) // call it for the next piece
+	if kernel.api_isnil(L, -1) {
+		kernel.api_pop(L, 1)
 		size^ = 0
 		return nil // end of input
 	}
-	if !lua.api_isstring(L, -1) {
+	if !kernel.api_isstring(L, -1) {
 		aux_error(L, "reader function must return a string")
 	}
-	lua.api_replace(L, RESERVEDSLOT) // park it in the reserved slot
-	s, _ := lua.api_tolstring(L, RESERVEDSLOT)
+	kernel.api_replace(L, RESERVEDSLOT) // park it in the reserved slot
+	s, _ := kernel.api_tolstring(L, RESERVEDSLOT)
 	size^ = uint(len(s))
 	return ([^]u8)(raw_data(s))
 }
@@ -505,18 +505,18 @@ base_load :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	mode := getMode(L, 3)
-	env := !lua.api_isnone(L, 4) ? 4 : 0
-	status: lua.Thread_Status
-	if s, ok := lua.api_tolstring(L, 1); ok {
+	env := !kernel.api_isnone(L, 4) ? 4 : 0
+	status: kernel.Thread_Status
+	if s, ok := kernel.api_tolstring(L, 1); ok {
 		// Loading from a string.
 		chunkname := aux_optstring(L, 2, s)
 		status = aux_loadbufferx(L, transmute([]u8)s, chunkname, mode)
 	} else {
 		// Loading from a reader function.
 		chunkname := aux_optstring(L, 2, "=(load)")
-		aux_checktype(L, 1, lua.TFUNCTION)
-		lua.api_settop(L, RESERVEDSLOT) // create the reserved slot
-		status = lua.api_load(L, generic_reader, nil, chunkname, mode)
+		aux_checktype(L, 1, kernel.TFUNCTION)
+		kernel.api_settop(L, RESERVEDSLOT) // create the reserved slot
+		status = kernel.api_load(L, generic_reader, nil, chunkname, mode)
 	}
 	return load_aux(L, status, env)
 }
@@ -529,37 +529,37 @@ base_load :: proc "c" (Lp: rawptr) -> i32 {
 
 // Shared continuation/tail for `pcall`/`xpcall` -- reference `finishpcall`. `extra`
 // counts leading stack values to skip when returning results.
-finishpcall :: proc "c" (Lp: rawptr, status: i32, extra: lua.K_Context) -> i32 {
+finishpcall :: proc "c" (Lp: rawptr, status: i32, extra: kernel.K_Context) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	st := lua.Thread_Status(status)
+	st := kernel.Thread_Status(status)
 	if st != .Ok && st != .Yield {
-		lua.api_pushboolean(L, false) // first result: false
-		lua.api_pushvalue(L, -2) // the error message
+		kernel.api_pushboolean(L, false) // first result: false
+		kernel.api_pushvalue(L, -2) // the error message
 		return 2
 	}
-	return i32(lua.api_gettop(L) - int(extra))
+	return i32(kernel.api_gettop(L) - int(extra))
 }
 
 base_pcall :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	aux_checkany(L, 1)
-	lua.api_pushboolean(L, true) // success sentinel, prepended
-	lua.api_insert(L, 1)
-	status := lua.api_pcallk(L, lua.api_gettop(L) - 2, lua.MULTRET, 0, 0, finishpcall)
+	kernel.api_pushboolean(L, true) // success sentinel, prepended
+	kernel.api_insert(L, 1)
+	status := kernel.api_pcallk(L, kernel.api_gettop(L) - 2, kernel.MULTRET, 0, 0, finishpcall)
 	return finishpcall(Lp, i32(status), 0)
 }
 
 base_xpcall :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	n := lua.api_gettop(L)
-	aux_checktype(L, 2, lua.TFUNCTION) // the message handler
-	lua.api_pushboolean(L, true)
-	lua.api_pushvalue(L, 1) // the function to call
-	lua.api_rotate(L, 3, 2) // move sentinel+function below the arguments
-	status := lua.api_pcallk(L, n - 2, lua.MULTRET, 2, 2, finishpcall)
+	n := kernel.api_gettop(L)
+	aux_checktype(L, 2, kernel.TFUNCTION) // the message handler
+	kernel.api_pushboolean(L, true)
+	kernel.api_pushvalue(L, 1) // the function to call
+	kernel.api_rotate(L, 3, 2) // move sentinel+function below the arguments
+	status := kernel.api_pcallk(L, n - 2, kernel.MULTRET, 2, 2, finishpcall)
 	return finishpcall(Lp, i32(status), 2)
 }
 
@@ -598,11 +598,11 @@ base_funcs := []Reg {
 open_base :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.api_pushglobaltable(L)
+	kernel.api_pushglobaltable(L)
 	aux_setfuncs(L, base_funcs, 0)
-	lua.api_pushvalue(L, -1)
-	lua.api_setfield(L, -2, G_NAME) // _G._G = _G
-	lua.api_pushstring(L, lua.VERSION)
-	lua.api_setfield(L, -2, "_VERSION")
+	kernel.api_pushvalue(L, -1)
+	kernel.api_setfield(L, -2, G_NAME) // _G._G = _G
+	kernel.api_pushstring(L, kernel.VERSION)
+	kernel.api_setfield(L, -2, "_VERSION")
 	return 1
 }

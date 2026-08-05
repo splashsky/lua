@@ -31,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
 $BenchDir = Join-Path $RepoRoot 'bench'
-$Collection = "-collection:luao=$SrcDir"
+$Collection = "-collection:lang=$SrcDir"
 
 # Odin mis-tokenizes the space in this repository's OneDrive path, so benchmark
 # builds deliberately land in a stable, space-free temp directory.

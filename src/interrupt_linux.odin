@@ -4,7 +4,7 @@
 package main
 
 import linux "core:sys/linux"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // Linux is the only POSIX ABI implemented here. Odin's core syscall wrapper
 // supplies the architecture-correct rt_sigaction layout and restorer without
@@ -17,7 +17,7 @@ linux_interrupt_handler :: proc "c" (signal: linux.Signal) {
 	action := linux.Sig_Action{}
 	action.special = .SIG_DFL
 	_ = linux.rt_sigaction(.SIGINT, &action, nil)
-	lua.api_request_async_hook(&interrupt_request)
+	kernel.api_request_async_hook(&interrupt_request)
 }
 
 platform_interrupt_init :: proc() {}

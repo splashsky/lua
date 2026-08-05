@@ -8,37 +8,37 @@ package tests
 // Files are removed at the end of each chunk so the tests leave no residue.
 
 import "core:testing"
-import lua "luao:lua"
-import aux "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
-io_state :: proc() -> ^lua.State {
-	L := lua.new_state(lua.default_allocator())
-	lua.api_pushcfunction(L, aux.open_base)
-	lua.api_call(L, 0, 0)
-	lua.api_pushcfunction(L, aux.open_io)
-	lua.api_call(L, 0, 1)
-	lua.api_setglobal(L, "io")
-	lua.api_pushcfunction(L, aux.open_os)
-	lua.api_call(L, 0, 1)
-	lua.api_setglobal(L, "os")
+io_state :: proc() -> ^kernel.State {
+	L := kernel.new_state(kernel.default_allocator())
+	kernel.api_pushcfunction(L, stdlib.open_base)
+	kernel.api_call(L, 0, 0)
+	kernel.api_pushcfunction(L, stdlib.open_io)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "io")
+	kernel.api_pushcfunction(L, stdlib.open_os)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "os")
 	return L
 }
 
-io_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
-	if st := aux.aux_loadstring(L, src); st != .Ok {
+io_run :: proc(L: ^kernel.State, src: string) -> kernel.Thread_Status {
+	if st := stdlib.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.api_pcall(L, 0, lua.MULTRET, 0)
+	return kernel.api_pcall(L, 0, kernel.MULTRET, 0)
 }
 
-io_eval :: proc(t: ^testing.T, L: ^lua.State, src: string) -> string {
+io_eval :: proc(t: ^testing.T, L: ^kernel.State, src: string) -> string {
 	st := io_run(L, src)
 	if st != .Ok {
-		msg, _ := lua.api_tolstring(L, -1)
+		msg, _ := kernel.api_tolstring(L, -1)
 		testing.expectf(t, false, "chunk failed: %s", msg)
 		return ""
 	}
-	s, _ := lua.api_tolstring(L, -1)
+	s, _ := kernel.api_tolstring(L, -1)
 	return s
 }
 
@@ -56,7 +56,7 @@ POPEN_WRITE_COMMAND :: "'sort > ' .. path" when ODIN_OS == .Windows else
 @(test)
 io_write_read_all :: proc(t: ^testing.T) {
 	L := io_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		IO_PREAMBLE +
 		"local path = tmppath('all.tmp')\n" +
@@ -76,7 +76,7 @@ io_write_read_all :: proc(t: ^testing.T) {
 @(test)
 io_line_formats :: proc(t: ^testing.T) {
 	L := io_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		IO_PREAMBLE +
 		"local path = tmppath('lines.tmp')\n" +
@@ -97,7 +97,7 @@ io_line_formats :: proc(t: ^testing.T) {
 @(test)
 io_bulk_read_edge_cases :: proc(t: ^testing.T) {
 	L := io_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		IO_PREAMBLE +
 		"local path = tmppath('bulk.tmp')\n" +
@@ -144,7 +144,7 @@ io_bulk_read_edge_cases :: proc(t: ^testing.T) {
 @(test)
 io_number_and_chars :: proc(t: ^testing.T) {
 	L := io_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		IO_PREAMBLE +
 		"local path = tmppath('num.tmp')\n" +
@@ -170,7 +170,7 @@ io_number_and_chars :: proc(t: ^testing.T) {
 @(test)
 io_seek_positions :: proc(t: ^testing.T) {
 	L := io_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		IO_PREAMBLE +
 		"local path = tmppath('seek.tmp')\n" +
@@ -195,7 +195,7 @@ io_seek_positions :: proc(t: ^testing.T) {
 @(test)
 io_lines_iterators :: proc(t: ^testing.T) {
 	L := io_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		IO_PREAMBLE +
 		"local path = tmppath('iter.tmp')\n" +
@@ -221,7 +221,7 @@ io_lines_iterators :: proc(t: ^testing.T) {
 @(test)
 io_type_and_defaults :: proc(t: ^testing.T) {
 	L := io_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		"assert(io.type('not a file') == nil)\n" + // non-userdata
 		"assert(io.type(42) == nil)\n" +
@@ -236,7 +236,7 @@ io_type_and_defaults :: proc(t: ^testing.T) {
 @(test)
 io_error_paths :: proc(t: ^testing.T) {
 	L := io_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		IO_PREAMBLE +
 		// invalid open mode is rejected before touching the filesystem
@@ -260,7 +260,7 @@ io_error_paths :: proc(t: ^testing.T) {
 @(test)
 io_tmpfile_roundtrip :: proc(t: ^testing.T) {
 	L := io_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// io.tmpfile may be unavailable in restricted environments; when it succeeds it
 	// must honestly round-trip through a rewind. When it fails it must report the
 	// (nil, message) failure contract. Either outcome is asserted truthfully.
@@ -283,7 +283,7 @@ io_tmpfile_roundtrip :: proc(t: ^testing.T) {
 io_popen_read_and_status :: proc(t: ^testing.T) {
 	when ODIN_OS == .Windows || ODIN_OS == .Linux {
 		L := io_state()
-		defer lua.close_state(L)
+		defer kernel.close_state(L)
 		src :=
 			"local f = assert(io.popen('echo hello'))\n" +
 			"assert(f:read('a') == 'hello\\n')\n" +
@@ -307,7 +307,7 @@ io_popen_read_and_status :: proc(t: ^testing.T) {
 io_popen_write_and_mode_validation :: proc(t: ^testing.T) {
 	when ODIN_OS == .Windows || ODIN_OS == .Linux {
 		L := io_state()
-		defer lua.close_state(L)
+		defer kernel.close_state(L)
 		src :=
 			IO_PREAMBLE +
 			"local path = tmppath('popen_write.tmp')\n" +

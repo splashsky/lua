@@ -5,7 +5,7 @@ package shellproc
 
 import "core:os"
 import linux "core:sys/linux"
-import stream "luao:stream"
+import stream "lang:stream"
 
 linux_error :: proc(errno: linux.Errno) -> os.Error {
 	#partial switch errno {

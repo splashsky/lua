@@ -13,24 +13,24 @@ package tests
 // If any of these drift, something that must agree with reference Lua has broken.
 
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 @(test)
 version_numbers_match_lua_5_5_0 :: proc(t: ^testing.T) {
-	testing.expect_value(t, lua.VERSION_MAJOR_N, 5)
-	testing.expect_value(t, lua.VERSION_MINOR_N, 5)
-	testing.expect_value(t, lua.VERSION_RELEASE_N, 0)
+	testing.expect_value(t, kernel.VERSION_MAJOR_N, 5)
+	testing.expect_value(t, kernel.VERSION_MINOR_N, 5)
+	testing.expect_value(t, kernel.VERSION_RELEASE_N, 0)
 }
 
 @(test)
 combined_version_numbers_use_reference_formula :: proc(t: ^testing.T) {
 	// Reference Lua: VERSION_NUM = MAJOR*100 + MINOR; RELEASE_NUM = NUM*100 + REL.
-	testing.expect_value(t, lua.VERSION_NUM, 505)
-	testing.expect_value(t, lua.VERSION_RELEASE_NUM, 50500)
+	testing.expect_value(t, kernel.VERSION_NUM, 505)
+	testing.expect_value(t, kernel.VERSION_RELEASE_NUM, 50500)
 }
 
 @(test)
 release_string_is_assembled_correctly :: proc(t: ^testing.T) {
-	testing.expect_value(t, lua.VERSION, "Lua 5.5")
-	testing.expect_value(t, lua.RELEASE, "Lua 5.5.0")
+	testing.expect_value(t, kernel.VERSION, "Lua 5.5")
+	testing.expect_value(t, kernel.RELEASE, "Lua 5.5.0")
 }

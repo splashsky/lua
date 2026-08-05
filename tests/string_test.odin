@@ -11,12 +11,12 @@ package tests
 // because we handed the same literal address in twice.
 
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // Read a TString's bytes back as an ordinary Odin string, so tests can assert on
 // content without poking at internal layout beyond the documented accessors.
-str_contents :: proc(ts: ^lua.TString) -> string {
-	return string(lua.str_bytes(ts)[:ts.len])
+str_contents :: proc(ts: ^kernel.TString) -> string {
+	return string(kernel.str_bytes(ts)[:ts.len])
 }
 
 // Two short strings with identical contents, built from two distinct buffers, must
@@ -24,9 +24,9 @@ str_contents :: proc(ts: ^lua.TString) -> string {
 // interning: it makes string comparison a single pointer compare everywhere else.
 @(test)
 short_strings_are_interned :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	buf_a := [5]u8{'h', 'e', 'l', 'l', 'o'}
 	buf_b := [5]u8{'h', 'e', 'l', 'l', 'o'}
@@ -34,29 +34,29 @@ short_strings_are_interned :: proc(t: ^testing.T) {
 	// caller's pointer identity.
 	testing.expect(t, &buf_a[0] != &buf_b[0], "buffers must be distinct")
 
-	a := lua.string_newlstr(L, ([^]u8)(&buf_a[0]), 5)
-	b := lua.string_newlstr(L, ([^]u8)(&buf_b[0]), 5)
+	a := kernel.string_newlstr(L, ([^]u8)(&buf_a[0]), 5)
+	b := kernel.string_newlstr(L, ([^]u8)(&buf_b[0]), 5)
 	testing.expect(t, a != nil && b != nil)
 	testing.expect(t, a == b, "equal short strings must intern to one object")
 	testing.expect_value(t, str_contents(a), "hello")
-	testing.expect(t, a.tt == lua.VSHRSTR, "short strings carry the VSHRSTR tag")
+	testing.expect(t, a.tt == kernel.VSHRSTR, "short strings carry the VSHRSTR tag")
 }
 
 // Distinct contents must yield distinct objects, and the general equality helper
 // must agree with identity for interned strings.
 @(test)
 distinct_short_strings_differ :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	a := lua.string_new(L, "alpha")
-	b := lua.string_new(L, "beta")
-	c := lua.string_new(L, "alpha")
+	a := kernel.string_new(L, "alpha")
+	b := kernel.string_new(L, "beta")
+	c := kernel.string_new(L, "alpha")
 	testing.expect(t, a != b, "different contents must not share an object")
 	testing.expect(t, a == c, "repeat of the same content re-uses the object")
-	testing.expect(t, lua.string_eqstr(a, c), "eqstr must hold for interned equals")
-	testing.expect(t, !lua.string_eqstr(a, b), "eqstr must fail for different strings")
+	testing.expect(t, kernel.string_eqstr(a, c), "eqstr must hold for interned equals")
+	testing.expect(t, !kernel.string_eqstr(a, b), "eqstr must fail for different strings")
 }
 
 // Long strings (longer than MAXSHORTLEN) are intentionally never interned: two
@@ -65,9 +65,9 @@ distinct_short_strings_differ :: proc(t: ^testing.T) {
 // identity, so the VM must never assume long-string identity means equality.
 @(test)
 long_strings_are_not_interned :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	// 50 bytes -- comfortably past the 40-byte short-string boundary.
 	buf_a: [50]u8
@@ -77,15 +77,15 @@ long_strings_are_not_interned :: proc(t: ^testing.T) {
 		buf_b[i] = 'x'
 	}
 
-	a := lua.string_newlstr(L, ([^]u8)(&buf_a[0]), 50)
-	b := lua.string_newlstr(L, ([^]u8)(&buf_b[0]), 50)
+	a := kernel.string_newlstr(L, ([^]u8)(&buf_a[0]), 50)
+	b := kernel.string_newlstr(L, ([^]u8)(&buf_b[0]), 50)
 	testing.expect(t, a != nil && b != nil)
-	testing.expect(t, a.tt == lua.VLNGSTR, "long strings carry the VLNGSTR tag")
+	testing.expect(t, a.tt == kernel.VLNGSTR, "long strings carry the VLNGSTR tag")
 	testing.expect(t, a != b, "equal long strings stay as separate objects")
 
 	// Content is still equal, and the long-string comparison helper must say so
 	// even though the objects differ.
-	testing.expect(t, lua.string_eqlngstr(a, b), "eqlngstr compares by content")
+	testing.expect(t, kernel.string_eqlngstr(a, b), "eqlngstr compares by content")
 	testing.expect_value(t, len(str_contents(a)), 50)
 }
 
@@ -96,22 +96,22 @@ long_strings_are_not_interned :: proc(t: ^testing.T) {
 // checks would fail.
 @(test)
 string_table_grows_and_keeps_interning :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	firsts: [400]^lua.TString
+	firsts: [400]^kernel.TString
 	for i in 0 ..< 400 {
 		buf: [16]u8
 		n := format_uint_into(buf[:], u64(i))
-		firsts[i] = lua.string_newlstr(L, ([^]u8)(&buf[0]), uint(n))
+		firsts[i] = kernel.string_newlstr(L, ([^]u8)(&buf[0]), uint(n))
 		testing.expect(t, firsts[i] != nil)
 	}
 	// Re-intern each: it must return the identical object stored the first time.
 	for i in 0 ..< 400 {
 		buf: [16]u8
 		n := format_uint_into(buf[:], u64(i))
-		again := lua.string_newlstr(L, ([^]u8)(&buf[0]), uint(n))
+		again := kernel.string_newlstr(L, ([^]u8)(&buf[0]), uint(n))
 		testing.expect(t, again == firsts[i], "interning must be stable across growth")
 	}
 }

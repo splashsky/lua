@@ -5,8 +5,8 @@ package main
 
 import "base:intrinsics"
 import win "core:sys/windows"
-import host "luao:host"
-import lua "luao:lua"
+import host "lang:host"
+import kernel "lang:kernel"
 
 // Windows does not deliver Ctrl-C on the interpreter thread. It creates a fresh
 // control-handler thread, often while the VM is halfway through mutating a
@@ -23,7 +23,7 @@ console_control_handler :: proc "system" (kind: win.DWORD) -> win.BOOL {
 		if intrinsics.atomic_load(&interrupt_stage) == 1 {
 			_, won := intrinsics.atomic_compare_exchange_strong(&interrupt_stage, i32(1), i32(2))
 			if won {
-				lua.api_request_async_hook(&interrupt_request)
+				kernel.api_request_async_hook(&interrupt_request)
 				return win.TRUE
 			}
 		}

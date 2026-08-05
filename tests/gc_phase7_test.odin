@@ -12,7 +12,7 @@ package tests
 // a parameter that round-trips). No test asserts on incidental collector internals.
 
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // A full collection must reclaim a batch of unreferenced objects: after creating
 // several tables that nothing roots, driving `lua_gc` COLLECT brings the live
@@ -20,17 +20,17 @@ import lua "luao:lua"
 // run to completion, sweeps everything the foundation used to sweep.
 @(test)
 gc_phase7_collect_reclaims_batch :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	base := count_allgc(L)
 	for _ in 0 ..< 8 {
-		_ = lua.table_new(L) // created, never rooted
+		_ = kernel.table_new(L) // created, never rooted
 	}
 	testing.expect(t, count_allgc(L) >= base + 8, "the batch is live before collecting")
 
-	lua.api_gc(L, lua.GCCOLLECT)
+	kernel.api_gc(L, kernel.GCCOLLECT)
 	testing.expect_value(t, count_allgc(L), base)
 }
 
@@ -40,21 +40,21 @@ gc_phase7_collect_reclaims_batch :: proc(t: ^testing.T) {
 // ISRUNNING off, and RESTART turns it back on.
 @(test)
 gc_phase7_api_count_and_running :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	// A living state holds some bytes; COUNT is #bytes >> 10, so it is >= 0 and
 	// COUNTB (the low 10 bits) is always in range.
-	testing.expect(t, lua.api_gc(L, lua.GCCOUNT) >= 0, "COUNT is non-negative")
-	countb := lua.api_gc(L, lua.GCCOUNTB)
+	testing.expect(t, kernel.api_gc(L, kernel.GCCOUNT) >= 0, "COUNT is non-negative")
+	countb := kernel.api_gc(L, kernel.GCCOUNTB)
 	testing.expect(t, 0 <= countb && countb < 1024, "COUNTB is the low 10 bits")
 
-	testing.expect_value(t, lua.api_gc(L, lua.GCISRUNNING), 1)
-	lua.api_gc(L, lua.GCSTOP)
-	testing.expect_value(t, lua.api_gc(L, lua.GCISRUNNING), 0)
-	lua.api_gc(L, lua.GCRESTART)
-	testing.expect_value(t, lua.api_gc(L, lua.GCISRUNNING), 1)
+	testing.expect_value(t, kernel.api_gc(L, kernel.GCISRUNNING), 1)
+	kernel.api_gc(L, kernel.GCSTOP)
+	testing.expect_value(t, kernel.api_gc(L, kernel.GCISRUNNING), 0)
+	kernel.api_gc(L, kernel.GCRESTART)
+	testing.expect_value(t, kernel.api_gc(L, kernel.GCISRUNNING), 1)
 }
 
 // Switching collection mode returns the *previous* mode and installs the new one,
@@ -63,16 +63,16 @@ gc_phase7_api_count_and_running :: proc(t: ^testing.T) {
 // returns GEN (and switches back).
 @(test)
 gc_phase7_api_mode_switch :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	// Fresh states run the incremental collector.
-	prev := lua.api_gc(L, lua.GCGEN)
-	testing.expect_value(t, prev, lua.GCINC)
+	prev := kernel.api_gc(L, kernel.GCGEN)
+	testing.expect_value(t, prev, kernel.GCINC)
 
-	prev2 := lua.api_gc(L, lua.GCINC)
-	testing.expect_value(t, prev2, lua.GCGEN)
+	prev2 := kernel.api_gc(L, kernel.GCINC)
+	testing.expect_value(t, prev2, kernel.GCGEN)
 }
 
 // A GC parameter must round-trip through `lua_gc` PARAM: reading returns the
@@ -80,16 +80,16 @@ gc_phase7_api_mode_switch :: proc(t: ^testing.T) {
 // next read. We use the pause parameter and confirm the write took.
 @(test)
 gc_phase7_api_param_roundtrip :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	// Set the pause parameter to 300 and read it straight back. The read applies
 	// the coded value at 100%, recovering (approximately) what we stored; the
 	// float-coding is lossy at the low bits, so we assert it is in the right
 	// neighborhood rather than bit-exact.
-	_ = lua.api_gc(L, lua.GCPARAM, lua.GCPPAUSE, 300)
-	got := lua.api_gc(L, lua.GCPARAM, lua.GCPPAUSE, -1)
+	_ = kernel.api_gc(L, kernel.GCPARAM, kernel.GCPPAUSE, 300)
+	got := kernel.api_gc(L, kernel.GCPARAM, kernel.GCPPAUSE, -1)
 	testing.expect(t, 290 <= got && got <= 310, "the pause parameter round-trips")
 }
 
@@ -99,48 +99,48 @@ gc_phase7_api_param_roundtrip :: proc(t: ^testing.T) {
 // key 2, collect, and confirm key 1 was cleared while key 2 survived.
 @(test)
 gc_phase7_weak_value_cleared :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	weak := lua.table_new(L)
-	push_root(L, lua.obj2gco(weak))
-	mt := lua.table_new(L)
-	push_root(L, lua.obj2gco(mt))
+	weak := kernel.table_new(L)
+	push_root(L, kernel.obj2gco(weak))
+	mt := kernel.table_new(L)
+	push_root(L, kernel.obj2gco(mt))
 
 	// Install __mode = "v" on the weak table's metatable.
-	modekey := lua.string_new(L, "__mode")
-	mk: lua.TValue
-	lua.set_string(&mk, modekey)
-	mv: lua.TValue
-	lua.set_string(&mv, lua.string_new(L, "v"))
-	testing.expect(t, lua.table_set(L, mt, &mk, &mv) == .Ok)
+	modekey := kernel.string_new(L, "__mode")
+	mk: kernel.TValue
+	kernel.set_string(&mk, modekey)
+	mv: kernel.TValue
+	kernel.set_string(&mv, kernel.string_new(L, "v"))
+	testing.expect(t, kernel.table_set(L, mt, &mk, &mv) == .Ok)
 	weak.metatable = mt
 
 	// key 1 -> a table nothing else references (weakly held, must be cleared).
-	orphan := lua.table_new(L)
-	ov: lua.TValue
-	lua.set_gc(&ov, lua.obj2gco(orphan))
-	testing.expect(t, lua.table_setint(L, weak, 1, &ov) == .Ok)
+	orphan := kernel.table_new(L)
+	ov: kernel.TValue
+	kernel.set_gc(&ov, kernel.obj2gco(orphan))
+	testing.expect(t, kernel.table_setint(L, weak, 1, &ov) == .Ok)
 
 	// key 2 -> a string we root on the stack (strongly held, must survive).
-	kept := lua.string_new(L, "kept-weak-value")
-	push_root(L, lua.obj2gco(kept))
-	kv: lua.TValue
-	lua.set_string(&kv, kept)
-	testing.expect(t, lua.table_setint(L, weak, 2, &kv) == .Ok)
+	kept := kernel.string_new(L, "kept-weak-value")
+	push_root(L, kernel.obj2gco(kept))
+	kv: kernel.TValue
+	kernel.set_string(&kv, kept)
+	testing.expect(t, kernel.table_setint(L, weak, 2, &kv) == .Ok)
 
-	lua.api_gc(L, lua.GCCOLLECT)
+	kernel.api_gc(L, kernel.GCCOLLECT)
 
 	// The orphaned value is gone; the rooted value is intact.
-	r1: lua.TValue
-	lua.table_getint(weak, 1, &r1)
-	testing.expect(t, lua.is_nil(&r1), "weak value with no other reference was cleared")
+	r1: kernel.TValue
+	kernel.table_getint(weak, 1, &r1)
+	testing.expect(t, kernel.is_nil(&r1), "weak value with no other reference was cleared")
 
-	r2: lua.TValue
-	lua.table_getint(weak, 2, &r2)
-	testing.expect(t, lua.is_collectable(&r2), "rooted weak value survived")
-	testing.expect_value(t, str_contents(lua.str_value(&r2)), "kept-weak-value")
+	r2: kernel.TValue
+	kernel.table_getint(weak, 2, &r2)
+	testing.expect(t, kernel.is_collectable(&r2), "rooted weak value survived")
+	testing.expect_value(t, str_contents(kernel.str_value(&r2)), "kept-weak-value")
 }
 
 // The count of finalizer invocations, bumped by `phase7_finalizer` below. A
@@ -164,31 +164,31 @@ phase7_finalizer :: proc "c" (L: rawptr) -> i32 {
 // collect, and confirm the finalizer fired a single time.
 @(test)
 gc_phase7_finalizer_runs :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	phase7_final_count = 0
 
 	// Root the metatable for as long as we are wiring it up; the finalizable
 	// table itself is deliberately left unrooted.
-	mt := lua.table_new(L)
-	push_root(L, lua.obj2gco(mt))
+	mt := kernel.table_new(L)
+	push_root(L, kernel.obj2gco(mt))
 
-	gckey := lua.string_new(L, "__gc")
-	gk: lua.TValue
-	lua.set_string(&gk, gckey)
-	gv: lua.TValue
-	lua.set_c_function(&gv, phase7_finalizer)
-	testing.expect(t, lua.table_set(L, mt, &gk, &gv) == .Ok)
+	gckey := kernel.string_new(L, "__gc")
+	gk: kernel.TValue
+	kernel.set_string(&gk, gckey)
+	gv: kernel.TValue
+	kernel.set_c_function(&gv, phase7_finalizer)
+	testing.expect(t, kernel.table_set(L, mt, &gk, &gv) == .Ok)
 
-	victim := lua.table_new(L)
+	victim := kernel.table_new(L)
 	victim.metatable = mt
-	lua.gc_checkfinalizer(L, lua.obj2gco(victim), mt)
+	kernel.gc_checkfinalizer(L, kernel.obj2gco(victim), mt)
 
 	// The victim is unreachable: collecting must separate it, resurrect it for
 	// the finalizer, and run `__gc` once.
-	lua.api_gc(L, lua.GCCOLLECT)
+	kernel.api_gc(L, kernel.GCCOLLECT)
 	testing.expect_value(t, phase7_final_count, 1)
 
 	pop_root(L) // drop the metatable root

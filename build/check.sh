@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 SRC_DIR="$REPO_ROOT/src"
-COLLECTION="-collection:luao=$SRC_DIR"
+COLLECTION="-collection:lang=$SRC_DIR"
 
 # "path:is_library" pairs. Library packages have no `main`, so pass -no-entry-point.
 check_one() {
@@ -29,8 +29,8 @@ check_one() {
 }
 
 check_one src        0
-check_one src/luac   0
-check_one src/lua    1
+check_one src/compiler   0
+check_one src/kernel    1
 check_one src/stdlib 1
 check_one tests      1
 

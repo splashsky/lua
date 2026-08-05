@@ -47,7 +47,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
 $PucDir   = Join-Path $RepoRoot 'tests\puc'
 
-$Collection = "-collection:luao=$SrcDir"
+$Collection = "-collection:lang=$SrcDir"
 
 # Build to a space-free temp dir to dodge Odin's space-in-path tokenization bug.
 $OutDir  = Join-Path $env:TEMP 'luao-puc'

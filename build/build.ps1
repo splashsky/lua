@@ -33,7 +33,7 @@ $SrcDir   = Join-Path $RepoRoot 'src'
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 # Shared flags: the collection makes cross-package imports stable.
-$Collection = "-collection:luao=$SrcDir"
+$Collection = "-collection:lang=$SrcDir"
 $Optimize   = if ($DebugBuild) { '-debug' } else { '-o:speed' }
 
 # Windows ships threads with only a 1 MiB stack by default, but Lua allows up to

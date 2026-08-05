@@ -11,26 +11,26 @@ package tests
 // upvalue detaches it from the stack while preserving the captured value.
 
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // A freshly allocated Lua closure records its upvalue count and lands on the
 // sweepable object list, and its inline upvalue slots can be populated by
 // luaF_initupvals.
 @(test)
 api_closure_allocation :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	base := count_allgc(L)
-	cl := lua.func_newLclosure(L, 3)
+	cl := kernel.func_newLclosure(L, 3)
 	testing.expect(t, cl != nil)
 	testing.expect_value(t, cl.nupvalues, u8(3))
-	testing.expect(t, cl.tt == lua.VLCL, "Lua closures carry the VLCL tag")
+	testing.expect(t, cl.tt == kernel.VLCL, "Lua closures carry the VLCL tag")
 	testing.expect_value(t, count_allgc(L), base + 1)
 
 	// Populate the upvalue objects; each is itself a fresh collectable object.
-	st := lua.func_initupvals(L, cl)
+	st := kernel.func_initupvals(L, cl)
 	testing.expect(t, st == .Ok)
 	for i in 0 ..< 3 {
 		testing.expect(t, cl.upvals[i] != nil, "every upvalue slot must be filled")
@@ -42,15 +42,15 @@ api_closure_allocation :: proc(t: ^testing.T) {
 // slots start nil so a collection before they're filled never scans garbage.
 @(test)
 c_closure_allocation :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	cl := lua.func_newCclosure(L, 2)
+	cl := kernel.func_newCclosure(L, 2)
 	testing.expect(t, cl != nil)
 	testing.expect_value(t, cl.nupvalues, u8(2))
-	testing.expect(t, cl.tt == lua.VCCL, "C closures carry the VCCL tag")
-	testing.expect(t, lua.is_nil(&cl.upvalue[0]) && lua.is_nil(&cl.upvalue[1]))
+	testing.expect(t, cl.tt == kernel.VCCL, "C closures carry the VCCL tag")
+	testing.expect(t, kernel.is_nil(&cl.upvalue[0]) && kernel.is_nil(&cl.upvalue[1]))
 }
 
 // A prototype allocates and frees cleanly through the counting allocator, so the
@@ -60,19 +60,19 @@ c_closure_allocation :: proc(t: ^testing.T) {
 @(test)
 proto_allocation_leaves_no_leak :: proc(t: ^testing.T) {
 	c: Counting_Allocator
-	alloc := lua.Allocator {
+	alloc := kernel.Allocator {
 		alloc = counting_alloc,
 		ud    = &c,
 	}
 
-	L := lua.new_state(alloc)
+	L := kernel.new_state(alloc)
 	testing.expect(t, L != nil)
 
-	p := lua.func_newproto(L)
+	p := kernel.func_newproto(L)
 	testing.expect(t, p != nil)
-	testing.expect(t, p.tt == lua.VPROTO, "prototypes carry the VPROTO tag")
+	testing.expect(t, p.tt == kernel.VPROTO, "prototypes carry the VPROTO tag")
 
-	lua.close_state(L)
+	kernel.close_state(L)
 	testing.expect_value(t, c.outstanding, 0)
 }
 
@@ -82,37 +82,37 @@ proto_allocation_leaves_no_leak :: proc(t: ^testing.T) {
 // the captured value into its own storage.
 @(test)
 open_upvalues_share_and_close :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	// Put a value on the stack at a known slot and expose it as "in use".
 	slot := L.top
-	lua.set_int(lua.stack_value(L, slot), 1234)
+	kernel.set_int(kernel.stack_value(L, slot), 1234)
 	L.top += 1
 
 	// Two finds for the same slot must return the identical shared upvalue.
-	uv1 := lua.func_findupval(L, slot)
-	uv2 := lua.func_findupval(L, slot)
+	uv1 := kernel.func_findupval(L, slot)
+	uv2 := kernel.func_findupval(L, slot)
 	testing.expect(t, uv1 != nil && uv2 != nil)
 	testing.expect(t, uv1 == uv2, "same slot must share one upvalue object")
 	testing.expect(t, uv1.open, "a capture of a live slot is open")
 
 	// While open, the upvalue forwards to the live stack slot.
-	testing.expect_value(t, lua.int_value(lua.upval_value(uv1)), lua.Integer(1234))
+	testing.expect_value(t, kernel.int_value(kernel.upval_value(uv1)), kernel.Integer(1234))
 
 	// A different slot must get a different upvalue object.
 	other_slot := L.top
-	lua.set_int(lua.stack_value(L, other_slot), 5678)
+	kernel.set_int(kernel.stack_value(L, other_slot), 5678)
 	L.top += 1
-	uv_other := lua.func_findupval(L, other_slot)
+	uv_other := kernel.func_findupval(L, other_slot)
 	testing.expect(t, uv_other != uv1, "different slots get different upvalues")
 
 	// Now close everything at or above `slot`. The upvalue must go closed, detach
 	// from the stack, and still yield the captured value from its own storage.
-	lua.func_closeupval(L, slot)
+	kernel.func_closeupval(L, slot)
 	testing.expect(t, !uv1.open, "closing flips the upvalue to closed")
-	testing.expect_value(t, lua.int_value(lua.upval_value(uv1)), lua.Integer(1234))
+	testing.expect_value(t, kernel.int_value(kernel.upval_value(uv1)), kernel.Integer(1234))
 
 	// The thread's open-upvalue list is now empty (both were at/above `slot`).
 	testing.expect(t, L.openupval == nil, "no open upvalues remain after closing")

@@ -30,25 +30,25 @@ import "core:os"
 import "core:strings"
 import "base:runtime"
 
-import host "luao:host"
-import lineedit "luao:lineedit"
-import lua "luao:lua"
-import aux "luao:stdlib"
-import stream "luao:stream"
+import host "lang:host"
+import lineedit "lang:lineedit"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
+import stream "lang:stream"
 
 // --------------------------------------------------------------------------------
 // Small configuration constants that reference Lua keeps in luaconf.h.
 // --------------------------------------------------------------------------------
 
 // The name the interpreter calls itself in diagnostics before it has learned its
-// real argv[0]. Reference LUA_PROGNAME.
-PROGNAME :: "lua"
+// real argv[0]. Reference LUA_PROGNAME; brand-derived, see kernel/brand.odin.
+PROGNAME :: kernel.PROGNAME
 
-// The environment variables consulted at start-up. LUA_INIT_5_5 is tried first
-// (version-suffixed, VERSUFFIX = "_5_5"), then the unversioned LUA_INIT. Reference
-// LUA_INIT_VAR / LUA_INITVARVERSION.
-INIT_VAR :: "INIT"
-INIT_VAR_VERSION :: "INIT_5_5"
+// The environment variables consulted at start-up. `LUA_INIT_5_5` is tried first
+// (version-suffixed, VERSUFFIX = "_5_5"), then the unversioned `LUA_INIT`.
+// Reference LUA_INIT_VAR / LUA_INITVARVERSION; both are brand-derived.
+INIT_VAR :: kernel.ENV_INIT
+INIT_VAR_VERSION :: kernel.ENV_INIT_VERSION
 
 // REPL prompts and the input line cap. Reference LUA_PROMPT / LUA_PROMPT2 /
 // LUA_MAXINPUT.
@@ -92,7 +92,7 @@ repl_history: [dynamic]string
 // Static storage is important: an OS callback may still be finishing while
 // docall disarms it. The callback never dereferences L; it only publishes to
 // this mailbox, whose lifetime is the whole process.
-interrupt_request: lua.Async_Hook_Request
+interrupt_request: kernel.Async_Hook_Request
 
 // --------------------------------------------------------------------------------
 // Tiny string helpers. Odin strings coming from `os.args` are NOT guaranteed to be
@@ -123,13 +123,13 @@ index_byte :: proc(s: string, ch: u8) -> int {
 
 // Print the usage summary, blaming `badoption`. Reference print_usage.
 print_usage :: proc(badoption: string) {
-	aux.write_stderr(fmt.tprintf("%s: ", progname))
+	stdlib.write_stderr(fmt.tprintf("%s: ", progname))
 	if byte_at(badoption, 1) == 'e' || byte_at(badoption, 1) == 'l' {
-		aux.write_stderr(fmt.tprintf("'%s' needs argument\n", badoption))
+		stdlib.write_stderr(fmt.tprintf("'%s' needs argument\n", badoption))
 	} else {
-		aux.write_stderr(fmt.tprintf("unrecognized option '%s'\n", badoption))
+		stdlib.write_stderr(fmt.tprintf("unrecognized option '%s'\n", badoption))
 	}
-	aux.write_stderr(
+	stdlib.write_stderr(
 		fmt.tprintf(
 			"usage: %s [options] [script [args]]\n" +
 			"Available options are:\n" +
@@ -150,21 +150,21 @@ print_usage :: proc(badoption: string) {
 // Print `msg` prefixed with `pname` (when non-empty). Reference l_message.
 l_message :: proc(pname: string, msg: string) {
 	if pname != "" {
-		aux.write_stderr(fmt.tprintf("%s: ", pname))
+		stdlib.write_stderr(fmt.tprintf("%s: ", pname))
 	}
-	aux.write_stderr(fmt.tprintf("%s\n", msg))
+	stdlib.write_stderr(fmt.tprintf("%s\n", msg))
 }
 
 // If `status` is not OK, print the error message sitting on top of the stack and
 // pop it. Returns `status` unchanged so callers can chain. Reference report.
-report :: proc(L: ^lua.State, status: lua.Thread_Status) -> lua.Thread_Status {
+report :: proc(L: ^kernel.State, status: kernel.Thread_Status) -> kernel.Thread_Status {
 	if status != .Ok {
-		msg, ok := lua.api_tolstring(L, -1)
+		msg, ok := kernel.api_tolstring(L, -1)
 		if !ok {
 			msg = "(error message not a string)"
 		}
 		l_message(progname, msg)
-		lua.api_pop(L, 1)
+		kernel.api_pop(L, 1)
 	}
 	return status
 }
@@ -175,18 +175,18 @@ report :: proc(L: ^lua.State, status: lua.Thread_Status) -> lua.Thread_Status {
 // `context` before touching anything that allocates.
 msghandler :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	L := (^lua.State)(Lp)
+	L := (^kernel.State)(Lp)
 	// `lua_tolstring` also *converts* a numeric error object into a string in
 	// place, so we try it first and only fall back to __tostring / a generic
 	// description when the object is genuinely not string-convertible.
-	msg, ok := lua.api_tolstring(L, 1)
+	msg, ok := kernel.api_tolstring(L, 1)
 	if !ok {
-		if aux.aux_callmeta(L, 1, "__tostring") && lua.api_type(L, -1) == lua.TSTRING {
+		if stdlib.aux_callmeta(L, 1, "__tostring") && kernel.api_type(L, -1) == kernel.TSTRING {
 			return 1 // the metamethod result itself is the message
 		}
-		msg = lua.api_pushfstring(L, "(error object is a %s value)", aux.aux_typename(L, 1))
+		msg = kernel.api_pushfstring(L, "(error object is a %s value)", stdlib.aux_typename(L, 1))
 	}
-	aux.aux_traceback(L, L, msg, true, 1) // append a standard traceback
+	stdlib.aux_traceback(L, L, msg, true, 1) // append a standard traceback
 	return 1
 }
 
@@ -194,33 +194,33 @@ msghandler :: proc "c" (Lp: rawptr) -> i32 {
 // Reset first, exactly like reference lstop, so error handling cannot re-enter it.
 lstop :: proc "c" (Lp, ar: rawptr) {
 	context = runtime.default_context()
-	L := (^lua.State)(Lp)
-	lua.api_sethook(L, nil, 0, 0)
-	aux.aux_error(L, "interrupted!")
+	L := (^kernel.State)(Lp)
+	kernel.api_sethook(L, nil, 0, 0)
+	stdlib.aux_error(L, "interrupted!")
 }
 
 // Call a function already sitting on the stack (with `narg` arguments above it),
 // wrapping it with the message handler so errors arrive pre-tracebacked.
 // Reference docall. platform_interrupt_arm is deliberately scoped to the pcall:
 // Ctrl-C while ordinary driver/editor code is not mistaken for a running chunk.
-docall :: proc(L: ^lua.State, narg: int, nres: int) -> lua.Thread_Status {
-	base := lua.api_gettop(L) - narg // function index
-	lua.api_pushcfunction(L, msghandler) // push message handler
-	lua.api_insert(L, base) // put it under function and args
-	flag := lua.MASKCALL | lua.MASKRET | lua.MASKLINE | lua.MASKCOUNT
-	lua.api_prepare_async_hook(L, &interrupt_request, lstop, flag, 1)
+docall :: proc(L: ^kernel.State, narg: int, nres: int) -> kernel.Thread_Status {
+	base := kernel.api_gettop(L) - narg // function index
+	kernel.api_pushcfunction(L, msghandler) // push message handler
+	kernel.api_insert(L, base) // put it under function and args
+	flag := kernel.MASKCALL | kernel.MASKRET | kernel.MASKLINE | kernel.MASKCOUNT
+	kernel.api_prepare_async_hook(L, &interrupt_request, lstop, flag, 1)
 	platform_interrupt_arm()
-	status := lua.api_pcall(L, narg, nres, base)
+	status := kernel.api_pcall(L, narg, nres, base)
 	platform_interrupt_disarm()
-	lua.api_disarm_async_hook(L, &interrupt_request)
-	lua.api_remove(L, base) // remove message handler from the stack
+	kernel.api_disarm_async_hook(L, &interrupt_request)
+	kernel.api_remove(L, base) // remove message handler from the stack
 	return status
 }
 
 // Print the copyright banner. Reference print_version.
 print_version :: proc() {
-	aux.write_string(lua.COPYRIGHT)
-	aux.write_line()
+	stdlib.write_string(kernel.COPYRIGHT)
+	stdlib.write_line()
 }
 
 // --------------------------------------------------------------------------------
@@ -230,28 +230,28 @@ print_version :: proc() {
 // Build the global `arg` table so that `arg[0]` is the script name, arguments
 // after it get positive indices, and options before it get negative indices.
 // Reference createargtable.
-createargtable :: proc(L: ^lua.State, argv: []string, argc: int, script: int) {
+createargtable :: proc(L: ^kernel.State, argv: []string, argc: int, script: int) {
 	narg := argc - (script + 1) // number of positive indices
-	lua.api_createtable(L, narg, script + 1)
+	kernel.api_createtable(L, narg, script + 1)
 	for i in 0 ..< argc {
-		lua.api_pushstring(L, argv[i])
-		lua.api_rawseti(L, -2, lua.Integer(i - script))
+		kernel.api_pushstring(L, argv[i])
+		kernel.api_rawseti(L, -2, kernel.Integer(i - script))
 	}
-	lua.api_setglobal(L, "arg")
+	kernel.api_setglobal(L, "arg")
 }
 
 // Push the contents of `arg` from 1..#arg on the stack and return the count.
 // Reference pushargs.
-pushargs :: proc(L: ^lua.State) -> int {
-	if lua.api_getglobal(L, "arg") != lua.TTABLE {
-		aux.aux_error(L, "'arg' is not a table")
+pushargs :: proc(L: ^kernel.State) -> int {
+	if kernel.api_getglobal(L, "arg") != kernel.TTABLE {
+		stdlib.aux_error(L, "'arg' is not a table")
 	}
-	n := int(aux.aux_len(L, -1))
-	aux.aux_checkstack(L, n + 3, "too many arguments to script")
+	n := int(stdlib.aux_len(L, -1))
+	stdlib.aux_checkstack(L, n + 3, "too many arguments to script")
 	for i in 1 ..= n {
-		lua.api_rawgeti(L, -i, lua.Integer(i))
+		kernel.api_rawgeti(L, -i, kernel.Integer(i))
 	}
-	lua.api_remove(L, -(n + 1)) // remove table from the stack
+	kernel.api_remove(L, -(n + 1)) // remove table from the stack
 	return n
 }
 
@@ -261,7 +261,7 @@ pushargs :: proc(L: ^lua.State) -> int {
 // to the reference `luaL_loadfile` does.
 // --------------------------------------------------------------------------------
 
-dochunk :: proc(L: ^lua.State, status: lua.Thread_Status) -> lua.Thread_Status {
+dochunk :: proc(L: ^kernel.State, status: kernel.Thread_Status) -> kernel.Thread_Status {
 	status := status
 	if status == .Ok {
 		status = docall(L, 0, 0)
@@ -269,18 +269,18 @@ dochunk :: proc(L: ^lua.State, status: lua.Thread_Status) -> lua.Thread_Status {
 	return report(L, status)
 }
 
-dofile :: proc(L: ^lua.State, name: string) -> lua.Thread_Status {
-	return dochunk(L, aux.aux_loadfilex(L, name))
+dofile :: proc(L: ^kernel.State, name: string) -> kernel.Thread_Status {
+	return dochunk(L, stdlib.aux_loadfilex(L, name))
 }
 
-dostring :: proc(L: ^lua.State, s: string, name: string) -> lua.Thread_Status {
-	return dochunk(L, aux.aux_loadbufferx(L, transmute([]u8)s, name))
+dostring :: proc(L: ^kernel.State, s: string, name: string) -> kernel.Thread_Status {
+	return dochunk(L, stdlib.aux_loadbufferx(L, transmute([]u8)s, name))
 }
 
 // Run `globname[=modname]` as `globname = require(modname)`. With no explicit
 // `=modname`, a '-' in the name marks a "version" suffix that is trimmed off the
 // *global* name (the module name keeps it). Reference dolibrary (LUA_IGMARK = "-").
-dolibrary :: proc(L: ^lua.State, arg: string) -> lua.Thread_Status {
+dolibrary :: proc(L: ^kernel.State, arg: string) -> kernel.Thread_Status {
 	globname := arg
 	modname := arg
 	suffix := -1 // index of the '-' version mark in the global name, if any
@@ -290,14 +290,14 @@ dolibrary :: proc(L: ^lua.State, arg: string) -> lua.Thread_Status {
 	} else {
 		suffix = index_byte(modname, '-') // look for a suffix mark
 	}
-	lua.api_getglobal(L, "require")
-	lua.api_pushstring(L, modname)
+	kernel.api_getglobal(L, "require")
+	kernel.api_pushstring(L, modname)
 	status := docall(L, 1, 1) // call 'require(modname)'
 	if status == .Ok {
 		if suffix >= 0 {
 			globname = globname[:suffix] // drop the version suffix
 		}
-		lua.api_setglobal(L, globname) // globname = require(modname)
+		kernel.api_setglobal(L, globname) // globname = require(modname)
 	}
 	return report(L, status)
 }
@@ -370,8 +370,8 @@ collectargs :: proc(argv: []string) -> (args: int, first: int) {
 
 // Execute the `-e`, `-l`, and `-W` options in command-line order, stopping at the
 // first error. Reference runargs.
-runargs :: proc(L: ^lua.State, argv: []string, n: int) -> bool {
-	lua.api_warning(L, cstring("@off"), false) // stand-alone Lua starts with warnings off
+runargs :: proc(L: ^kernel.State, argv: []string, n: int) -> bool {
+	kernel.api_warning(L, cstring("@off"), false) // stand-alone Lua starts with warnings off
 	i := 1
 	for i < n {
 		option := byte_at(argv[i], 1)
@@ -391,7 +391,7 @@ runargs :: proc(L: ^lua.State, argv: []string, n: int) -> bool {
 				return false // stop if error
 			}
 		case 'W':
-			lua.api_warning(L, cstring("@on"), false) // warnings on
+			kernel.api_warning(L, cstring("@on"), false) // warnings on
 		}
 		i += 1
 	}
@@ -401,7 +401,7 @@ runargs :: proc(L: ^lua.State, argv: []string, n: int) -> bool {
 // Run the LUA_INIT / LUA_INIT_5_5 environment hook, if set. A leading '@' means
 // "the rest is a filename"; otherwise the value is a chunk of Lua source.
 // Reference handle_luainit.
-handle_luainit :: proc(L: ^lua.State) -> lua.Thread_Status {
+handle_luainit :: proc(L: ^kernel.State) -> kernel.Thread_Status {
 	name := INIT_VAR_VERSION
 	init, ok := os.lookup_env(name, context.temp_allocator)
 	if !ok {
@@ -419,15 +419,15 @@ handle_luainit :: proc(L: ^lua.State) -> lua.Thread_Status {
 
 // Load and run the main script named on the command line. A bare "-" (unless it
 // followed a literal "--") means stdin. Reference handle_script.
-handle_script :: proc(L: ^lua.State, argv: []string, script: int) -> lua.Thread_Status {
+handle_script :: proc(L: ^kernel.State, argv: []string, script: int) -> kernel.Thread_Status {
 	fname := argv[script]
 	if fname == "-" && argv[script - 1] != "--" {
 		fname = "" // stdin
 	}
-	status := aux.aux_loadfilex(L, fname)
+	status := stdlib.aux_loadfilex(L, fname)
 	if status == .Ok {
 		n := pushargs(L) // push arguments to script
-		status = docall(L, n, lua.MULTRET)
+		status = docall(L, n, kernel.MULTRET)
 	}
 	return report(L, status)
 }
@@ -438,23 +438,23 @@ handle_script :: proc(L: ^lua.State, argv: []string, script: int) -> lua.Thread_
 
 // Return the prompt string, leaving its Lua value anchored on the stack (the
 // caller pops it). Honours the `_PROMPT` / `_PROMPT2` globals. Reference get_prompt.
-get_prompt :: proc(L: ^lua.State, firstline: bool) -> string {
+get_prompt :: proc(L: ^kernel.State, firstline: bool) -> string {
 	name := firstline ? "_PROMPT" : "_PROMPT2"
-	if lua.api_getglobal(L, name) == lua.TNIL {
+	if kernel.api_getglobal(L, name) == kernel.TNIL {
 		return firstline ? PROMPT : PROMPT2 // default
 	}
 	// apply tostring over the custom prompt value
-	p := aux.aux_tolstring(L, -1)
-	lua.api_remove(L, -2) // remove original value, keep the string
+	p := stdlib.aux_tolstring(L, -1)
+	kernel.api_remove(L, -2) // remove original value, keep the string
 	return p
 }
 
 // Does `status` mean "syntax error because the statement isn't finished"? True
 // when it's a syntax error whose message ends with the EOFMARK. Reference
 // incomplete.
-incomplete :: proc(L: ^lua.State, status: lua.Thread_Status) -> bool {
+incomplete :: proc(L: ^kernel.State, status: kernel.Thread_Status) -> bool {
 	if status == .Err_Syntax {
-		msg, ok := lua.api_tolstring(L, -1)
+		msg, ok := kernel.api_tolstring(L, -1)
 		if ok && len(msg) >= len(EOFMARK) && msg[len(msg) - len(EOFMARK):] == EOFMARK {
 			return true
 		}
@@ -465,19 +465,19 @@ incomplete :: proc(L: ^lua.State, status: lua.Thread_Status) -> bool {
 // Show the prompt and read one physical line. All Lua interaction and storage
 // preparation happens before native raw mode begins, and the editor restores the
 // terminal before this procedure touches the Lua stack again.
-pushline :: proc(L: ^lua.State, firstline: bool) -> bool {
+pushline :: proc(L: ^kernel.State, firstline: bool) -> bool {
 	buffer: [MAXINPUT]u8
 	prmt := get_prompt(L, firstline)
-	aux.write_string(prmt)
+	stdlib.write_string(prmt)
 	stream.flush(stream.stdout())
 
 	n, editor_eof, edited := lineedit.read_line(L, prmt, buffer[:], repl_history[:])
 	if edited {
-		lua.api_pop(L, 1)
+		kernel.api_pop(L, 1)
 		if editor_eof {
 			return false
 		}
-		lua.api_pushlstring(L, buffer[:n])
+		kernel.api_pushlstring(L, buffer[:n])
 		return true
 	}
 
@@ -496,7 +496,7 @@ pushline :: proc(L: ^lua.State, firstline: bool) -> bool {
 			break
 		}
 	}
-	lua.api_pop(L, 1) // remove prompt (get_prompt left it on the stack)
+	kernel.api_pop(L, 1) // remove prompt (get_prompt left it on the stack)
 	if n == 0 {
 		return false // no input
 	}
@@ -504,7 +504,7 @@ pushline :: proc(L: ^lua.State, firstline: bool) -> bool {
 	if l > 0 && buffer[l - 1] == '\n' {
 		l -= 1
 	}
-	lua.api_pushlstring(L, transmute([]u8)buffer[:l])
+	kernel.api_pushlstring(L, transmute([]u8)buffer[:l])
 	return true
 }
 
@@ -512,14 +512,14 @@ pushline :: proc(L: ^lua.State, firstline: bool) -> bool {
 // that lets the REPL echo bare expressions. On success the compiled chunk
 // replaces the line; on failure the stack is left holding the original line.
 // Reference addreturn.
-addreturn :: proc(L: ^lua.State) -> lua.Thread_Status {
-	line, _ := lua.api_tolstring(L, -1) // original line
-	retline := lua.api_pushfstring(L, "return %s;", line)
-	status := aux.aux_loadbufferx(L, transmute([]u8)retline, "=stdin")
+addreturn :: proc(L: ^kernel.State) -> kernel.Thread_Status {
+	line, _ := kernel.api_tolstring(L, -1) // original line
+	retline := kernel.api_pushfstring(L, "return %s;", line)
+	status := stdlib.aux_loadbufferx(L, transmute([]u8)retline, "=stdin")
 	if status == .Ok {
-		lua.api_remove(L, -2) // remove modified line, keep the chunk
+		kernel.api_remove(L, -2) // remove modified line, keep the chunk
 	} else {
-		lua.api_pop(L, 2) // pop the failed load result and the modified line
+		kernel.api_pop(L, 2) // pop the failed load result and the modified line
 	}
 	return status
 }
@@ -535,7 +535,7 @@ checklocal :: proc(line: string) {
 	rest := line[i:]
 	if len(rest) >= 5 && rest[:5] == "local" {
 		if len(rest) == 5 || rest[5] == ' ' || rest[5] == '\t' {
-			aux.write_stderr(
+			stdlib.write_stderr(
 				"warning: locals do not survive across lines in interactive mode\n",
 			)
 		}
@@ -545,19 +545,19 @@ checklocal :: proc(line: string) {
 // Keep reading and concatenating lines until we have a complete statement (or hit
 // an error that isn't "incomplete"). The first line is already on the stack.
 // Reference multiline.
-multiline :: proc(L: ^lua.State) -> lua.Thread_Status {
-	line, _ := lua.api_tolstring(L, 1) // get first line
+multiline :: proc(L: ^kernel.State) -> kernel.Thread_Status {
+	line, _ := kernel.api_tolstring(L, 1) // get first line
 	checklocal(line)
 	for {
-		status := aux.aux_loadbufferx(L, transmute([]u8)line, "=stdin") // try it
+		status := stdlib.aux_loadbufferx(L, transmute([]u8)line, "=stdin") // try it
 		if !incomplete(L, status) || !pushline(L, false) {
 			return status // shouldn't or can't add a continuation line
 		}
-		lua.api_remove(L, -2) // remove the "incomplete" error message
-		lua.api_pushstring(L, "\n") // add a newline...
-		lua.api_insert(L, -2) // ...between the two lines
-		lua.api_concat(L, 3) // join them
-		line, _ = lua.api_tolstring(L, 1) // get what we have so far
+		kernel.api_remove(L, -2) // remove the "incomplete" error message
+		kernel.api_pushstring(L, "\n") // add a newline...
+		kernel.api_insert(L, -2) // ...between the two lines
+		kernel.api_concat(L, 3) // join them
+		line, _ = kernel.api_tolstring(L, 1) // get what we have so far
 	}
 }
 
@@ -565,8 +565,8 @@ multiline :: proc(L: ^lua.State) -> lua.Thread_Status {
 // ...`), then, failing that, as a statement possibly spanning continuation lines.
 // Returns `eof = true` at end-of-input. Reference loadline (with a boolean eof in
 // place of the C sentinel return of -1).
-loadline :: proc(L: ^lua.State) -> (status: lua.Thread_Status, eof: bool) {
-	lua.api_settop(L, 0)
+loadline :: proc(L: ^kernel.State) -> (status: kernel.Thread_Status, eof: bool) {
+	kernel.api_settop(L, 0)
 	if !pushline(L, true) {
 		return .Ok, true // no input
 	}
@@ -574,7 +574,7 @@ loadline :: proc(L: ^lua.State) -> (status: lua.Thread_Status, eof: bool) {
 	if status != .Ok { // "return ..." didn't compile?
 		status = multiline(L) // try as a statement, maybe multi-line
 	}
-	line, _ := lua.api_tolstring(L, 1)
+	line, _ := kernel.api_tolstring(L, 1)
 	if len(line) > 0 {
 		// Bounded session history prevents an indefinitely long REPL from growing
 		// without limit. Allocation happens after raw mode has ended; if the Odin
@@ -587,28 +587,28 @@ loadline :: proc(L: ^lua.State) -> (status: lua.Thread_Status, eof: bool) {
 		}
 		append(&repl_history, strings.clone(line))
 	}
-	lua.api_remove(L, 1) // remove the line, leaving the chunk (if any)
+	kernel.api_remove(L, 1) // remove the line, leaving the chunk (if any)
 	return status, false
 }
 
 // Print, via the global `print`, whatever values a REPL chunk left on the stack.
 // Reference l_print.
-l_print :: proc(L: ^lua.State) {
-	n := lua.api_gettop(L)
+l_print :: proc(L: ^kernel.State) {
+	n := kernel.api_gettop(L)
 	if n > 0 { // any result to print?
-		aux.aux_checkstack(L, lua.MINSTACK, "too many results to print")
-		lua.api_getglobal(L, "print")
-		lua.api_insert(L, 1)
-		if lua.api_pcall(L, n, 0, 0) != .Ok {
-			msg, _ := lua.api_tolstring(L, -1)
-			l_message(progname, lua.api_pushfstring(L, "error calling 'print' (%s)", msg))
+		stdlib.aux_checkstack(L, kernel.MINSTACK, "too many results to print")
+		kernel.api_getglobal(L, "print")
+		kernel.api_insert(L, 1)
+		if kernel.api_pcall(L, n, 0, 0) != .Ok {
+			msg, _ := kernel.api_tolstring(L, -1)
+			l_message(progname, kernel.api_pushfstring(L, "error calling 'print' (%s)", msg))
 		}
 	}
 }
 
 // The loop itself: read a line, evaluate it, print results, repeat. Errors are
 // reported but don't end the session. Reference doREPL.
-doREPL :: proc(L: ^lua.State) {
+doREPL :: proc(L: ^kernel.State) {
 	oldprogname := progname
 	progname = "" // no 'progname' prefix on errors in interactive mode
 	for {
@@ -617,7 +617,7 @@ doREPL :: proc(L: ^lua.State) {
 			break
 		}
 		if status == .Ok {
-			status = docall(L, 0, lua.MULTRET)
+			status = docall(L, 0, kernel.MULTRET)
 		}
 		if status == .Ok {
 			l_print(L)
@@ -625,8 +625,8 @@ doREPL :: proc(L: ^lua.State) {
 			report(L, status)
 		}
 	}
-	lua.api_settop(L, 0) // clear the stack
-	aux.write_line()
+	kernel.api_settop(L, 0) // clear the stack
+	stdlib.write_line()
 	progname = oldprogname
 }
 
@@ -637,13 +637,13 @@ doREPL :: proc(L: ^lua.State) {
 
 pmain :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	L := (^lua.State)(Lp)
-	argc := int(lua.api_tointeger(L, 1))
-	argv := (^[]string)(lua.api_touserdata(L, 2))^
+	L := (^kernel.State)(Lp)
+	argc := int(kernel.api_tointeger(L, 1))
+	argv := (^[]string)(kernel.api_touserdata(L, 2))^
 	args, script := collectargs(argv)
 	// index of the first argument that is not an option (or argc when there is none)
 	optlim := script > 0 ? script : argc
-	aux.aux_checkversion(L) // check the core is the version we expect
+	stdlib.aux_checkversion(L) // check the core is the version we expect
 	if args == has_error { // bad argument?
 		print_usage(argv[script]) // 'script' holds the bad-arg index
 		return 0
@@ -652,13 +652,13 @@ pmain :: proc "c" (Lp: rawptr) -> i32 {
 		print_version()
 	}
 	if (args & has_E) != 0 { // -E? tell the libraries to ignore env vars
-		lua.api_pushboolean(L, true)
-		lua.api_setfield(L, lua.REGISTRYINDEX, "NOENV")
+		kernel.api_pushboolean(L, true)
+		kernel.api_setfield(L, kernel.REGISTRYINDEX, kernel.ENV_NOENV)
 	}
-	aux.aux_openlibs(L) // open the standard libraries
+	stdlib.aux_openlibs(L) // open the standard libraries
 	createargtable(L, argv, argc, script) // build the 'arg' table
-	lua.api_gc(L, lua.GCRESTART) // start the collector...
-	lua.api_gc(L, lua.GCGEN) // ...in generational mode
+	kernel.api_gc(L, kernel.GCRESTART) // start the collector...
+	kernel.api_gc(L, kernel.GCGEN) // ...in generational mode
 	if (args & has_E) == 0 { // no -E? run LUA_INIT
 		if handle_luainit(L) != .Ok {
 			return 0 // error running LUA_INIT
@@ -682,7 +682,7 @@ pmain :: proc "c" (Lp: rawptr) -> i32 {
 			dofile(L, "") // execute stdin as a file (status deliberately ignored)
 		}
 	}
-	lua.api_pushboolean(L, true) // signal "no errors"
+	kernel.api_pushboolean(L, true) // signal "no errors"
 	return 1
 }
 
@@ -695,23 +695,23 @@ main :: proc() {
 	g_argv = os.args // capture the command line; storage outlives the pcall below
 	platform_interrupt_init()
 
-	L := lua.new_state(lua.default_allocator()) // create the interpreter state
+	L := kernel.new_state(kernel.default_allocator()) // create the interpreter state
 	if L == nil {
 		l_message(len(g_argv) > 0 ? g_argv[0] : PROGNAME, "cannot create state: not enough memory")
 		host.process_exit(1)
 	}
-	lua.api_gc(L, lua.GCSTOP) // stop the GC while we build the state
-	lua.api_pushcfunction(L, pmain) // the function to protect-call
-	lua.api_pushinteger(L, lua.Integer(len(g_argv))) // 1st arg: argc
-	lua.api_pushlightuserdata(L, &g_argv) // 2nd arg: pointer to argv
-	status := lua.api_pcall(L, 2, 1, 0) // run pmain in protected mode
+	kernel.api_gc(L, kernel.GCSTOP) // stop the GC while we build the state
+	kernel.api_pushcfunction(L, pmain) // the function to protect-call
+	kernel.api_pushinteger(L, kernel.Integer(len(g_argv))) // 1st arg: argc
+	kernel.api_pushlightuserdata(L, &g_argv) // 2nd arg: pointer to argv
+	status := kernel.api_pcall(L, 2, 1, 0) // run pmain in protected mode
 	// A Lua error can longjmp over the editor's ordinary stack frames and every
 	// defer in them. Repair raw mode immediately at the outermost protected
 	// boundary, before even inspecting or reporting the error.
 	host.restore_terminal()
-	result := lua.api_toboolean(L, -1) // pmain's boolean result
+	result := kernel.api_toboolean(L, -1) // pmain's boolean result
 	report(L, status)
-	lua.close_state(L)
+	kernel.close_state(L)
 	// Reference Lua exits by returning from `main`, so the C runtime flushes every
 	// buffered stream on the way out. os.exit skips language-runtime cleanup on
 	// some platforms, so explicitly flush every Odin stream first.

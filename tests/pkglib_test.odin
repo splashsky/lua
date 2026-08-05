@@ -10,40 +10,40 @@ package tests
 // / package.config behave exactly as reference Lua's dlopen-less configuration.
 
 import "core:testing"
-import lua "luao:lua"
-import aux "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
 // A state with the ENTIRE standard library opened (base, package, coroutine,
 // debug, io, math, os, string, table, utf8) -- i.e. luaL_openlibs, the real entry
 // point host programs use.
-pkg_state :: proc() -> ^lua.State {
-	L := lua.new_state(lua.default_allocator())
-	aux.aux_openlibs(L)
+pkg_state :: proc() -> ^kernel.State {
+	L := kernel.new_state(kernel.default_allocator())
+	stdlib.aux_openlibs(L)
 	return L
 }
 
-pkg_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
-	if st := aux.aux_loadstring(L, src); st != .Ok {
+pkg_run :: proc(L: ^kernel.State, src: string) -> kernel.Thread_Status {
+	if st := stdlib.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.api_pcall(L, 0, lua.MULTRET, 0)
+	return kernel.api_pcall(L, 0, kernel.MULTRET, 0)
 }
 
-pkg_eval :: proc(t: ^testing.T, L: ^lua.State, src: string) -> string {
+pkg_eval :: proc(t: ^testing.T, L: ^kernel.State, src: string) -> string {
 	st := pkg_run(L, src)
 	if st != .Ok {
-		msg, _ := lua.api_tolstring(L, -1)
+		msg, _ := kernel.api_tolstring(L, -1)
 		testing.expectf(t, false, "chunk failed: %s", msg)
 		return ""
 	}
-	s, _ := lua.api_tolstring(L, -1)
+	s, _ := kernel.api_tolstring(L, -1)
 	return s
 }
 
 @(test)
 pkg_openlibs_installs_everything :: proc(t: ^testing.T) {
 	L := pkg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// every standard library is present as a global table / function
 		"assert(type(_G) == 'table')\n" +
@@ -69,7 +69,7 @@ pkg_openlibs_installs_everything :: proc(t: ^testing.T) {
 @(test)
 pkg_config_and_searchpath :: proc(t: ^testing.T) {
 	L := pkg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// package.config is five lines; line 1 is the directory separator,
 		// line 2 ';', line 3 '?', line 4 '!', line 5 '-'
@@ -91,7 +91,7 @@ pkg_config_and_searchpath :: proc(t: ^testing.T) {
 @(test)
 pkg_preload :: proc(t: ^testing.T) {
 	L := pkg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// a preloaded module is found by searcher_preload; require runs it and
 		// caches the result, and returns ':preload:' as the loader data
@@ -116,7 +116,7 @@ pkg_preload :: proc(t: ^testing.T) {
 @(test)
 pkg_require_not_found :: proc(t: ^testing.T) {
 	L := pkg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// a module that no searcher can find raises a 'not found' error listing
 		// the searchers' individual failures
@@ -134,7 +134,7 @@ pkg_require_not_found :: proc(t: ^testing.T) {
 @(test)
 pkg_loadlib_unsupported :: proc(t: ^testing.T) {
 	L := pkg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// dlopen-less build: loadlib fails with the reference DLMSG and 'absent'
 		"local ok, msg, where = package.loadlib('whatever.dll', 'open_x')\n" +
@@ -148,7 +148,7 @@ pkg_loadlib_unsupported :: proc(t: ^testing.T) {
 @(test)
 pkg_require_lua_file :: proc(t: ^testing.T) {
 	L := pkg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// Write a real .lua module to the temp directory, then require it through
 	// package.path. This exercises searcher_Lua + luaL_loadfile end to end and
 	// proves the two-value (module, loader-data=filename) return.

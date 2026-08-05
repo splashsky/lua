@@ -10,7 +10,7 @@ package tests
 
 import "base:runtime"
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // An allocator that tracks how many bytes are currently live and can be told to
 // fail its Nth fresh allocation. `outstanding` must return to exactly zero once a
@@ -60,18 +60,18 @@ counting_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize: uint, nsize: uint) -
 // resting just past the base frame's function slot.
 @(test)
 new_state_baseline :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil, "new_state must succeed with the default allocator")
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	// The sentinel must report a complete state.
-	testing.expect(t, lua.completestate(L.g), "state should be marked complete")
+	testing.expect(t, kernel.completestate(L.g), "state should be marked complete")
 
 	// The thread starts life with no error.
-	testing.expect_value(t, L.status, lua.Thread_Status.Ok)
+	testing.expect_value(t, L.status, kernel.Thread_Status.Ok)
 
 	// Stack geometry mirrors reference Lua's stack_init exactly.
-	testing.expect_value(t, L.stack_size, lua.BASIC_STACK_SIZE)
+	testing.expect_value(t, L.stack_size, kernel.BASIC_STACK_SIZE)
 	testing.expect_value(t, L.top, 1)
 	testing.expect_value(t, L.tbclist, 0)
 
@@ -81,8 +81,8 @@ new_state_baseline :: proc(t: ^testing.T) {
 	testing.expect_value(t, L.ci, 0)
 	base := L.frames[0]
 	testing.expect_value(t, base.func, 0)
-	testing.expect_value(t, base.top, 1 + lua.MINSTACK)
-	testing.expect(t, (base.callstatus & lua.CIST_C) != 0, "base frame must be a C frame")
+	testing.expect_value(t, base.top, 1 + kernel.MINSTACK)
+	testing.expect(t, (base.callstatus & kernel.CIST_C) != 0, "base frame must be a C frame")
 }
 
 // Building a state and closing it must leave zero bytes outstanding. This is the
@@ -92,16 +92,16 @@ new_state_baseline :: proc(t: ^testing.T) {
 @(test)
 state_lifecycle_leaves_no_leak :: proc(t: ^testing.T) {
 	c: Counting_Allocator
-	alloc := lua.Allocator {
+	alloc := kernel.Allocator {
 		alloc = counting_alloc,
 		ud    = &c,
 	}
 
-	L := lua.new_state(alloc)
+	L := kernel.new_state(alloc)
 	testing.expect(t, L != nil, "new_state must succeed")
 	testing.expect(t, c.outstanding > 0, "a live state must hold some memory")
 
-	lua.close_state(L)
+	kernel.close_state(L)
 	testing.expect_value(t, c.outstanding, 0)
 }
 
@@ -114,12 +114,12 @@ new_state_oom_on_global_block :: proc(t: ^testing.T) {
 		fail_at      = 0,
 		fail_enabled = true,
 	}
-	alloc := lua.Allocator {
+	alloc := kernel.Allocator {
 		alloc = counting_alloc,
 		ud    = &c,
 	}
 
-	L := lua.new_state(alloc)
+	L := kernel.new_state(alloc)
 	testing.expect(t, L == nil, "new_state must fail when the global block can't allocate")
 	testing.expect_value(t, c.outstanding, 0)
 }
@@ -134,12 +134,12 @@ new_state_oom_on_stack_frees_partial :: proc(t: ^testing.T) {
 		fail_at      = 1,
 		fail_enabled = true,
 	}
-	alloc := lua.Allocator {
+	alloc := kernel.Allocator {
 		alloc = counting_alloc,
 		ud    = &c,
 	}
 
-	L := lua.new_state(alloc)
+	L := kernel.new_state(alloc)
 	testing.expect(t, L == nil, "new_state must fail when the value stack can't allocate")
 	testing.expect_value(t, c.outstanding, 0)
 }
@@ -154,12 +154,12 @@ new_state_oom_on_frames_frees_partial :: proc(t: ^testing.T) {
 		fail_at      = 2,
 		fail_enabled = true,
 	}
-	alloc := lua.Allocator {
+	alloc := kernel.Allocator {
 		alloc = counting_alloc,
 		ud    = &c,
 	}
 
-	L := lua.new_state(alloc)
+	L := kernel.new_state(alloc)
 	testing.expect(t, L == nil, "new_state must fail when the frame array can't allocate")
 	testing.expect_value(t, c.outstanding, 0)
 }

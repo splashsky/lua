@@ -7,44 +7,44 @@ package tests
 // metatable/registry access, hooks, and traceback formatting.
 
 import "core:testing"
-import lua "luao:lua"
-import aux "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
-dbg_state :: proc() -> ^lua.State {
-	L := lua.new_state(lua.default_allocator())
-	lua.api_pushcfunction(L, aux.open_base)
-	lua.api_call(L, 0, 0)
-	lua.api_pushcfunction(L, aux.open_string)
-	lua.api_call(L, 0, 1)
-	lua.api_setglobal(L, "string")
-	lua.api_pushcfunction(L, aux.open_debug)
-	lua.api_call(L, 0, 1)
-	lua.api_setglobal(L, "debug")
+dbg_state :: proc() -> ^kernel.State {
+	L := kernel.new_state(kernel.default_allocator())
+	kernel.api_pushcfunction(L, stdlib.open_base)
+	kernel.api_call(L, 0, 0)
+	kernel.api_pushcfunction(L, stdlib.open_string)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "string")
+	kernel.api_pushcfunction(L, stdlib.open_debug)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "debug")
 	return L
 }
 
-dbg_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
-	if st := aux.aux_loadstring(L, src); st != .Ok {
+dbg_run :: proc(L: ^kernel.State, src: string) -> kernel.Thread_Status {
+	if st := stdlib.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.api_pcall(L, 0, lua.MULTRET, 0)
+	return kernel.api_pcall(L, 0, kernel.MULTRET, 0)
 }
 
-dbg_eval :: proc(t: ^testing.T, L: ^lua.State, src: string) -> string {
+dbg_eval :: proc(t: ^testing.T, L: ^kernel.State, src: string) -> string {
 	st := dbg_run(L, src)
 	if st != .Ok {
-		msg, _ := lua.api_tolstring(L, -1)
+		msg, _ := kernel.api_tolstring(L, -1)
 		testing.expectf(t, false, "chunk failed: %s", msg)
 		return ""
 	}
-	s, _ := lua.api_tolstring(L, -1)
+	s, _ := kernel.api_tolstring(L, -1)
 	return s
 }
 
 @(test)
 dbg_getinfo_function :: proc(t: ^testing.T) {
 	L := dbg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		"local function f(a, b) return a + b end\n" +
 		"local info = debug.getinfo(f)\n" +
@@ -68,7 +68,7 @@ dbg_getinfo_function :: proc(t: ^testing.T) {
 @(test)
 dbg_getinfo_level :: proc(t: ^testing.T) {
 	L := dbg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		"local function where() return debug.getinfo(1, 'l').currentline end\n" +
 		"local ln = where()\n" +
@@ -82,7 +82,7 @@ dbg_getinfo_level :: proc(t: ^testing.T) {
 @(test)
 dbg_locals :: proc(t: ^testing.T) {
 	L := dbg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// level form: read a running function's first local
 		"local function probe()\n" +
@@ -110,7 +110,7 @@ dbg_locals :: proc(t: ^testing.T) {
 @(test)
 dbg_upvalues :: proc(t: ^testing.T) {
 	L := dbg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		"local function counter()\n" +
 		"  local c = 0\n" +
@@ -130,7 +130,7 @@ dbg_upvalues :: proc(t: ^testing.T) {
 @(test)
 dbg_upvalue_id_join :: proc(t: ^testing.T) {
 	L := dbg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// two closures over the same local share one upvalue id
 		"local function mk()\n" +
@@ -156,7 +156,7 @@ dbg_upvalue_id_join :: proc(t: ^testing.T) {
 @(test)
 dbg_metatable_registry :: proc(t: ^testing.T) {
 	L := dbg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		"local t = {}\n" +
 		"assert(debug.getmetatable(t) == nil)\n" +
@@ -177,7 +177,7 @@ dbg_metatable_registry :: proc(t: ^testing.T) {
 @(test)
 dbg_hooks :: proc(t: ^testing.T) {
 	L := dbg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// gethook reflects a registered call hook and its mask
 		"local function myhook() end\n" +
@@ -201,7 +201,7 @@ dbg_hooks :: proc(t: ^testing.T) {
 @(test)
 dbg_traceback :: proc(t: ^testing.T) {
 	L := dbg_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		"local tb = debug.traceback('my message')\n" +
 		"assert(type(tb) == 'string')\n" +

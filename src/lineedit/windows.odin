@@ -4,7 +4,7 @@
 package lineedit
 
 import win "core:sys/windows"
-import stream "luao:stream"
+import stream "lang:stream"
 
 input_handle: win.HANDLE
 output_handle: win.HANDLE

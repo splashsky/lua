@@ -23,9 +23,9 @@ import "core:fmt"
 import "core:os"
 import "core:time"
 import win32 "core:sys/windows"
-import host "luao:host"
-import lua "luao:lua"
-import shellproc "luao:shellproc"
+import host "lang:host"
+import kernel "lang:kernel"
+import shellproc "lang:shellproc"
 
 when ODIN_OS == .Windows {
 	foreign import oslib_kernel32 "system:Kernel32.lib"
@@ -35,8 +35,8 @@ when ODIN_OS == .Windows {
 }
 
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
-	return (^lua.State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^kernel.State {
+	return (^kernel.State)(Lp)
 }
 
 // This is the exact option set selected by the vendored loslib.c on each host.
@@ -411,13 +411,13 @@ timestamp_from_local :: proc(wall: Civil_Time, nominal: i64, wanted_dst: int) ->
 }
 
 @(private = "file")
-setfield :: proc(L: ^lua.State, key: string, value: i64) {
-	lua.api_pushinteger(L, lua.Integer(value))
-	lua.api_setfield(L, -2, key)
+setfield :: proc(L: ^kernel.State, key: string, value: i64) {
+	kernel.api_pushinteger(L, kernel.Integer(value))
+	kernel.api_setfield(L, -2, key)
 }
 
 @(private = "file")
-setallfields :: proc(L: ^lua.State, c: Civil_Time) {
+setallfields :: proc(L: ^kernel.State, c: Civil_Time) {
 	setfield(L, "year", c.year)
 	setfield(L, "month", i64(c.month))
 	setfield(L, "day", i64(c.day))
@@ -427,46 +427,46 @@ setallfields :: proc(L: ^lua.State, c: Civil_Time) {
 	setfield(L, "yday", i64(c.yday + 1))
 	setfield(L, "wday", i64(c.wday + 1))
 	if c.isdst >= 0 {
-		lua.api_pushboolean(L, c.isdst != 0)
-		lua.api_setfield(L, -2, "isdst")
+		kernel.api_pushboolean(L, c.isdst != 0)
+		kernel.api_setfield(L, -2, "isdst")
 	}
 }
 
 @(private = "file")
-getboolfield :: proc(L: ^lua.State, key: string) -> int {
+getboolfield :: proc(L: ^kernel.State, key: string) -> int {
 	res := -1
-	if lua.api_getfield(L, -1, key) != lua.TNIL {
-		res = lua.api_toboolean(L, -1) ? 1 : 0
+	if kernel.api_getfield(L, -1, key) != kernel.TNIL {
+		res = kernel.api_toboolean(L, -1) ? 1 : 0
 	}
-	lua.api_pop(L, 1)
+	kernel.api_pop(L, 1)
 	return res
 }
 
 @(private = "file")
-getfield :: proc(L: ^lua.State, key: string, d: int, delta: int) -> int {
-	tp := lua.api_getfield(L, -1, key)
-	res, isnum := lua.api_tointegerx(L, -1)
+getfield :: proc(L: ^kernel.State, key: string, d: int, delta: int) -> int {
+	tp := kernel.api_getfield(L, -1, key)
+	res, isnum := kernel.api_tointegerx(L, -1)
 	if !isnum {
-		if tp != lua.TNIL {
+		if tp != kernel.TNIL {
 			aux_error(L, "field '%s' is not an integer", key)
 		} else if d < 0 {
 			aux_error(L, "field '%s' missing in date table", key)
 		}
-		res = lua.Integer(d)
+		res = kernel.Integer(d)
 	} else {
-		ok := res >= 0 ? res - lua.Integer(delta) <= lua.Integer(max(i32)) :
-			lua.Integer(min(i32)) + lua.Integer(delta) <= res
+		ok := res >= 0 ? res - kernel.Integer(delta) <= kernel.Integer(max(i32)) :
+			kernel.Integer(min(i32)) + kernel.Integer(delta) <= res
 		if !ok {
 			aux_error(L, "field '%s' is out-of-bound", key)
 		}
-		res -= lua.Integer(delta)
+		res -= kernel.Integer(delta)
 	}
-	lua.api_pop(L, 1)
+	kernel.api_pop(L, 1)
 	return int(res)
 }
 
 @(private = "file")
-checkoption :: proc(L: ^lua.State, conv: []u8) -> int {
+checkoption :: proc(L: ^kernel.State, conv: []u8) -> int {
 	option := STRFTIME_OPTIONS
 	oplen := 1
 	oi := 0
@@ -478,7 +478,7 @@ checkoption :: proc(L: ^lua.State, conv: []u8) -> int {
 		}
 		oi += oplen
 	}
-	aux_argerror(L, 1, lua.api_pushfstring(L, "invalid conversion specifier '%%%s'", string(conv)))
+	aux_argerror(L, 1, kernel.api_pushfstring(L, "invalid conversion specifier '%%%s'", string(conv)))
 }
 
 @(private = "file")
@@ -616,7 +616,7 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 }
 
 @(private = "file")
-l_checktime :: proc(L: ^lua.State, arg: int) -> i64 {
+l_checktime :: proc(L: ^kernel.State, arg: int) -> i64 {
 	return i64(aux_checkinteger(L, arg))
 }
 
@@ -625,7 +625,7 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	s := transmute([]u8)aux_optlstring(L, 1, "%c")
-	t := lua.api_isnoneornil(L, 2) ? time.to_unix_seconds(time.now()) : l_checktime(L, 2)
+	t := kernel.api_isnoneornil(L, 2) ? time.to_unix_seconds(time.now()) : l_checktime(L, 2)
 	i := 0
 	utc := false
 	if len(s) > 0 && s[0] == '!' {
@@ -684,7 +684,7 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 	}
 	rest := s[i:]
 	if string(rest) == "*t" {
-		lua.api_createtable(L, 0, 9)
+		kernel.api_createtable(L, 0, 9)
 		setallfields(L, c)
 		return 1
 	}
@@ -710,11 +710,11 @@ os_time :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	t: i64
-	if lua.api_isnoneornil(L, 1) {
+	if kernel.api_isnoneornil(L, 1) {
 		t = time.to_unix_seconds(time.now())
 	} else {
-		aux_checktype(L, 1, lua.TTABLE)
-		lua.api_settop(L, 1)
+		aux_checktype(L, 1, kernel.TTABLE)
+		kernel.api_settop(L, 1)
 		year := i64(getfield(L, "year", -1, 1900) + 1900)
 		month := getfield(L, "month", -1, 1) + 1
 		day := getfield(L, "day", -1, 0)
@@ -739,7 +739,7 @@ os_time :: proc "c" (Lp: rawptr) -> i32 {
 	if t == -1 {
 		aux_error(L, "time result cannot be represented in this installation")
 	}
-	lua.api_pushinteger(L, lua.Integer(t))
+	kernel.api_pushinteger(L, kernel.Integer(t))
 	return 1
 }
 
@@ -747,7 +747,7 @@ os_time :: proc "c" (Lp: rawptr) -> i32 {
 os_difftime :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	lua.api_pushnumber(L, lua.Number(l_checktime(L, 1) - l_checktime(L, 2)))
+	kernel.api_pushnumber(L, kernel.Number(l_checktime(L, 1) - l_checktime(L, 2)))
 	return 1
 }
 
@@ -756,17 +756,17 @@ os_clock :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	when ODIN_OS == .Windows {
-		creation, exiting, kernel, user: win32.FILETIME
-		if win32.GetProcessTimes(win32.GetCurrentProcess(), &creation, &exiting, &kernel, &user) {
-			k := transmute(u64le)kernel
-			u := transmute(u64le)user
-			lua.api_pushnumber(L, lua.Number(f64(k + u) / 10_000_000.0))
+		creation, exiting, ktime, utime: win32.FILETIME
+		if win32.GetProcessTimes(win32.GetCurrentProcess(), &creation, &exiting, &ktime, &utime) {
+			k := transmute(u64le)ktime
+			u := transmute(u64le)utime
+			kernel.api_pushnumber(L, kernel.Number(f64(k + u) / 10_000_000.0))
 			return 1
 		}
 	}
 	// tick_now is elapsed rather than CPU time, but is a sane standard-library
 	// fallback on targets whose OS bindings expose no process accounting.
-	lua.api_pushnumber(L, lua.Number(f64(time.tick_now()._nsec) / 1e9))
+	kernel.api_pushnumber(L, kernel.Number(f64(time.tick_now()._nsec) / 1e9))
 	return 1
 }
 
@@ -776,8 +776,8 @@ os_getenv :: proc "c" (Lp: rawptr) -> i32 {
 	L := state(Lp)
 	name := aux_checkstring(L, 1)
 	value, found := os.lookup_env(name, context.temp_allocator)
-	if found do lua.api_pushstring(L, value)
-	else do lua.api_pushnil(L)
+	if found do kernel.api_pushstring(L, value)
+	else do kernel.api_pushnil(L)
 	return 1
 }
 
@@ -802,12 +802,12 @@ os_rename :: proc "c" (Lp: rawptr) -> i32 {
 os_tmpname :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	f, err := os.create_temp_file("", "lua-*")
+	f, err := os.create_temp_file("", kernel.BRAND_LOWER + "-*")
 	if err != nil {
 		aux_error(L, "unable to generate a unique filename")
 	}
 	name := os.name(f)
-	lua.api_pushstring(L, name)
+	kernel.api_pushstring(L, name)
 	os.close(f)
 	when ODIN_OS == .Windows {
 		// core:os obtains a collision-free name by creating it. Windows Lua's
@@ -821,12 +821,12 @@ os_tmpname :: proc "c" (Lp: rawptr) -> i32 {
 os_execute :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.api_isnoneornil(L, 1) {
+	if kernel.api_isnoneornil(L, 1) {
 		when ODIN_OS == .Windows {
-			lua.api_pushboolean(L, true) // cmd.exe is part of supported Windows.
+			kernel.api_pushboolean(L, true) // cmd.exe is part of supported Windows.
 		} else {
 			f, err := os.open("/bin/sh")
-			lua.api_pushboolean(L, err == nil)
+			kernel.api_pushboolean(L, err == nil)
 			if f != nil do os.close(f)
 		}
 		return 1
@@ -858,15 +858,15 @@ os_setlocale :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	_ = aux_checkoption(L, 2, "all", locale_names)
-	if lua.api_isnoneornil(L, 1) {
-		lua.api_pushstring(L, "C")
+	if kernel.api_isnoneornil(L, 1) {
+		kernel.api_pushstring(L, "C")
 		return 1
 	}
 	requested := aux_checkstring(L, 1)
 	if requested == "" || requested == "C" || requested == "POSIX" {
-		lua.api_pushstring(L, "C")
+		kernel.api_pushstring(L, "C")
 	} else {
-		lua.api_pushnil(L)
+		kernel.api_pushnil(L)
 	}
 	return 1
 }
@@ -876,13 +876,13 @@ os_exit :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	status := 0
-	if lua.api_isboolean(L, 1) {
-		status = lua.api_toboolean(L, 1) ? 0 : 1
+	if kernel.api_isboolean(L, 1) {
+		status = kernel.api_toboolean(L, 1) ? 0 : 1
 	} else {
 		status = int(aux_optinteger(L, 1, 0))
 	}
-	if lua.api_toboolean(L, 2) {
-		lua.close_state(L)
+	if kernel.api_toboolean(L, 2) {
+		kernel.close_state(L)
 	}
 	host.process_exit(status)
 }

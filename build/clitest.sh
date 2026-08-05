@@ -16,7 +16,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 SRC_DIR="$REPO_ROOT/src"
-COLLECTION="-collection:luao=$SRC_DIR"
+COLLECTION="-collection:lang=$SRC_DIR"
 
 OUT_DIR="$REPO_ROOT/build/out"
 mkdir -p "$OUT_DIR"

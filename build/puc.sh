@@ -28,7 +28,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 SRC_DIR="$REPO_ROOT/src"
 PUC_DIR="$REPO_ROOT/tests/puc"
 
-COLLECTION="-collection:luao=$SRC_DIR"
+COLLECTION="-collection:lang=$SRC_DIR"
 
 OUT_DIR="$REPO_ROOT/build/out"
 mkdir -p "$OUT_DIR"

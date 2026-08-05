@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 SRC_DIR="$REPO_ROOT/src"
 BENCH_DIR="$REPO_ROOT/bench"
-COLLECTION="-collection:luao=$SRC_DIR"
+COLLECTION="-collection:lang=$SRC_DIR"
 
 # Prefer the platform's configured temporary/runtime directory, but fall back to
 # a private directory under HOME. Odin requires this output path to contain no

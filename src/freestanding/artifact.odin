@@ -9,19 +9,19 @@ package freestanding
 // allocator, open exactly the freestanding libraries, and close it again.
 
 import "base:runtime"
-import lua "luao:lua"
-import stdlib "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
 @(export)
 lang_freestanding_newstate :: proc "c" (
-	alloc: lua.Alloc_Proc,
+	alloc: kernel.Alloc_Proc,
 	ud: rawptr,
-) -> ^lua.State {
+) -> ^kernel.State {
 	context = runtime.default_context()
 	if alloc == nil {
 		return nil
 	}
-	L := lua.new_state(lua.Allocator{alloc = alloc, ud = ud})
+	L := kernel.new_state(kernel.Allocator{alloc = alloc, ud = ud})
 	if L != nil {
 		stdlib.aux_openlibs(L)
 	}
@@ -29,9 +29,9 @@ lang_freestanding_newstate :: proc "c" (
 }
 
 @(export)
-lang_freestanding_close :: proc "c" (L: ^lua.State) {
+lang_freestanding_close :: proc "c" (L: ^kernel.State) {
 	context = runtime.default_context()
 	if L != nil {
-		lua.close_state(L)
+		kernel.close_state(L)
 	}
 }

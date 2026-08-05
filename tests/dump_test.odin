@@ -26,7 +26,7 @@ package tests
 
 import "base:runtime"
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // A growable sink the dump writer appends into. It lives on the test stack and is
 // handed to `lua_dump` as the opaque `data` cookie.
@@ -50,20 +50,20 @@ dump_writer :: proc "c" (L: rawptr, p: rawptr, sz: uint, ud: rawptr) -> i32 {
 }
 
 // Load `src` as a text chunk, leaving the compiled closure on top of the stack.
-dump_load_text :: proc(L: ^lua.State, src: string, rd: ^Src_Reader) -> lua.Thread_Status {
+dump_load_text :: proc(L: ^kernel.State, src: string, rd: ^Src_Reader) -> kernel.Thread_Status {
 	rd^ = Src_Reader {
 		data = ([^]u8)(raw_data(src)),
 		len  = uint(len(src)),
 		done = false,
 	}
-	return lua.api_load(L, src_read, rd, "=dump", "")
+	return kernel.api_load(L, src_read, rd, "=dump", "")
 }
 
 // Dump the function on top of the stack into a fresh byte slice. `lua_dump` does
 // not pop the function (reference parity), so the caller's stack is unchanged.
-dump_top :: proc(L: ^lua.State, strip: bool) -> [dynamic]u8 {
+dump_top :: proc(L: ^kernel.State, strip: bool) -> [dynamic]u8 {
 	sink: Dump_Sink
-	status := lua.api_dump(L, dump_writer, &sink, strip)
+	status := kernel.api_dump(L, dump_writer, &sink, strip)
 	if status != 0 {
 		// Should never happen with our always-succeeding writer.
 		delete(sink.bytes)
@@ -74,13 +74,13 @@ dump_top :: proc(L: ^lua.State, strip: bool) -> [dynamic]u8 {
 
 // Load a previously-dumped byte slice back into a closure on top of the stack,
 // using binary ("b") mode so it routes through `luaU_undump`.
-dump_load_binary :: proc(L: ^lua.State, bytes: []u8, rd: ^Src_Reader) -> lua.Thread_Status {
+dump_load_binary :: proc(L: ^kernel.State, bytes: []u8, rd: ^Src_Reader) -> kernel.Thread_Status {
 	rd^ = Src_Reader {
 		data = ([^]u8)(raw_data(bytes)),
 		len  = uint(len(bytes)),
 		done = false,
 	}
-	return lua.api_load(L, src_read, rd, "=binary", "b")
+	return kernel.api_load(L, src_read, rd, "=binary", "b")
 }
 
 // A representative chunk: a nested closure capturing an upvalue, several distinct
@@ -107,11 +107,11 @@ DUMP_SAMPLE_RESULT :: 122
 
 @(test)
 test_dump_header_golden_bytes :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
-	defer lua.close_state(L)
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
 
 	rd: Src_Reader
-	testing.expect_value(t, dump_load_text(L, "return 1", &rd), lua.Thread_Status.Ok)
+	testing.expect_value(t, dump_load_text(L, "return 1", &rd), kernel.Thread_Status.Ok)
 	bytes := dump_top(L, false)
 	defer delete(bytes)
 
@@ -129,25 +129,25 @@ test_dump_header_golden_bytes :: proc(t: ^testing.T) {
 			append(b, src[i])
 		}
 	}
-	append_str(&expected, lua.SIGNATURE) // "\x1bLua"
-	append(&expected, u8(lua.HEADER_VERSION)) // 0x55 for 5.5
-	append(&expected, u8(lua.HEADER_FORMAT)) // 0x00
-	append_str(&expected, lua.HEADER_DATA) // the 6-byte conversion-check marker
+	append_str(&expected, kernel.SIGNATURE) // "\x1bLua"
+	append(&expected, u8(kernel.HEADER_VERSION)) // 0x55 for 5.5
+	append(&expected, u8(kernel.HEADER_FORMAT)) // 0x00
+	append_str(&expected, kernel.HEADER_DATA) // the 6-byte conversion-check marker
 	// int marker: size byte 4, then i32 LUAC_INT little-endian.
 	append(&expected, 4)
-	iv := i32(lua.HEADER_INT)
+	iv := i32(kernel.HEADER_INT)
 	append_scalar(&expected, &iv, 4)
 	// Instruction marker: size byte 4, then u32 LUAC_INST little-endian.
 	append(&expected, 4)
-	instv := lua.Instruction(lua.HEADER_INST)
+	instv := kernel.Instruction(kernel.HEADER_INST)
 	append_scalar(&expected, &instv, 4)
 	// lua_Integer marker: size byte 8, then i64 LUAC_INT little-endian.
 	append(&expected, 8)
-	lintv := lua.Integer(lua.HEADER_INT)
+	lintv := kernel.Integer(kernel.HEADER_INT)
 	append_scalar(&expected, &lintv, 8)
 	// lua_Number marker: size byte 8, then f64 LUAC_NUM little-endian.
 	append(&expected, 8)
-	lnumv := lua.Number(lua.HEADER_NUM)
+	lnumv := kernel.Number(kernel.HEADER_NUM)
 	append_scalar(&expected, &lnumv, 8)
 
 	testing.expect(t, len(bytes) >= len(expected), "dump shorter than expected header")
@@ -169,12 +169,12 @@ test_dump_header_golden_bytes :: proc(t: ^testing.T) {
 // dump the reload, assert the two dumps are byte-identical, then run the reloaded
 // closure and confirm it yields the expected value.
 dump_roundtrip_check :: proc(t: ^testing.T, strip: bool) {
-	L := lua.new_state(lua.default_allocator())
-	defer lua.close_state(L)
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
 
 	// Compile the source.
 	rd: Src_Reader
-	testing.expect_value(t, dump_load_text(L, DUMP_SAMPLE_SRC, &rd), lua.Thread_Status.Ok)
+	testing.expect_value(t, dump_load_text(L, DUMP_SAMPLE_SRC, &rd), kernel.Thread_Status.Ok)
 
 	// First dump.
 	first := dump_top(L, strip)
@@ -182,9 +182,9 @@ dump_roundtrip_check :: proc(t: ^testing.T, strip: bool) {
 	testing.expect(t, len(first) > 0, "first dump produced no bytes")
 
 	// Drop the original closure; reload purely from the dumped bytes.
-	lua.api_settop(L, 0)
+	kernel.api_settop(L, 0)
 	rd2: Src_Reader
-	testing.expect_value(t, dump_load_binary(L, first[:], &rd2), lua.Thread_Status.Ok)
+	testing.expect_value(t, dump_load_binary(L, first[:], &rd2), kernel.Thread_Status.Ok)
 
 	// Second dump of the reconstructed closure.
 	second := dump_top(L, strip)
@@ -205,8 +205,8 @@ dump_roundtrip_check :: proc(t: ^testing.T, strip: bool) {
 
 	// Behavioral equivalence: run the reloaded closure (still on top) and check
 	// it computes the expected result.
-	testing.expect_value(t, lua.api_pcall(L, 0, 1, 0), lua.Thread_Status.Ok)
-	testing.expect_value(t, lua.api_tointeger(L, -1), DUMP_SAMPLE_RESULT)
+	testing.expect_value(t, kernel.api_pcall(L, 0, 1, 0), kernel.Thread_Status.Ok)
+	testing.expect_value(t, kernel.api_tointeger(L, -1), DUMP_SAMPLE_RESULT)
 }
 
 @(test)
@@ -225,11 +225,11 @@ test_dump_roundtrip_stripped :: proc(t: ^testing.T) {
 // silently no-op'ing).
 @(test)
 test_dump_strip_is_smaller :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
-	defer lua.close_state(L)
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
 
 	rd: Src_Reader
-	testing.expect_value(t, dump_load_text(L, DUMP_SAMPLE_SRC, &rd), lua.Thread_Status.Ok)
+	testing.expect_value(t, dump_load_text(L, DUMP_SAMPLE_SRC, &rd), kernel.Thread_Status.Ok)
 
 	with_debug := dump_top(L, false)
 	defer delete(with_debug)

@@ -298,7 +298,7 @@ open :: proc(path, mode: string) -> ^Stream {
 }
 
 tmpfile :: proc() -> ^Stream {
-	f, err := os.create_temp_file("", "lua-odin-*")
+	f, err := os.create_temp_file("", "langtmp-*")
 	if err != nil {
 		set_error(err)
 		return nil

@@ -6,8 +6,8 @@
     provenance comments that name the reference C original stay verbatim.
 
     Usage:
-        .\build\debrand-rename.ps1 -Path src\lua            # rewrite in place
-        .\build\debrand-rename.ps1 -Path src\lua -WhatIfReport   # collision report only
+        .\build\debrand-rename.ps1 -Path src\kernel            # rewrite in place
+        .\build\debrand-rename.ps1 -Path src\kernel -WhatIfReport   # collision report only
 #>
 [CmdletBinding()]
 param(

@@ -5,10 +5,10 @@ Set-Location 'C:\Users\skyjohnson\OneDrive - Microsoft\Documents\lua-odin'
 . .\build\debrand-map.ps1
 
 $pkgs = [ordered]@{
-    'kernel'    = 'src\lua'
+    'kernel'    = 'src\kernel'
     'stdlib'    = 'src\stdlib'
     'main'      = 'src'
-    'luac'      = 'src\luac'
+    'luac'      = 'src\compiler'
     'tests'     = 'tests'
     'lineedit'  = 'src\lineedit'
     'host'      = 'src\host'

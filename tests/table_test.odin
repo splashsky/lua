@@ -15,42 +15,42 @@ package tests
 
 import "core:fmt"
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // Store an integer value under integer key `k`.
-set_int_key :: proc(L: ^lua.State, tbl: ^lua.Table, k: lua.Integer, v: lua.Integer) {
-	val: lua.TValue
-	lua.set_int(&val, v)
-	st := lua.table_setint(L, tbl, k, &val)
+set_int_key :: proc(L: ^kernel.State, tbl: ^kernel.Table, k: kernel.Integer, v: kernel.Integer) {
+	val: kernel.TValue
+	kernel.set_int(&val, v)
+	st := kernel.table_setint(L, tbl, k, &val)
 	assert(st == .Ok)
 }
 
 // Read an integer key, returning (value, found). "Found" means the slot held a
 // real (non-empty) value.
-get_int_key :: proc(tbl: ^lua.Table, k: lua.Integer) -> (lua.Integer, bool) {
-	res: lua.TValue
-	lua.table_getint(tbl, k, &res)
-	if lua.is_nil(&res) {
+get_int_key :: proc(tbl: ^kernel.Table, k: kernel.Integer) -> (kernel.Integer, bool) {
+	res: kernel.TValue
+	kernel.table_getint(tbl, k, &res)
+	if kernel.is_nil(&res) {
 		return 0, false
 	}
-	return lua.int_value(&res), true
+	return kernel.int_value(&res), true
 }
 
 // Basic integer key round-trip: what you put in is what you get out, distinct keys
 // keep distinct values, and a key never set reads as nil.
 @(test)
 table_int_roundtrip :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	tbl := lua.table_new(L)
+	tbl := kernel.table_new(L)
 	testing.expect(t, tbl != nil)
 
-	for i in lua.Integer(1) ..= 5 {
+	for i in kernel.Integer(1) ..= 5 {
 		set_int_key(L, tbl, i, i * 100)
 	}
-	for i in lua.Integer(1) ..= 5 {
+	for i in kernel.Integer(1) ..= 5 {
 		v, found := get_int_key(tbl, i)
 		testing.expect(t, found, "previously set key must be found")
 		testing.expect_value(t, v, i * 100)
@@ -64,55 +64,55 @@ table_int_roundtrip :: proc(t: ^testing.T) {
 // Overwriting a key replaces its value in place rather than creating a duplicate.
 @(test)
 table_overwrite_replaces :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	tbl := lua.table_new(L)
+	tbl := kernel.table_new(L)
 	set_int_key(L, tbl, 7, 111)
 	set_int_key(L, tbl, 7, 222)
 
 	v, found := get_int_key(tbl, 7)
 	testing.expect(t, found)
-	testing.expect_value(t, v, lua.Integer(222))
+	testing.expect_value(t, v, kernel.Integer(222))
 }
 
 // String keys must round-trip too, keyed by the interned string object.
 @(test)
 table_string_key_roundtrip :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	tbl := lua.table_new(L)
-	key := lua.string_new(L, "answer")
-	val: lua.TValue
-	lua.set_int(&val, 42)
-	kv: lua.TValue
-	lua.set_gc(&kv, lua.obj2gco(key))
-	st := lua.table_set(L, tbl, &kv, &val)
+	tbl := kernel.table_new(L)
+	key := kernel.string_new(L, "answer")
+	val: kernel.TValue
+	kernel.set_int(&val, 42)
+	kv: kernel.TValue
+	kernel.set_gc(&kv, kernel.obj2gco(key))
+	st := kernel.table_set(L, tbl, &kv, &val)
 	testing.expect(t, st == .Ok)
 
-	res: lua.TValue
-	lua.table_getstr(tbl, key, &res)
-	testing.expect(t, lua.is_integer(&res), "string key must retrieve its value")
-	testing.expect_value(t, lua.int_value(&res), lua.Integer(42))
+	res: kernel.TValue
+	kernel.table_getstr(tbl, key, &res)
+	testing.expect(t, kernel.is_integer(&res), "string key must retrieve its value")
+	testing.expect_value(t, kernel.int_value(&res), kernel.Integer(42))
 }
 
 // The length operator's contract is a "border": an index n where t[n] is non-nil
 // and t[n+1] is nil. For a contiguous sequence 1..N the border is exactly N.
 @(test)
 table_length_border :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	tbl := lua.table_new(L)
-	for i in lua.Integer(1) ..= 10 {
+	tbl := kernel.table_new(L)
+	for i in kernel.Integer(1) ..= 10 {
 		set_int_key(L, tbl, i, i)
 	}
-	n := lua.table_getn(L, tbl)
-	testing.expect_value(t, n, lua.Unsigned(10))
+	n := kernel.table_getn(L, tbl)
+	testing.expect_value(t, n, kernel.Unsigned(10))
 }
 
 // `next` must visit every stored entry exactly once. We insert a known set of
@@ -120,28 +120,28 @@ table_length_border :: proc(t: ^testing.T) {
 // tell-tale: any missed or duplicated key changes it).
 @(test)
 table_next_visits_all :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	tbl := lua.table_new(L)
-	expected_sum := lua.Integer(0)
-	for i in lua.Integer(1) ..= 10 {
+	tbl := kernel.table_new(L)
+	expected_sum := kernel.Integer(0)
+	for i in kernel.Integer(1) ..= 10 {
 		set_int_key(L, tbl, i, i)
 		expected_sum += i
 	}
 
-	key: lua.TValue
-	lua.set_nil(&key) // nil starts a traversal
-	out_key: lua.TValue
-	out_val: lua.TValue
+	key: kernel.TValue
+	kernel.set_nil(&key) // nil starts a traversal
+	out_key: kernel.TValue
+	out_val: kernel.TValue
 	seen := 0
-	sum := lua.Integer(0)
-	for lua.table_next(L, tbl, &key, &out_key, &out_val) {
+	sum := kernel.Integer(0)
+	for kernel.table_next(L, tbl, &key, &out_key, &out_val) {
 		seen += 1
-		testing.expect(t, lua.is_integer(&out_key), "keys were all integers")
-		sum += lua.int_value(&out_key)
-		lua.set_obj(&key, &out_key) // advance the cursor
+		testing.expect(t, kernel.is_integer(&out_key), "keys were all integers")
+		sum += kernel.int_value(&out_key)
+		kernel.set_obj(&key, &out_key) // advance the cursor
 	}
 	testing.expect_value(t, seen, 10)
 	testing.expect_value(t, sum, expected_sum)
@@ -153,55 +153,55 @@ table_next_visits_all :: proc(t: ^testing.T) {
 // entries.
 @(test)
 table_bulk_insert_rehashes_losslessly :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	tbl := lua.table_new(L)
-	for i in lua.Integer(1) ..= 200 {
+	tbl := kernel.table_new(L)
+	for i in kernel.Integer(1) ..= 200 {
 		set_int_key(L, tbl, i, i * 3)
 	}
-	for i in lua.Integer(1) ..= 200 {
+	for i in kernel.Integer(1) ..= 200 {
 		v, found := get_int_key(tbl, i)
 		testing.expect(t, found, "every bulk key must survive rehashing")
 		testing.expect_value(t, v, i * 3)
 	}
-	testing.expect_value(t, lua.table_getn(L, tbl), lua.Unsigned(200))
+	testing.expect_value(t, kernel.table_getn(L, tbl), kernel.Unsigned(200))
 }
 
 // --- hash-part specific -----------------------------------------------------
 
 // Store integer value `v` under the string key `name`.
-set_str_key :: proc(L: ^lua.State, tbl: ^lua.Table, name: string, v: lua.Integer) {
-	key := lua.string_new(L, name)
-	kv: lua.TValue
-	lua.set_gc(&kv, lua.obj2gco(key))
-	val: lua.TValue
-	lua.set_int(&val, v)
-	st := lua.table_set(L, tbl, &kv, &val)
+set_str_key :: proc(L: ^kernel.State, tbl: ^kernel.Table, name: string, v: kernel.Integer) {
+	key := kernel.string_new(L, name)
+	kv: kernel.TValue
+	kernel.set_gc(&kv, kernel.obj2gco(key))
+	val: kernel.TValue
+	kernel.set_int(&val, v)
+	st := kernel.table_set(L, tbl, &kv, &val)
 	assert(st == .Ok)
 }
 
 // Clear the string key `name` (Lua's `t[name] = nil`).
-clear_str_key :: proc(L: ^lua.State, tbl: ^lua.Table, name: string) {
-	key := lua.string_new(L, name)
-	kv: lua.TValue
-	lua.set_gc(&kv, lua.obj2gco(key))
-	val: lua.TValue
-	lua.set_nil(&val)
-	st := lua.table_set(L, tbl, &kv, &val)
+clear_str_key :: proc(L: ^kernel.State, tbl: ^kernel.Table, name: string) {
+	key := kernel.string_new(L, name)
+	kv: kernel.TValue
+	kernel.set_gc(&kv, kernel.obj2gco(key))
+	val: kernel.TValue
+	kernel.set_nil(&val)
+	st := kernel.table_set(L, tbl, &kv, &val)
 	assert(st == .Ok)
 }
 
 // Read the string key `name`, returning (value, found).
-get_str_key :: proc(L: ^lua.State, tbl: ^lua.Table, name: string) -> (lua.Integer, bool) {
-	key := lua.string_new(L, name)
-	res: lua.TValue
-	lua.table_getstr(tbl, key, &res)
-	if lua.is_nil(&res) {
+get_str_key :: proc(L: ^kernel.State, tbl: ^kernel.Table, name: string) -> (kernel.Integer, bool) {
+	key := kernel.string_new(L, name)
+	res: kernel.TValue
+	kernel.table_getstr(tbl, key, &res)
+	if kernel.is_nil(&res) {
 		return 0, false
 	}
-	return lua.int_value(&res), true
+	return kernel.int_value(&res), true
 }
 
 // Filling the hash part drives it through every growth stage -- sizes below the
@@ -212,23 +212,23 @@ get_str_key :: proc(L: ^lua.State, tbl: ^lua.Table, name: string) -> (lua.Intege
 // entry once and only once.
 @(test)
 table_hash_bulk_insert_lossless :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	tbl := lua.table_new(L)
+	tbl := kernel.table_new(L)
 	testing.expect(t, tbl != nil)
 
 	N :: 500
 	for i in 0 ..< N {
-		set_str_key(L, tbl, fmt.tprintf("key%d", i), lua.Integer(i * 7))
+		set_str_key(L, tbl, fmt.tprintf("key%d", i), kernel.Integer(i * 7))
 	}
 
 	// Every key must read back with its exact value.
 	for i in 0 ..< N {
 		v, found := get_str_key(L, tbl, fmt.tprintf("key%d", i))
 		testing.expect(t, found, "every hash key must survive rehashing")
-		testing.expect_value(t, v, lua.Integer(i * 7))
+		testing.expect_value(t, v, kernel.Integer(i * 7))
 	}
 
 	// A key never inserted must still be absent (nothing stray got left behind).
@@ -237,21 +237,21 @@ table_hash_bulk_insert_lossless :: proc(t: ^testing.T) {
 
 	// Traversal must see exactly N entries. Summing the values is the tell-tale:
 	// a lost, duplicated, or mis-mapped entry changes the total.
-	key: lua.TValue
-	lua.set_nil(&key)
-	out_key, out_val: lua.TValue
+	key: kernel.TValue
+	kernel.set_nil(&key)
+	out_key, out_val: kernel.TValue
 	seen := 0
-	sum := lua.Integer(0)
-	for lua.table_next(L, tbl, &key, &out_key, &out_val) {
+	sum := kernel.Integer(0)
+	for kernel.table_next(L, tbl, &key, &out_key, &out_val) {
 		seen += 1
-		sum += lua.int_value(&out_val)
-		lua.set_obj(&key, &out_key)
+		sum += kernel.int_value(&out_val)
+		kernel.set_obj(&key, &out_key)
 	}
 	testing.expect_value(t, seen, N)
 
-	want := lua.Integer(0)
+	want := kernel.Integer(0)
 	for i in 0 ..< N {
-		want += lua.Integer(i * 7)
+		want += kernel.Integer(i * 7)
 	}
 	testing.expect_value(t, sum, want)
 }
@@ -263,14 +263,14 @@ table_hash_bulk_insert_lossless :: proc(t: ^testing.T) {
 // surviving set: cleared keys absent, untouched keys unchanged, new keys correct.
 @(test)
 table_hash_delete_reinsert_stays_consistent :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	tbl := lua.table_new(L)
+	tbl := kernel.table_new(L)
 	N :: 300
 	for i in 0 ..< N {
-		set_str_key(L, tbl, fmt.tprintf("k%d", i), lua.Integer(i))
+		set_str_key(L, tbl, fmt.tprintf("k%d", i), kernel.Integer(i))
 	}
 
 	// Clear every other key.
@@ -283,14 +283,14 @@ table_hash_delete_reinsert_stays_consistent :: proc(t: ^testing.T) {
 			testing.expect(t, !found, "cleared key must read as absent")
 		} else {
 			testing.expect(t, found, "untouched key must survive its neighbours' deletion")
-			testing.expect_value(t, v, lua.Integer(i))
+			testing.expect_value(t, v, kernel.Integer(i))
 		}
 	}
 
 	// Now insert a fresh batch, which must find room among (or beyond) the dead
 	// entries left behind above.
 	for i in 0 ..< N {
-		set_str_key(L, tbl, fmt.tprintf("n%d", i), lua.Integer(i * 2))
+		set_str_key(L, tbl, fmt.tprintf("n%d", i), kernel.Integer(i * 2))
 	}
 
 	// Final state: survivors intact, cleared keys still gone, new keys correct.
@@ -301,22 +301,22 @@ table_hash_delete_reinsert_stays_consistent :: proc(t: ^testing.T) {
 			testing.expect(t, !found, "cleared key must stay absent after refilling")
 		} else {
 			testing.expect(t, found, "survivor must outlast the second batch")
-			testing.expect_value(t, v, lua.Integer(i))
+			testing.expect_value(t, v, kernel.Integer(i))
 			live += 1
 		}
 		nv, nfound := get_str_key(L, tbl, fmt.tprintf("n%d", i))
 		testing.expect(t, nfound, "newly inserted key must be retrievable")
-		testing.expect_value(t, nv, lua.Integer(i * 2))
+		testing.expect_value(t, nv, kernel.Integer(i * 2))
 	}
 
 	// Traversal must agree with that accounting: survivors plus the new batch.
-	key: lua.TValue
-	lua.set_nil(&key)
-	out_key, out_val: lua.TValue
+	key: kernel.TValue
+	kernel.set_nil(&key)
+	out_key, out_val: kernel.TValue
 	seen := 0
-	for lua.table_next(L, tbl, &key, &out_key, &out_val) {
+	for kernel.table_next(L, tbl, &key, &out_key, &out_val) {
 		seen += 1
-		lua.set_obj(&key, &out_key)
+		kernel.set_obj(&key, &out_key)
 	}
 	testing.expect_value(t, seen, live + N)
 }

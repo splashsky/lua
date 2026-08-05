@@ -20,7 +20,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 SRC_DIR="$REPO_ROOT/src"
 TESTS_DIR="$REPO_ROOT/tests"
 
-COLLECTION="-collection:luao=$SRC_DIR"
+COLLECTION="-collection:lang=$SRC_DIR"
 
 ARGS=("$TESTS_DIR" "$COLLECTION")
 if [[ -n "${1:-}" ]]; then

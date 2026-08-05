@@ -8,47 +8,47 @@ package tests
 // at the same indices, afterward -- and freshly exposed slots read back as nil.
 
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // Growing the stack must preserve every existing slot's value at its index and
 // nil-fill the new region. Shrinking must preserve the low slots it keeps.
 @(test)
 stack_growth_preserves_indices :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	// Plant a sentinel inside the initial stack and remember where top is.
-	lua.set_int(lua.stack_value(L, 10), 999)
+	kernel.set_int(kernel.stack_value(L, 10), 999)
 	old_top := L.top
 
 	// Grow well past the initial size.
-	testing.expect_value(t, lua.realloc_stack(L, 200, false), lua.Thread_Status.Ok)
+	testing.expect_value(t, kernel.realloc_stack(L, 200, false), kernel.Thread_Status.Ok)
 	testing.expect_value(t, L.stack_size, 200)
 
 	// The sentinel survived the move at the very same index.
-	testing.expect_value(t, lua.int_value(lua.stack_value(L, 10)), 999)
+	testing.expect_value(t, kernel.int_value(kernel.stack_value(L, 10)), 999)
 	// top is an index, so it is unchanged by the reallocation.
 	testing.expect_value(t, L.top, old_top)
 	// A slot in the newly grown region reads back as nil.
-	testing.expect(t, lua.is_nil(lua.stack_value(L, 100)), "grown region must be nil-filled")
+	testing.expect(t, kernel.is_nil(kernel.stack_value(L, 100)), "grown region must be nil-filled")
 
 	// Shrinking back keeps the low slots that remain in range.
-	testing.expect_value(t, lua.realloc_stack(L, lua.BASIC_STACK_SIZE, false), lua.Thread_Status.Ok)
-	testing.expect_value(t, L.stack_size, lua.BASIC_STACK_SIZE)
-	testing.expect_value(t, lua.int_value(lua.stack_value(L, 10)), 999)
+	testing.expect_value(t, kernel.realloc_stack(L, kernel.BASIC_STACK_SIZE, false), kernel.Thread_Status.Ok)
+	testing.expect_value(t, L.stack_size, kernel.BASIC_STACK_SIZE)
+	testing.expect_value(t, kernel.int_value(kernel.stack_value(L, 10)), 999)
 }
 
 // grow_stack must honor the "at least what was asked for" rule: when the 1.5x
 // growth is not enough, it grows exactly to top + n.
 @(test)
 grow_stack_respects_request :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	// From BASIC_STACK_SIZE (40), 1.5x is 60, but top(1)+1000 = 1001 wins.
-	testing.expect_value(t, lua.grow_stack(L, 1000, false), lua.Thread_Status.Ok)
+	testing.expect_value(t, kernel.grow_stack(L, 1000, false), kernel.Thread_Status.Ok)
 	testing.expect_value(t, L.stack_size, L.top + 1000)
 }
 
@@ -56,10 +56,10 @@ grow_stack_respects_request :: proc(t: ^testing.T) {
 // floored at LUA_MINSTACK.
 @(test)
 stack_in_use_reports_frame_extent :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	// Base frame top is 1 + LUA_MINSTACK; in-use is that plus one slot.
-	testing.expect_value(t, lua.stack_in_use(L), 1 + lua.MINSTACK + 1)
+	testing.expect_value(t, kernel.stack_in_use(L), 1 + kernel.MINSTACK + 1)
 }

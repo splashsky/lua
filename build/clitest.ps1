@@ -22,7 +22,7 @@ $ErrorActionPreference = 'Stop'
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
-$Collection = "-collection:luao=$SrcDir"
+$Collection = "-collection:lang=$SrcDir"
 
 # Build to a space-free temp dir (Odin mis-tokenizes the space in this repo's path).
 $OutDir = Join-Path $env:TEMP 'luao-clitest'

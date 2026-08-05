@@ -5,7 +5,7 @@ package shellproc
 
 import "core:os"
 import win "core:sys/windows"
-import stream "luao:stream"
+import stream "lang:stream"
 
 platform_error :: proc() -> os.Error {
 	// core:os does not expose its private GetLastError converter. Keep the

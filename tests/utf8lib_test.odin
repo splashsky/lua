@@ -6,30 +6,30 @@ package tests
 // width characters, the codes() iterator, and the fail return on malformed input.
 
 import "core:testing"
-import lua "luao:lua"
-import aux "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
-utf8_state :: proc() -> ^lua.State {
-	L := lua.new_state(lua.default_allocator())
-	lua.api_pushcfunction(L, aux.open_base)
-	lua.api_call(L, 0, 0)
-	lua.api_pushcfunction(L, aux.open_utf8)
-	lua.api_call(L, 0, 1)
-	lua.api_setglobal(L, "utf8")
+utf8_state :: proc() -> ^kernel.State {
+	L := kernel.new_state(kernel.default_allocator())
+	kernel.api_pushcfunction(L, stdlib.open_base)
+	kernel.api_call(L, 0, 0)
+	kernel.api_pushcfunction(L, stdlib.open_utf8)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "utf8")
 	return L
 }
 
-utf8_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
-	if st := aux.aux_loadstring(L, src); st != .Ok {
+utf8_run :: proc(L: ^kernel.State, src: string) -> kernel.Thread_Status {
+	if st := stdlib.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.api_pcall(L, 0, lua.MULTRET, 0)
+	return kernel.api_pcall(L, 0, kernel.MULTRET, 0)
 }
 
 @(test)
 utf8_char_codepoint_roundtrip :: proc(t: ^testing.T) {
 	L := utf8_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// H, é (U+00E9, 2 bytes), l, l, o -> 6 bytes, 5 characters.
 	st := utf8_run(
 		L,
@@ -46,7 +46,7 @@ utf8_char_codepoint_roundtrip :: proc(t: ^testing.T) {
 @(test)
 utf8_offset_navigation :: proc(t: ^testing.T) {
 	L := utf8_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// A (1 byte), U+1F600 emoji (4 bytes), B (1 byte) -> 6 bytes.
 	st := utf8_run(
 		L,
@@ -64,7 +64,7 @@ utf8_offset_navigation :: proc(t: ^testing.T) {
 @(test)
 utf8_codes_iterator :: proc(t: ^testing.T) {
 	L := utf8_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// U+263A smiley (3 bytes) then A (1 byte).
 	st := utf8_run(
 		L,
@@ -82,7 +82,7 @@ utf8_codes_iterator :: proc(t: ^testing.T) {
 @(test)
 utf8_len_invalid :: proc(t: ^testing.T) {
 	L := utf8_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// 0xFF is never a valid lead byte -> len must report fail plus position 1.
 	st := utf8_run(
 		L,
@@ -97,7 +97,7 @@ utf8_len_invalid :: proc(t: ^testing.T) {
 @(test)
 utf8_charpattern_and_ascii :: proc(t: ^testing.T) {
 	L := utf8_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	st := utf8_run(
 		L,
 		"assert(type(utf8.charpattern) == 'string', 'charpattern is a string')\n" +
@@ -108,6 +108,6 @@ utf8_charpattern_and_ascii :: proc(t: ^testing.T) {
 	testing.expect(t, st == .Ok)
 	// The pattern begins with '[' and, being a byte string with an embedded NUL,
 	// is 14 bytes long -- verify the observable shape without asserting internals.
-	s, _ := lua.api_tolstring(L, -1)
+	s, _ := kernel.api_tolstring(L, -1)
 	testing.expect(t, len(s) == 14 && s[0] == '[', "charpattern has the reference bytes")
 }

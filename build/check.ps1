@@ -16,13 +16,13 @@ $ErrorActionPreference = 'Stop'
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
-$Collection = "-collection:luao=$SrcDir"
+$Collection = "-collection:lang=$SrcDir"
 
 # Each entry: the path to check, and whether it's a library (no `main`).
 $Targets = @(
     @{ Path = 'src';        Lib = $false },
-    @{ Path = 'src\luac';   Lib = $false },
-    @{ Path = 'src\lua';    Lib = $true  },
+    @{ Path = 'src\compiler';   Lib = $false },
+    @{ Path = 'src\kernel';    Lib = $true  },
     @{ Path = 'src\stdlib'; Lib = $true  },
     @{ Path = 'tests';      Lib = $true  }
 )

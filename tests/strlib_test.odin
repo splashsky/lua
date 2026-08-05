@@ -7,42 +7,42 @@ package tests
 // round-tripped back through `load`. No test inspects an incidental internal.
 
 import "core:testing"
-import lua "luao:lua"
-import aux "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
-str_state :: proc() -> ^lua.State {
-	L := lua.new_state(lua.default_allocator())
-	lua.api_pushcfunction(L, aux.open_base)
-	lua.api_call(L, 0, 0)
-	lua.api_pushcfunction(L, aux.open_string)
-	lua.api_call(L, 0, 1)
-	lua.api_setglobal(L, "string")
+str_state :: proc() -> ^kernel.State {
+	L := kernel.new_state(kernel.default_allocator())
+	kernel.api_pushcfunction(L, stdlib.open_base)
+	kernel.api_call(L, 0, 0)
+	kernel.api_pushcfunction(L, stdlib.open_string)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "string")
 	return L
 }
 
-str_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
-	if st := aux.aux_loadstring(L, src); st != .Ok {
+str_run :: proc(L: ^kernel.State, src: string) -> kernel.Thread_Status {
+	if st := stdlib.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.api_pcall(L, 0, lua.MULTRET, 0)
+	return kernel.api_pcall(L, 0, kernel.MULTRET, 0)
 }
 
 // Convenience: run a chunk, expect success, return the top string.
-str_eval :: proc(t: ^testing.T, L: ^lua.State, src: string) -> string {
+str_eval :: proc(t: ^testing.T, L: ^kernel.State, src: string) -> string {
 	st := str_run(L, src)
 	if st != .Ok {
-		msg, _ := lua.api_tolstring(L, -1)
+		msg, _ := kernel.api_tolstring(L, -1)
 		testing.expectf(t, false, "chunk failed: %s", msg)
 		return ""
 	}
-	s, _ := lua.api_tolstring(L, -1)
+	s, _ := kernel.api_tolstring(L, -1)
 	return s
 }
 
 @(test)
 str_basic_ops :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// sub with negatives, rep with separator, reverse, upper/lower, byte/char, len.
 	src :=
 		"local s = 'Hello, World'\n" +
@@ -65,7 +65,7 @@ str_basic_ops :: proc(t: ^testing.T) {
 @(test)
 str_find_and_match :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// plain find returns 1-based start/end
 		"local i,j = string.find('abcXYZ', 'XYZ')\n" +
@@ -89,7 +89,7 @@ str_find_and_match :: proc(t: ^testing.T) {
 @(test)
 str_gmatch_iterates :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		"local words = {}\n" +
 		"for w in string.gmatch('the quick brown fox', '%a+') do words[#words+1] = w end\n" +
@@ -110,7 +110,7 @@ str_gmatch_iterates :: proc(t: ^testing.T) {
 @(test)
 str_gsub_replacements :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// string replacement with a capture reference and a count
 		"local r,n = string.gsub('hello world', '(%w+)', '<%1>')\n" +
@@ -134,7 +134,7 @@ str_gsub_replacements :: proc(t: ^testing.T) {
 @(test)
 str_pattern_specials :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// %b balanced match
 		"assert(string.match('(a(b)c)d', '%b()') == '(a(b)c)')\n" +
@@ -155,7 +155,7 @@ str_pattern_specials :: proc(t: ^testing.T) {
 @(test)
 str_format_numbers :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		"assert(string.format('%d', 42) == '42')\n" +
 		"assert(string.format('%5d', 42) == '   42')\n" +
@@ -196,7 +196,7 @@ str_format_numbers :: proc(t: ^testing.T) {
 @(test)
 str_format_q_roundtrip :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// %q must produce something `load` can read back to the original value. This is
 	// an honest oracle: we don't assert the exact escaping, only that round-tripping
 	// through the Lua reader recovers each value.
@@ -216,7 +216,7 @@ str_format_q_roundtrip :: proc(t: ^testing.T) {
 @(test)
 str_pack_integers :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// little- vs big-endian byte order for a 4-byte unsigned
 		"assert(string.pack('<I4', 0x01020304) == '\\4\\3\\2\\1')\n" +
@@ -238,7 +238,7 @@ str_pack_integers :: proc(t: ^testing.T) {
 @(test)
 str_pack_floats_and_strings :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	src :=
 		// double round-trips exactly
 		"local d = string.pack('<d', 3.141592653589793)\n" +
@@ -266,7 +266,7 @@ str_pack_floats_and_strings :: proc(t: ^testing.T) {
 @(test)
 str_metatable_methods :: proc(t: ^testing.T) {
 	L := str_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// The string metatable makes method syntax and numeric-string arithmetic work.
 	src :=
 		"assert(('hello'):upper() == 'HELLO')\n" +

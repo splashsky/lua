@@ -10,24 +10,24 @@ package tests
 // and relocates the error object to where the caller wants it.
 
 import "core:testing"
-import lua "luao:lua"
-import aux "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
 // A protected computation that pushes a few scratch values and then raises a
 // runtime error with a caller-supplied integer as the error object on top.
-raising_proc :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
+raising_proc :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
 	errval := (^i64)(ud)^
-	lua.set_int(lua.stack_value(L, L.top), 111)
+	kernel.set_int(kernel.stack_value(L, L.top), 111)
 	L.top += 1
-	lua.set_int(lua.stack_value(L, L.top), 222)
+	kernel.set_int(kernel.stack_value(L, L.top), 222)
 	L.top += 1
-	lua.set_int(lua.stack_value(L, L.top), errval) // the error object
+	kernel.set_int(kernel.stack_value(L, L.top), errval) // the error object
 	L.top += 1
-	return lua.throw(L, .Err_Run)
+	return kernel.throw(L, .Err_Run)
 }
 
 // A protected computation that simply succeeds.
-ok_proc :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
+ok_proc :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
 	return .Ok
 }
 
@@ -35,12 +35,12 @@ ok_proc :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 // codes above Yield are real errors.
 @(test)
 error_status_classification :: proc(t: ^testing.T) {
-	testing.expect(t, !lua.is_error_status(.Ok))
-	testing.expect(t, !lua.is_error_status(.Yield))
-	testing.expect(t, lua.is_error_status(.Err_Run))
-	testing.expect(t, lua.is_error_status(.Err_Syntax))
-	testing.expect(t, lua.is_error_status(.Err_Mem))
-	testing.expect(t, lua.is_error_status(.Err_Err))
+	testing.expect(t, !kernel.is_error_status(.Ok))
+	testing.expect(t, !kernel.is_error_status(.Yield))
+	testing.expect(t, kernel.is_error_status(.Err_Run))
+	testing.expect(t, kernel.is_error_status(.Err_Syntax))
+	testing.expect(t, kernel.is_error_status(.Err_Mem))
+	testing.expect(t, kernel.is_error_status(.Err_Err))
 }
 
 // A protected boundary must catch a raised error, report its status, and unlink
@@ -49,34 +49,34 @@ error_status_classification :: proc(t: ^testing.T) {
 // observably broken.
 @(test)
 protected_boundary_catches_error :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	old_top := L.top
 	errval: i64 = 4242
-	status := lua.run_protected(L, raising_proc, &errval)
+	status := kernel.run_protected(L, raising_proc, &errval)
 
-	testing.expect_value(t, status, lua.Thread_Status.Err_Run)
-	testing.expect_value(t, L.status, lua.Thread_Status.Ok) // NOT clobbered
+	testing.expect_value(t, status, kernel.Thread_Status.Err_Run)
+	testing.expect_value(t, L.status, kernel.Thread_Status.Ok) // NOT clobbered
 	testing.expect(t, L.errorJmp == nil) // boundary unlinked
 
 	// The error object sits at top-1; relocating it to old_top must land the
 	// exact value we raised and leave top one slot past it.
-	lua.set_error_object(L, .Err_Run, old_top)
-	testing.expect_value(t, lua.int_value(lua.stack_value(L, old_top)), 4242)
+	kernel.set_error_object(L, .Err_Run, old_top)
+	testing.expect_value(t, kernel.int_value(kernel.stack_value(L, old_top)), 4242)
 	testing.expect_value(t, L.top, old_top + 1)
 }
 
 // A successful protected call returns Ok and leaves the boundary chain balanced.
 @(test)
 protected_boundary_success :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
-	status := lua.run_protected(L, ok_proc, nil)
-	testing.expect_value(t, status, lua.Thread_Status.Ok)
+	status := kernel.run_protected(L, ok_proc, nil)
+	testing.expect_value(t, status, kernel.Thread_Status.Ok)
 	testing.expect(t, L.errorJmp == nil)
 }
 
@@ -85,21 +85,21 @@ protected_boundary_success :: proc(t: ^testing.T) {
 // unwind cleanly back to empty.
 @(test)
 protected_boundary_nests :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	errval: i64 = 7
-	outer := lua.run_protected(L, nested_outer, &errval)
-	testing.expect_value(t, outer, lua.Thread_Status.Ok)
+	outer := kernel.run_protected(L, nested_outer, &errval)
+	testing.expect_value(t, outer, kernel.Thread_Status.Ok)
 	testing.expect(t, L.errorJmp == nil)
-	testing.expect_value(t, L.status, lua.Thread_Status.Ok)
+	testing.expect_value(t, L.status, kernel.Thread_Status.Ok)
 }
 
 // The outer computation runs an inner protected call that raises, confirms it
 // caught Err_Run, and reports success -- modeling a pcall that recovers.
-nested_outer :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
-	inner := lua.run_protected(L, raising_proc, ud)
+nested_outer :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
+	inner := kernel.run_protected(L, raising_proc, ud)
 	if inner != .Err_Run {
 		return .Err_Run // propagate an unexpected result so the test fails loudly
 	}
@@ -109,7 +109,7 @@ nested_outer :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 Jump_Stress_Shared :: struct {
 	ok:          bool,
 	catches:     int,
-	next_status: lua.Thread_Status,
+	next_status: kernel.Thread_Status,
 }
 
 Jump_Stress_Level :: struct {
@@ -123,13 +123,13 @@ Jump_Stress_Level :: struct {
 // into tail recursion; its address also escapes, forcing the value to memory
 // rather than relying on LLVM understanding setjmp's missing "returns_twice"
 // attribute.
-deep_jump_stress :: #force_no_inline proc(L: ^lua.State, depth: int, shared: ^Jump_Stress_Shared) -> lua.Thread_Status {
+deep_jump_stress :: #force_no_inline proc(L: ^kernel.State, depth: int, shared: ^Jump_Stress_Shared) -> kernel.Thread_Status {
 	sentinel := i64(0x120000 + depth)
 	sentinel_ptr := &sentinel
 	if depth == 0 {
 		shared.next_status = .Err_Syntax
 		L.n_ccalls = 900
-		return lua.throw(L, .Err_Syntax)
+		return kernel.throw(L, .Err_Syntax)
 	}
 	status := deep_jump_stress(L, depth - 1, shared)
 	if sentinel_ptr^ != i64(0x120000 + depth) {
@@ -141,7 +141,7 @@ deep_jump_stress :: #force_no_inline proc(L: ^lua.State, depth: int, shared: ^Ju
 // Every level catches the child at a different native depth, verifies a local
 // which was live across that jump, then throws again to its own parent. This
 // proves that the errorJmp chain routes each jump to the innermost live buffer.
-jump_stress_level :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
+jump_stress_level :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
 	level := (^Jump_Stress_Level)(ud)
 	if level.parent_sentinel != nil &&
 	   level.parent_sentinel^ != i64(0x340000 + level.depth + 1) {
@@ -160,7 +160,7 @@ jump_stress_level :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	before_ccalls := L.n_ccalls + 3
 	L.n_ccalls = before_ccalls
 	float_sentinel := f64(before_ccalls)*1.25 + 0.5
-	status := lua.run_protected(L, jump_stress_level, &child)
+	status := kernel.run_protected(L, jump_stress_level, &child)
 	if status != level.shared.next_status ||
 	   sentinel != i64(0x340000 + level.depth) ||
 	   float_sentinel != f64(before_ccalls)*1.25 + 0.5 ||
@@ -169,7 +169,7 @@ jump_stress_level :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 	}
 	level.shared.catches += 1
 	level.shared.next_status = .Err_Run if status == .Err_Syntax else .Err_Syntax
-	return lua.throw(L, level.shared.next_status)
+	return kernel.throw(L, level.shared.next_status)
 }
 
 // This is intentionally harsher than a normal pcall: 200 native recursive
@@ -179,21 +179,21 @@ jump_stress_level :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
 // makes this crash or fail its exact restoration checks under -o:speed.
 @(test)
 protected_boundary_machine_state_stress :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	L.n_ccalls = 37
 	shared := Jump_Stress_Shared{ok = true}
 	root := Jump_Stress_Level{depth = 4, shared = &shared}
-	status := lua.run_protected(L, jump_stress_level, &root)
+	status := kernel.run_protected(L, jump_stress_level, &root)
 
-	testing.expect_value(t, status, lua.Thread_Status.Err_Syntax)
+	testing.expect_value(t, status, kernel.Thread_Status.Err_Syntax)
 	testing.expect(t, shared.ok, "live locals and nested landing pads survived every jump")
 	testing.expect_value(t, shared.catches, 4)
 	testing.expect_value(t, L.n_ccalls, 37)
 	testing.expect(t, L.errorJmp == nil, "all protected-boundary nodes were unlinked")
-	testing.expect_value(t, L.status, lua.Thread_Status.Ok)
+	testing.expect_value(t, L.status, kernel.Thread_Status.Ok)
 }
 
 // Drive the same mechanism through the public Lua surface. The chunk combines
@@ -203,10 +203,10 @@ protected_boundary_machine_state_stress :: proc(t: ^testing.T) {
 // boundary restored its chain and C-call accounting.
 @(test)
 protected_boundary_lua_surface_stress :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
-	aux.aux_openlibs(L)
+	defer kernel.close_state(L)
+	stdlib.aux_openlibs(L)
 
 	before_ccalls := L.n_ccalls
 	source :=
@@ -253,15 +253,15 @@ protected_boundary_lua_surface_stress :: proc(t: ^testing.T) {
 		"assert(survivor.tag == 'alive' and survivor.value == 0x12345)\n" +
 		"return 0x5eed"
 
-	testing.expect_value(t, aux.aux_loadstring(L, source), lua.Thread_Status.Ok)
-	status := lua.api_pcall(L, 0, 1, 0)
+	testing.expect_value(t, stdlib.aux_loadstring(L, source), kernel.Thread_Status.Ok)
+	status := kernel.api_pcall(L, 0, 1, 0)
 	if status != .Ok {
-		message, _ := lua.api_tolstring(L, -1)
+		message, _ := kernel.api_tolstring(L, -1)
 		testing.expectf(t, false, "jump stress chunk failed: %s", message)
 		return
 	}
-	testing.expect_value(t, lua.api_tointeger(L, -1), i64(0x5eed))
+	testing.expect_value(t, kernel.api_tointeger(L, -1), i64(0x5eed))
 	testing.expect_value(t, L.n_ccalls, before_ccalls)
 	testing.expect(t, L.errorJmp == nil, "public pcall left no protected boundary linked")
-	testing.expect_value(t, L.status, lua.Thread_Status.Ok)
+	testing.expect_value(t, L.status, kernel.Thread_Status.Ok)
 }

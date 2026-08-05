@@ -8,30 +8,30 @@ package tests
 // wrapper from coroutine.wrap, running()/isyieldable() on the main thread, close().
 
 import "core:testing"
-import lua "luao:lua"
-import aux "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
-corolib_state :: proc() -> ^lua.State {
-	L := lua.new_state(lua.default_allocator())
-	lua.api_pushcfunction(L, aux.open_base)
-	lua.api_call(L, 0, 0)
-	lua.api_pushcfunction(L, aux.open_coroutine)
-	lua.api_call(L, 0, 1)
-	lua.api_setglobal(L, "coroutine")
+corolib_state :: proc() -> ^kernel.State {
+	L := kernel.new_state(kernel.default_allocator())
+	kernel.api_pushcfunction(L, stdlib.open_base)
+	kernel.api_call(L, 0, 0)
+	kernel.api_pushcfunction(L, stdlib.open_coroutine)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "coroutine")
 	return L
 }
 
-corolib_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
-	if st := aux.aux_loadstring(L, src); st != .Ok {
+corolib_run :: proc(L: ^kernel.State, src: string) -> kernel.Thread_Status {
+	if st := stdlib.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.api_pcall(L, 0, lua.MULTRET, 0)
+	return kernel.api_pcall(L, 0, kernel.MULTRET, 0)
 }
 
 @(test)
 corolib_resume_yield_handoff :: proc(t: ^testing.T) {
 	L := corolib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// Values flow both ways across yield: arguments into resume become the yield's
 	// results, and the values passed to resume become the yield expression's value.
 	st := corolib_run(
@@ -58,7 +58,7 @@ corolib_resume_yield_handoff :: proc(t: ^testing.T) {
 @(test)
 corolib_status_lifecycle :: proc(t: ^testing.T) {
 	L := corolib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	st := corolib_run(
 		L,
 		"local co = coroutine.create(function() coroutine.yield() end)\n" +
@@ -75,7 +75,7 @@ corolib_status_lifecycle :: proc(t: ^testing.T) {
 @(test)
 corolib_wrap_iterator :: proc(t: ^testing.T) {
 	L := corolib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	st := corolib_run(
 		L,
 		"local gen = coroutine.wrap(function()\n" +
@@ -92,7 +92,7 @@ corolib_wrap_iterator :: proc(t: ^testing.T) {
 @(test)
 corolib_error_propagation :: proc(t: ^testing.T) {
 	L := corolib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// resume must catch the error and report (false, message); wrap must re-raise
 	// it, so pcall around the wrapper observes a failure.
 	st := corolib_run(
@@ -113,7 +113,7 @@ corolib_error_propagation :: proc(t: ^testing.T) {
 @(test)
 corolib_running_and_close :: proc(t: ^testing.T) {
 	L := corolib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	st := corolib_run(
 		L,
 		"local _, ismain = coroutine.running()\n" +

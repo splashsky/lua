@@ -12,11 +12,11 @@ package stdlib
 // function" checks that detect an inconsistent comparator.
 
 import "base:runtime"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
-	return (^lua.State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^kernel.State {
+	return (^kernel.State)(Lp)
 }
 
 // Capability flags an argument must provide to stand in for a table -- reference
@@ -34,9 +34,9 @@ TAB_RW :: TAB_R | TAB_W
 // Push `key`, raw-get it from the table `n` slots down, and report whether the
 // result is non-nil -- reference `checkfield`.
 @(private = "file")
-checkfield :: proc(L: ^lua.State, key: string, n: int) -> bool {
-	lua.api_pushstring(L, key)
-	return lua.api_rawget(L, -n) != lua.TNIL
+checkfield :: proc(L: ^kernel.State, key: string, n: int) -> bool {
+	kernel.api_pushstring(L, key)
+	return kernel.api_rawget(L, -n) != kernel.TNIL
 }
 
 // Verify `arg` is a table, or an object that emulates one via the metamethods
@@ -45,10 +45,10 @@ checkfield :: proc(L: ^lua.State, key: string, n: int) -> bool {
 // `lua_pop(n)` removes the metatable and every probe. (Odin has no comma
 // operator, so the C `++n` folded into the short-circuit chain is spelled out.)
 @(private = "file")
-checktab :: proc(L: ^lua.State, arg: int, what: int) {
-	if lua.api_type(L, arg) != lua.TTABLE {
+checktab :: proc(L: ^kernel.State, arg: int, what: int) {
+	if kernel.api_type(L, arg) != kernel.TTABLE {
 		n := 1 // number of elements to pop
-		ok := lua.api_getmetatable(L, arg) // must have a metatable
+		ok := kernel.api_getmetatable(L, arg) // must have a metatable
 		if ok && what & TAB_R != 0 {
 			n += 1
 			ok = checkfield(L, "__index", n)
@@ -62,9 +62,9 @@ checktab :: proc(L: ^lua.State, arg: int, what: int) {
 			ok = checkfield(L, "__len", n)
 		}
 		if ok {
-			lua.api_pop(L, n) // pop metatable and tested metamethods
+			kernel.api_pop(L, n) // pop metatable and tested metamethods
 		} else {
-			aux_checktype(L, arg, lua.TTABLE) // force a "table expected" error
+			aux_checktype(L, arg, kernel.TTABLE) // force a "table expected" error
 		}
 	}
 }
@@ -72,7 +72,7 @@ checktab :: proc(L: ^lua.State, arg: int, what: int) {
 // `aux_getn` -- reference macro: assert the argument is a length-capable table
 // and return its border length.
 @(private = "file")
-aux_getn :: proc(L: ^lua.State, n: int, w: int) -> lua.Integer {
+aux_getn :: proc(L: ^kernel.State, n: int, w: int) -> kernel.Integer {
 	checktab(L, n, w | TAB_L)
 	return aux_len(L, n)
 }
@@ -86,11 +86,11 @@ aux_getn :: proc(L: ^lua.State, n: int, w: int) -> lua.Integer {
 table_create :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	sizeseq := lua.Unsigned(aux_checkinteger(L, 1))
-	sizerest := lua.Unsigned(aux_optinteger(L, 2, 0))
-	aux_argcheck(L, sizeseq <= lua.Unsigned(max(i32)), 1, "out of range")
-	aux_argcheck(L, sizerest <= lua.Unsigned(max(i32)), 2, "out of range")
-	lua.api_createtable(L, int(sizeseq), int(sizerest))
+	sizeseq := kernel.Unsigned(aux_checkinteger(L, 1))
+	sizerest := kernel.Unsigned(aux_optinteger(L, 2, 0))
+	aux_argcheck(L, sizeseq <= kernel.Unsigned(max(i32)), 1, "out of range")
+	aux_argcheck(L, sizerest <= kernel.Unsigned(max(i32)), 2, "out of range")
+	kernel.api_createtable(L, int(sizeseq), int(sizerest))
 	return 1
 }
 
@@ -99,23 +99,23 @@ table_insert :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	e := aux_getn(L, 1, TAB_RW)
-	e = lua.Integer(lua.Unsigned(e) + 1) // first empty element (wrapping like luaL_intop)
-	pos: lua.Integer
-	switch lua.api_gettop(L) {
+	e = kernel.Integer(kernel.Unsigned(e) + 1) // first empty element (wrapping like luaL_intop)
+	pos: kernel.Integer
+	switch kernel.api_gettop(L) {
 	case 2: // table.insert(t, v): append
 		pos = e
 	case 3: // table.insert(t, pos, v)
 		pos = aux_checkinteger(L, 2)
 		// pos must be in [1, e]
-		aux_argcheck(L, lua.Unsigned(pos) - 1 < lua.Unsigned(e), 2, "position out of bounds")
+		aux_argcheck(L, kernel.Unsigned(pos) - 1 < kernel.Unsigned(e), 2, "position out of bounds")
 		for i := e; i > pos; i -= 1 {
-			lua.api_geti(L, 1, i - 1)
-			lua.api_seti(L, 1, i) // t[i] = t[i - 1]
+			kernel.api_geti(L, 1, i - 1)
+			kernel.api_seti(L, 1, i) // t[i] = t[i - 1]
 		}
 	case:
 		aux_error(L, "wrong number of arguments to 'insert'")
 	}
-	lua.api_seti(L, 1, pos) // t[pos] = v
+	kernel.api_seti(L, 1, pos) // t[pos] = v
 	return 0
 }
 
@@ -126,15 +126,15 @@ table_remove :: proc "c" (Lp: rawptr) -> i32 {
 	size := aux_getn(L, 1, TAB_RW)
 	pos := aux_optinteger(L, 2, size)
 	if pos != size { // validate an explicit pos: must be in [1, size + 1]
-		aux_argcheck(L, lua.Unsigned(pos) - 1 <= lua.Unsigned(size), 2, "position out of bounds")
+		aux_argcheck(L, kernel.Unsigned(pos) - 1 <= kernel.Unsigned(size), 2, "position out of bounds")
 	}
-	lua.api_geti(L, 1, pos) // result = t[pos]
+	kernel.api_geti(L, 1, pos) // result = t[pos]
 	for ; pos < size; pos += 1 {
-		lua.api_geti(L, 1, pos + 1)
-		lua.api_seti(L, 1, pos) // t[pos] = t[pos + 1]
+		kernel.api_geti(L, 1, pos + 1)
+		kernel.api_seti(L, 1, pos) // t[pos] = t[pos + 1]
 	}
-	lua.api_pushnil(L)
-	lua.api_seti(L, 1, pos) // t[pos] = nil (erase the vacated slot)
+	kernel.api_pushnil(L)
+	kernel.api_seti(L, 1, pos) // t[pos] = nil (erase the vacated slot)
 	return 1
 }
 
@@ -147,35 +147,35 @@ table_move :: proc "c" (Lp: rawptr) -> i32 {
 	f := aux_checkinteger(L, 2)
 	e := aux_checkinteger(L, 3)
 	t := aux_checkinteger(L, 4)
-	tt := !lua.api_isnoneornil(L, 5) ? 5 : 1 // destination table index
+	tt := !kernel.api_isnoneornil(L, 5) ? 5 : 1 // destination table index
 	checktab(L, 1, TAB_R)
 	checktab(L, tt, TAB_W)
 	if e >= f { // otherwise there is nothing to move
-		aux_argcheck(L, f > 0 || e < lua.MAX_INTEGER + f, 3, "too many elements to move")
+		aux_argcheck(L, f > 0 || e < kernel.MAX_INTEGER + f, 3, "too many elements to move")
 		n := e - f + 1 // number of elements to move
-		aux_argcheck(L, t <= lua.MAX_INTEGER - n + 1, 4, "destination wrap around")
-		if t > e || t <= f || (tt != 1 && !lua.api_compare(L, 1, tt, lua.OPEQ)) {
-			for i: lua.Integer = 0; i < n; i += 1 {
-				lua.api_geti(L, 1, f + i)
-				lua.api_seti(L, tt, t + i)
+		aux_argcheck(L, t <= kernel.MAX_INTEGER - n + 1, 4, "destination wrap around")
+		if t > e || t <= f || (tt != 1 && !kernel.api_compare(L, 1, tt, kernel.OPEQ)) {
+			for i: kernel.Integer = 0; i < n; i += 1 {
+				kernel.api_geti(L, 1, f + i)
+				kernel.api_seti(L, tt, t + i)
 			}
 		} else {
 			for i := n - 1; i >= 0; i -= 1 {
-				lua.api_geti(L, 1, f + i)
-				lua.api_seti(L, tt, t + i)
+				kernel.api_geti(L, 1, f + i)
+				kernel.api_seti(L, tt, t + i)
 			}
 		}
 	}
-	lua.api_pushvalue(L, tt) // return the destination table
+	kernel.api_pushvalue(L, tt) // return the destination table
 	return 1
 }
 
 // Append t[i] to the concat buffer, erroring if it is not string-coercible --
 // reference `addfield`.
 @(private = "file")
-addfield :: proc(L: ^lua.State, b: ^Buffer, i: lua.Integer) {
-	lua.api_geti(L, 1, i)
-	if !lua.api_isstring(L, -1) {
+addfield :: proc(L: ^kernel.State, b: ^Buffer, i: kernel.Integer) {
+	kernel.api_geti(L, 1, i)
+	if !kernel.api_isstring(L, -1) {
 		aux_error(
 			L,
 			"invalid value (%s) at index %I in table for 'concat'",
@@ -216,14 +216,14 @@ table_concat :: proc "c" (Lp: rawptr) -> i32 {
 table_pack :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	n := int(lua.api_gettop(L)) // number of elements to pack
-	lua.api_createtable(L, n, 1)
-	lua.api_insert(L, 1) // put the result table at index 1
+	n := int(kernel.api_gettop(L)) // number of elements to pack
+	kernel.api_createtable(L, n, 1)
+	kernel.api_insert(L, 1) // put the result table at index 1
 	for i := n; i >= 1; i -= 1 {
-		lua.api_seti(L, 1, lua.Integer(i))
+		kernel.api_seti(L, 1, kernel.Integer(i))
 	}
-	lua.api_pushinteger(L, lua.Integer(n))
-	lua.api_setfield(L, 1, "n") // t.n = number of elements
+	kernel.api_pushinteger(L, kernel.Integer(n))
+	kernel.api_setfield(L, 1, "n") // t.n = number of elements
 	return 1
 }
 
@@ -234,19 +234,19 @@ table_unpack :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	i := aux_optinteger(L, 2, 1)
-	e := lua.api_isnoneornil(L, 3) ? aux_len(L, 1) : aux_checkinteger(L, 3)
+	e := kernel.api_isnoneornil(L, 3) ? aux_len(L, 1) : aux_checkinteger(L, 3)
 	if i > e {
 		return 0 // empty range
 	}
-	n := lua.Unsigned(e) - lua.Unsigned(i) // number of elements minus 1
-	if n >= lua.Unsigned(max(u32)) || !lua.api_checkstack(L, int(n + 1)) {
+	n := kernel.Unsigned(e) - kernel.Unsigned(i) // number of elements minus 1
+	if n >= kernel.Unsigned(max(u32)) || !kernel.api_checkstack(L, int(n + 1)) {
 		aux_error(L, "too many results to unpack")
 	}
 	n += 1
 	for ; i < e; i += 1 { // push arg[i..e-1] (last pushed separately to avoid overflow)
-		lua.api_geti(L, 1, i)
+		kernel.api_geti(L, 1, i)
 	}
-	lua.api_geti(L, 1, e) // push the last element
+	kernel.api_geti(L, 1, e) // push the last element
 	return i32(n)
 }
 
@@ -264,19 +264,19 @@ IdxT :: u32
 RANLIMIT :: 100
 
 @(private = "file")
-geti_idx :: #force_inline proc(L: ^lua.State, idt: int, idx: IdxT) -> int {
-	return lua.api_geti(L, idt, lua.Integer(idx))
+geti_idx :: #force_inline proc(L: ^kernel.State, idt: int, idx: IdxT) -> int {
+	return kernel.api_geti(L, idt, kernel.Integer(idx))
 }
 
 @(private = "file")
-seti_idx :: #force_inline proc(L: ^lua.State, idt: int, idx: IdxT) {
-	lua.api_seti(L, idt, lua.Integer(idx))
+seti_idx :: #force_inline proc(L: ^kernel.State, idt: int, idx: IdxT) {
+	kernel.api_seti(L, idt, kernel.Integer(idx))
 }
 
 // Store the top two stack values into t[i] and t[j] -- reference `set2`. The
 // values are consumed in the order they sit on the stack (i first, then j).
 @(private = "file")
-set2 :: proc(L: ^lua.State, i: IdxT, j: IdxT) {
+set2 :: proc(L: ^kernel.State, i: IdxT, j: IdxT) {
 	seti_idx(L, 1, i)
 	seti_idx(L, 1, j)
 }
@@ -286,22 +286,22 @@ set2 :: proc(L: ^lua.State, i: IdxT, j: IdxT) {
 // with one we call it. The `a-1`/`b-2` offsets compensate for the extra values
 // pushed onto the stack during the comparator call.
 @(private = "file")
-sort_comp :: proc(L: ^lua.State, a: int, b: int) -> bool {
-	if lua.api_isnil(L, 2) { // no function?
-		return lua.api_compare(L, a, b, lua.OPLT) // a < b
+sort_comp :: proc(L: ^kernel.State, a: int, b: int) -> bool {
+	if kernel.api_isnil(L, 2) { // no function?
+		return kernel.api_compare(L, a, b, kernel.OPLT) // a < b
 	}
-	lua.api_pushvalue(L, 2) // push comparator
-	lua.api_pushvalue(L, a - 1) // -1 to compensate for the function
-	lua.api_pushvalue(L, b - 2) // -2 to compensate for the function and 'a'
-	lua.api_call(L, 2, 1)
-	res := lua.api_toboolean(L, -1)
-	lua.api_pop(L, 1)
+	kernel.api_pushvalue(L, 2) // push comparator
+	kernel.api_pushvalue(L, a - 1) // -1 to compensate for the function
+	kernel.api_pushvalue(L, b - 2) // -2 to compensate for the function and 'a'
+	kernel.api_call(L, 2, 1)
+	res := kernel.api_toboolean(L, -1)
+	kernel.api_pop(L, 1)
 	return res
 }
 
 // Partition around the pivot at the top of the stack -- reference `partition`.
 @(private = "file")
-partition :: proc(L: ^lua.State, lo: IdxT, up: IdxT) -> IdxT {
+partition :: proc(L: ^kernel.State, lo: IdxT, up: IdxT) -> IdxT {
 	i := lo // incremented before first use
 	j := up - 1 // decremented before first use
 	for {
@@ -312,7 +312,7 @@ partition :: proc(L: ^lua.State, lo: IdxT, up: IdxT) -> IdxT {
 			if i == up - 1 { // a[up-1] < P == a[up-1]
 				aux_error(L, "invalid order function for sorting")
 			}
-			lua.api_pop(L, 1) // remove a[i]
+			kernel.api_pop(L, 1) // remove a[i]
 			i += 1
 			geti_idx(L, 1, i)
 		}
@@ -324,13 +324,13 @@ partition :: proc(L: ^lua.State, lo: IdxT, up: IdxT) -> IdxT {
 			if j < i { // j <= i-1 and a[j] > P contradicts the invariant
 				aux_error(L, "invalid order function for sorting")
 			}
-			lua.api_pop(L, 1) // remove a[j]
+			kernel.api_pop(L, 1) // remove a[j]
 			j -= 1
 			geti_idx(L, 1, j)
 		}
 		// after the loop, a[j] <= P and a[j+1 .. up] >= P
 		if j < i { // nothing out of place?
-			lua.api_pop(L, 1) // pop a[j]
+			kernel.api_pop(L, 1) // pop a[j]
 			set2(L, up - 1, i) // swap pivot (a[up-1]) with a[i]
 			return i
 		}
@@ -348,7 +348,7 @@ choosePivot :: proc(lo: IdxT, up: IdxT, rnd: u32) -> IdxT {
 
 // Recursive quicksort with tail-call flattening -- reference `auxsort`.
 @(private = "file")
-auxsort :: proc(L: ^lua.State, lo0: IdxT, up0: IdxT, rnd0: u32) {
+auxsort :: proc(L: ^kernel.State, lo0: IdxT, up0: IdxT, rnd0: u32) {
 	lo := lo0
 	up := up0
 	rnd := rnd0
@@ -359,7 +359,7 @@ auxsort :: proc(L: ^lua.State, lo0: IdxT, up0: IdxT, rnd0: u32) {
 		if sort_comp(L, -1, -2) { // a[up] < a[lo]?
 			set2(L, lo, up)
 		} else {
-			lua.api_pop(L, 2)
+			kernel.api_pop(L, 2)
 		}
 		if up - lo == 1 { // only 2 elements: already sorted
 			return
@@ -375,19 +375,19 @@ auxsort :: proc(L: ^lua.State, lo0: IdxT, up0: IdxT, rnd0: u32) {
 		if sort_comp(L, -2, -1) { // a[p] < a[lo]?
 			set2(L, p, lo)
 		} else {
-			lua.api_pop(L, 1) // remove a[lo]
+			kernel.api_pop(L, 1) // remove a[lo]
 			geti_idx(L, 1, up)
 			if sort_comp(L, -1, -2) { // a[up] < a[p]?
 				set2(L, p, up)
 			} else {
-				lua.api_pop(L, 2)
+				kernel.api_pop(L, 2)
 			}
 		}
 		if up - lo == 2 { // only 3 elements: already sorted
 			return
 		}
 		geti_idx(L, 1, p) // get the middle element (pivot)
-		lua.api_pushvalue(L, -1) // push a copy of the pivot
+		kernel.api_pushvalue(L, -1) // push a copy of the pivot
 		geti_idx(L, 1, up - 1) // push a[up-1]
 		set2(L, p, up - 1) // swap pivot (a[p]) with a[up-1]
 		p = partition(L, lo, up)
@@ -414,11 +414,11 @@ table_sort :: proc "c" (Lp: rawptr) -> i32 {
 	L := state(Lp)
 	n := aux_getn(L, 1, TAB_RW)
 	if n > 1 { // non-trivial interval?
-		aux_argcheck(L, n < lua.Integer(max(i32)), 1, "array too big")
-		if !lua.api_isnoneornil(L, 2) { // a comparator was supplied?
-			aux_checktype(L, 2, lua.TFUNCTION)
+		aux_argcheck(L, n < kernel.Integer(max(i32)), 1, "array too big")
+		if !kernel.api_isnoneornil(L, 2) { // a comparator was supplied?
+			aux_checktype(L, 2, kernel.TFUNCTION)
 		}
-		lua.api_settop(L, 2) // ensure exactly two arguments (t, comp)
+		kernel.api_settop(L, 2) // ensure exactly two arguments (t, comp)
 		auxsort(L, 1, IdxT(n), 0)
 	}
 	return 0

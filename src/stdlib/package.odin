@@ -27,12 +27,12 @@ package stdlib
 
 import "base:runtime"
 import "core:os"
-import lua "luao:lua"
-import stream "luao:stream"
+import kernel "lang:kernel"
+import stream "lang:stream"
 
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
-	return (^lua.State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^kernel.State {
+	return (^kernel.State)(Lp)
 }
 
 // -----------------------------------------------------------------------------
@@ -48,34 +48,50 @@ PATH_MARK :: "?" // substitution mark within a template
 EXEC_DIR :: "!" // executable-directory mark (left literal in the ISO-C fallback)
 @(private = "file")
 IGMARK :: "-" // "ignore all after this" mark in a module name
+
+// "_5_5" -- appended to versioned env-var names. Brand-derived; see brand.odin.
 @(private = "file")
-VERSUFFIX :: "_5_5" // "_" MAJOR "_" MINOR -- appended to versioned env-var names
+VERSUFFIX :: kernel.VERSUFFIX
+
+// The brand-derived pieces of every default template: the lower-case brand used
+// as a directory component ("lua"), the source extension (".lua"), and the
+// MAJOR.MINOR directory ("5.5").
+@(private = "file")
+B :: kernel.BRAND_LOWER
+@(private = "file")
+EXT :: kernel.SOURCE_EXT
+@(private = "file")
+VD :: kernel.VERSION_DIR
 
 when ODIN_OS == .Windows {
 	@(private = "file")
 	DIRSEP :: "\\"
 	@(private = "file")
 	PATH_DEFAULT ::
-		"!\\lua\\?.lua;!\\lua\\?\\init.lua;" +
-		"!\\?.lua;!\\?\\init.lua;" +
-		"!\\..\\share\\lua\\5.5\\?.lua;!\\..\\share\\lua\\5.5\\?\\init.lua;" +
-		".\\?.lua;.\\?\\init.lua"
+		"!\\" + B + "\\?" + EXT + ";!\\" + B + "\\?\\init" + EXT + ";" +
+		"!\\?" + EXT + ";!\\?\\init" + EXT + ";" +
+		"!\\..\\share\\" + B + "\\" + VD + "\\?" + EXT +
+		";!\\..\\share\\" + B + "\\" + VD + "\\?\\init" + EXT + ";" +
+		".\\?" + EXT + ";.\\?\\init" + EXT
 	@(private = "file")
 	CPATH_DEFAULT ::
 		"!\\?.dll;" +
-		"!\\..\\lib\\lua\\5.5\\?.dll;" +
+		"!\\..\\lib\\" + B + "\\" + VD + "\\?.dll;" +
 		"!\\loadall.dll;.\\?.dll"
 } else {
 	@(private = "file")
 	DIRSEP :: "/"
 	@(private = "file")
 	PATH_DEFAULT ::
-		"/usr/local/share/lua/5.5/?.lua;/usr/local/share/lua/5.5/?/init.lua;" +
-		"/usr/local/lib/lua/5.5/?.lua;/usr/local/lib/lua/5.5/?/init.lua;" +
-		"./?.lua;./?/init.lua"
+		"/usr/local/share/" + B + "/" + VD + "/?" + EXT +
+		";/usr/local/share/" + B + "/" + VD + "/?/init" + EXT + ";" +
+		"/usr/local/lib/" + B + "/" + VD + "/?" + EXT +
+		";/usr/local/lib/" + B + "/" + VD + "/?/init" + EXT + ";" +
+		"./?" + EXT + ";./?/init" + EXT
 	@(private = "file")
 	CPATH_DEFAULT ::
-		"/usr/local/lib/lua/5.5/?.so;/usr/local/lib/lua/5.5/loadall.so;./?.so"
+		"/usr/local/lib/" + B + "/" + VD + "/?.so;/usr/local/lib/" + B + "/" + VD +
+		"/loadall.so;./?.so"
 }
 
 // The five-line `package.config` string -- reference:
@@ -93,7 +109,7 @@ CLIBS :: "_CLIBS"
 // The message reference Lua's ISO-C fallback reports when asked to load a native
 // dynamic library -- reference DLMSG.
 @(private = "file")
-DLMSG :: "dynamic libraries not enabled; check your Lua installation"
+DLMSG :: "dynamic libraries not enabled; check your " + kernel.BRAND + " installation"
 
 // Error codes from `lookforfunc` -- reference ERRLIB / ERRFUNC.
 @(private = "file")
@@ -148,8 +164,8 @@ str_index_byte :: proc(s: string, c: u8) -> int {
 // we push the DLMSG error and report ERRLIB. Reference's `checkclib` would find no
 // cached handle (CLIBS is always empty), then `lsys_load` fails identically.
 @(private = "file")
-lookforfunc :: proc(L: ^lua.State, path: string, sym: string) -> int {
-	lua.api_pushstring(L, DLMSG)
+lookforfunc :: proc(L: ^kernel.State, path: string, sym: string) -> int {
+	kernel.api_pushstring(L, DLMSG)
 	return ERRLIB
 }
 
@@ -166,8 +182,8 @@ ll_loadlib :: proc "c" (Lp: rawptr) -> i32 {
 	}
 	// Error: the message is on top. Return (fail, message, where).
 	aux_pushfail(L)
-	lua.api_insert(L, -2)
-	lua.api_pushstring(L, stat == ERRLIB ? LIB_FAIL : "init")
+	kernel.api_insert(L, -2)
+	kernel.api_pushstring(L, stat == ERRLIB ? LIB_FAIL : "init")
 	return 3
 }
 
@@ -193,7 +209,7 @@ readable :: proc(filename: string) -> bool {
 // already-expanded template list `path` -- reference `pusherrornotfound`. Leaves
 // the message on top of the stack.
 @(private = "file")
-pusherrornotfound :: proc(L: ^lua.State, path: string) {
+pusherrornotfound :: proc(L: ^kernel.State, path: string) {
 	b: Buffer
 	aux_buffinit(L, &b)
 	aux_addstring(&b, "no file '")
@@ -209,7 +225,7 @@ pusherrornotfound :: proc(L: ^lua.State, path: string) {
 // failure pushes the "not found" message and returns ok=false.
 @(private = "file")
 searchpath_push :: proc(
-	L: ^lua.State,
+	L: ^kernel.State,
 	name: string,
 	path: string,
 	sep: string,
@@ -230,7 +246,7 @@ searchpath_push :: proc(
 	aux_buffinit(L, &b)
 	aux_addgsub(&b, path, PATH_MARK, name)
 	aux_pushresult(&b)
-	expanded, _ := lua.api_tolstring(L, -1)
+	expanded, _ := kernel.api_tolstring(L, -1)
 	// Walk the ';'-separated candidates and return the first readable one.
 	start := 0
 	for i := 0; i <= len(expanded); i += 1 {
@@ -240,8 +256,8 @@ searchpath_push :: proc(
 				// Push a fresh copy of the found name (above the expanded list) and
 				// return it. The expanded list below is left as harmless residue,
 				// mirroring reference (which leaves its buffer box on the stack).
-				lua.api_pushstring(L, cand)
-				res, _ := lua.api_tolstring(L, -1)
+				kernel.api_pushstring(L, cand)
+				res, _ := kernel.api_tolstring(L, -1)
 				return res, true
 			}
 			start = i + 1
@@ -267,7 +283,7 @@ ll_searchpath :: proc "c" (Lp: rawptr) -> i32 {
 	}
 	// Error message is on top: return (fail, message).
 	aux_pushfail(L)
-	lua.api_insert(L, -2)
+	kernel.api_insert(L, -2)
 	return 2
 }
 
@@ -276,7 +292,7 @@ ll_searchpath :: proc "c" (Lp: rawptr) -> i32 {
 // the stack.
 @(private = "file")
 findfile :: proc(
-	L: ^lua.State,
+	L: ^kernel.State,
 	name: string,
 	pname: string,
 	dirsep: string,
@@ -284,8 +300,8 @@ findfile :: proc(
 	string,
 	bool,
 ) {
-	lua.api_getfield(L, lua.upvalueindex(1), pname)
-	path, isstr := lua.api_tolstring(L, -1)
+	kernel.api_getfield(L, kernel.upvalueindex(1), pname)
+	path, isstr := kernel.api_tolstring(L, -1)
 	if !isstr {
 		aux_error(L, "'package.%s' must be a string", pname)
 	}
@@ -296,13 +312,13 @@ findfile :: proc(
 // `checkload`. On success pushes the filename (the loader's 2nd argument) and
 // returns 2; on failure raises the standard "error loading module" error.
 @(private = "file")
-checkload :: proc(L: ^lua.State, stat: bool, filename: string) -> i32 {
+checkload :: proc(L: ^kernel.State, stat: bool, filename: string) -> i32 {
 	if stat {
-		lua.api_pushstring(L, filename) // 2nd argument to the module loader
+		kernel.api_pushstring(L, filename) // 2nd argument to the module loader
 		return 2
 	}
-	modname, _ := lua.api_tolstring(L, 1)
-	errmsg, _ := lua.api_tolstring(L, -1)
+	modname, _ := kernel.api_tolstring(L, 1)
+	errmsg, _ := kernel.api_tolstring(L, -1)
 	aux_error(L, "error loading module '%s' from file '%s':\n\t%s", modname, filename, errmsg)
 }
 
@@ -330,19 +346,19 @@ searcher_Lua :: proc "c" (Lp: rawptr) -> i32 {
 // handling; in our dlopen-less build every attempt bottoms out in `lookforfunc`
 // returning ERRLIB, so the ignore-mark branch returns immediately.
 @(private = "file")
-loadfunc :: proc(L: ^lua.State, filename: string, modname: string) -> int {
+loadfunc :: proc(L: ^kernel.State, filename: string, modname: string) -> int {
 	modname := aux_gsub(L, modname, ".", "_")
 	mark := str_index_byte(modname, IGMARK[0])
 	if mark >= 0 {
-		prefix := lua.api_pushlstring(L, transmute([]u8)modname[:mark])
-		openfunc := lua.api_pushfstring(L, "open_%s", prefix)
+		prefix := kernel.api_pushlstring(L, transmute([]u8)modname[:mark])
+		openfunc := kernel.api_pushfstring(L, kernel.NATIVE_OPEN_FMT, prefix)
 		stat := lookforfunc(L, filename, openfunc)
 		if stat != ERRFUNC {
 			return stat
 		}
 		modname = modname[mark + 1:] // else try the old-style name
 	}
-	openfunc := lua.api_pushfstring(L, "open_%s", modname)
+	openfunc := kernel.api_pushfstring(L, kernel.NATIVE_OPEN_FMT, modname)
 	return lookforfunc(L, filename, openfunc)
 }
 
@@ -372,7 +388,7 @@ searcher_Croot :: proc "c" (Lp: rawptr) -> i32 {
 	if p < 0 {
 		return 0 // `name` is a root -- nothing for this searcher to do
 	}
-	rootname := lua.api_pushlstring(L, transmute([]u8)name[:p])
+	rootname := kernel.api_pushlstring(L, transmute([]u8)name[:p])
 	filename, ok := findfile(L, rootname, "cpath", DIRSEP)
 	if !ok {
 		return 1 // root not found
@@ -383,10 +399,10 @@ searcher_Croot :: proc "c" (Lp: rawptr) -> i32 {
 			return checkload(L, false, filename) // real error
 		}
 		// open function not found: not fatal, just report it as a searcher message
-		lua.api_pushfstring(L, "no module '%s' in file '%s'", name, filename)
+		kernel.api_pushfstring(L, "no module '%s' in file '%s'", name, filename)
 		return 1
 	}
-	lua.api_pushstring(L, filename)
+	kernel.api_pushstring(L, filename)
 	return 2
 }
 
@@ -397,12 +413,12 @@ searcher_preload :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	name := aux_checkstring(L, 1)
-	lua.api_getfield(L, lua.REGISTRYINDEX, PRELOAD_TABLE)
-	if lua.api_getfield(L, -1, name) == lua.TNIL {
-		lua.api_pushfstring(L, "no field package.preload['%s']", name)
+	kernel.api_getfield(L, kernel.REGISTRYINDEX, PRELOAD_TABLE)
+	if kernel.api_getfield(L, -1, name) == kernel.TNIL {
+		kernel.api_pushfstring(L, "no field package.preload['%s']", name)
 		return 1
 	}
-	lua.api_pushstring(L, ":preload:")
+	kernel.api_pushstring(L, ":preload:")
 	return 2
 }
 
@@ -416,31 +432,31 @@ searcher_preload :: proc "c" (Lp: rawptr) -> i32 {
 // accumulated message. `package.searchers` is left at absolute stack index 3, and
 // searchers are read with `rawgeti` (holes terminate; `__index` is ignored).
 @(private = "file")
-findloader :: proc(L: ^lua.State, name: string) {
-	if lua.api_getfield(L, lua.upvalueindex(1), "searchers") != lua.TTABLE {
+findloader :: proc(L: ^kernel.State, name: string) {
+	if kernel.api_getfield(L, kernel.upvalueindex(1), "searchers") != kernel.TTABLE {
 		aux_error(L, "'package.searchers' must be a table")
 	}
 	msg: Buffer
 	aux_buffinit(L, &msg)
 	aux_addstring(&msg, "\n\t") // prefix for the first accumulated message
 	for i := 1;; i += 1 {
-		if lua.api_rawgeti(L, 3, lua.Integer(i)) == lua.TNIL {
-			lua.api_pop(L, 1) // remove the nil
+		if kernel.api_rawgeti(L, 3, kernel.Integer(i)) == kernel.TNIL {
+			kernel.api_pop(L, 1) // remove the nil
 			aux_buffsub(&msg, 2) // drop the last "\n\t"
 			aux_pushresult(&msg)
-			errmsg, _ := lua.api_tolstring(L, -1)
+			errmsg, _ := kernel.api_tolstring(L, -1)
 			aux_error(L, "module '%s' not found:%s", name, errmsg)
 		}
-		lua.api_pushstring(L, name)
-		lua.api_call(L, 1, 2) // call the searcher with the module name
-		if lua.api_isfunction(L, -2) {
+		kernel.api_pushstring(L, name)
+		kernel.api_call(L, 1, 2) // call the searcher with the module name
+		if kernel.api_isfunction(L, -2) {
 			return // found a loader
-		} else if lua.api_isstring(L, -2) {
-			lua.api_pop(L, 1) // remove the extra return (loader data slot)
+		} else if kernel.api_isstring(L, -2) {
+			kernel.api_pop(L, 1) // remove the extra return (loader data slot)
 			aux_addvalue(&msg) // concatenate the searcher's error message
 			aux_addstring(&msg, "\n\t")
 		} else {
-			lua.api_pop(L, 2) // no message: discard both returns
+			kernel.api_pop(L, 2) // no message: discard both returns
 		}
 	}
 }
@@ -453,29 +469,29 @@ ll_require :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	name := aux_checkstring(L, 1)
-	lua.api_settop(L, 1) // LOADED table will be at index 2
-	lua.api_getfield(L, lua.REGISTRYINDEX, LOADED_TABLE)
-	lua.api_getfield(L, 2, name) // LOADED[name]
-	if lua.api_toboolean(L, -1) {
+	kernel.api_settop(L, 1) // LOADED table will be at index 2
+	kernel.api_getfield(L, kernel.REGISTRYINDEX, LOADED_TABLE)
+	kernel.api_getfield(L, 2, name) // LOADED[name]
+	if kernel.api_toboolean(L, -1) {
 		return 1 // already loaded (truthiness: a cached `false` reloads)
 	}
-	lua.api_pop(L, 1) // remove the getfield result
+	kernel.api_pop(L, 1) // remove the getfield result
 	findloader(L, name)
-	lua.api_rotate(L, -2, 1) // function <-> loader data
-	lua.api_pushvalue(L, 1) // name is the loader's 1st argument
-	lua.api_pushvalue(L, -3) // loader data is the 2nd argument
-	lua.api_call(L, 2, 1) // run the loader to load the module
-	if !lua.api_isnil(L, -1) {
-		lua.api_setfield(L, 2, name) // LOADED[name] = returned value
+	kernel.api_rotate(L, -2, 1) // function <-> loader data
+	kernel.api_pushvalue(L, 1) // name is the loader's 1st argument
+	kernel.api_pushvalue(L, -3) // loader data is the 2nd argument
+	kernel.api_call(L, 2, 1) // run the loader to load the module
+	if !kernel.api_isnil(L, -1) {
+		kernel.api_setfield(L, 2, name) // LOADED[name] = returned value
 	} else {
-		lua.api_pop(L, 1) // pop the nil
+		kernel.api_pop(L, 1) // pop the nil
 	}
-	if lua.api_getfield(L, 2, name) == lua.TNIL { // module set no value?
-		lua.api_pushboolean(L, true) // use `true` as the result
-		lua.api_copy(L, -1, -2) // replace the loader result
-		lua.api_setfield(L, 2, name) // LOADED[name] = true
+	if kernel.api_getfield(L, 2, name) == kernel.TNIL { // module set no value?
+		kernel.api_pushboolean(L, true) // use `true` as the result
+		kernel.api_copy(L, -1, -2) // replace the loader result
+		kernel.api_setfield(L, 2, name) // LOADED[name] = true
 	}
-	lua.api_rotate(L, -2, 1) // loader data <-> module result
+	kernel.api_rotate(L, -2, 1) // loader data <-> module result
 	return 2 // module result and loader data
 }
 
@@ -485,10 +501,10 @@ ll_require :: proc "c" (Lp: rawptr) -> i32 {
 
 // registry.LUA_NOENV as a boolean -- reference `noenv`.
 @(private = "file")
-noenv :: proc(L: ^lua.State) -> bool {
-	lua.api_getfield(L, lua.REGISTRYINDEX, "NOENV")
-	b := lua.api_toboolean(L, -1)
-	lua.api_pop(L, 1)
+noenv :: proc(L: ^kernel.State) -> bool {
+	kernel.api_getfield(L, kernel.REGISTRYINDEX, kernel.ENV_NOENV)
+	b := kernel.api_toboolean(L, -1)
+	kernel.api_pop(L, 1)
 	return b
 }
 
@@ -503,14 +519,14 @@ getenv_str :: proc(name: string) -> (string, bool) {
 // name), honoring LUA_NOENV and the ";;" default-insertion rule -- reference
 // `setpath`. Assumes the package table is on top of the stack.
 @(private = "file")
-setpath :: proc(L: ^lua.State, fieldname: string, envname: string, dft: string) {
-	nver := lua.api_pushfstring(L, "%s%s", envname, VERSUFFIX) // e.g. "LUA_PATH_5_5"
+setpath :: proc(L: ^kernel.State, fieldname: string, envname: string, dft: string) {
+	nver := kernel.api_pushfstring(L, "%s%s", envname, VERSUFFIX) // e.g. "LUA_PATH_5_5"
 	path, have := getenv_str(nver)
 	if !have {
 		path, have = getenv_str(envname) // fall back to the unversioned name
 	}
 	if !have || noenv(L) {
-		lua.api_pushstring(L, dft) // no environment override: use the default
+		kernel.api_pushstring(L, dft) // no environment override: use the default
 	} else {
 		mark := -1
 		// find the first ";;" (a request to splice the default path in here)
@@ -521,7 +537,7 @@ setpath :: proc(L: ^lua.State, fieldname: string, envname: string, dft: string) 
 			}
 		}
 		if mark < 0 {
-			lua.api_pushstring(L, path) // nothing to change
+			kernel.api_pushstring(L, path) // nothing to change
 		} else {
 			prefix := path[:mark] // text before ";;"
 			suffix := path[mark + 2:] // text after ";;"
@@ -539,8 +555,8 @@ setpath :: proc(L: ^lua.State, fieldname: string, envname: string, dft: string) 
 			aux_pushresult(&b)
 		}
 	}
-	lua.api_setfield(L, -3, fieldname) // package[fieldname] = value
-	lua.api_pop(L, 1) // pop the versioned variable name (nver)
+	kernel.api_setfield(L, -3, fieldname) // package[fieldname] = value
+	kernel.api_pop(L, 1) // pop the versioned variable name (nver)
 }
 
 // -----------------------------------------------------------------------------
@@ -568,15 +584,15 @@ ll_funcs := []Reg{{"require", ll_require}}
 // C closure carrying the `package` table as upvalue 1. Assumes the package table is
 // at stack top.
 @(private = "file")
-createsearcherstable :: proc(L: ^lua.State) {
-	searchers := []lua.C_Function{searcher_preload, searcher_Lua, searcher_C, searcher_Croot}
-	lua.api_createtable(L, len(searchers), 0)
+createsearcherstable :: proc(L: ^kernel.State) {
+	searchers := []kernel.C_Function{searcher_preload, searcher_Lua, searcher_C, searcher_Croot}
+	kernel.api_createtable(L, len(searchers), 0)
 	for i in 0 ..< len(searchers) {
-		lua.api_pushvalue(L, -2) // package as the shared upvalue
-		lua.api_pushcclosure(L, searchers[i], 1)
-		lua.api_rawseti(L, -2, lua.Integer(i + 1))
+		kernel.api_pushvalue(L, -2) // package as the shared upvalue
+		kernel.api_pushcclosure(L, searchers[i], 1)
+		kernel.api_rawseti(L, -2, kernel.Integer(i + 1))
 	}
-	lua.api_setfield(L, -2, "searchers")
+	kernel.api_setfield(L, -2, "searchers")
 }
 
 // luaopen_package -- reference `luaopen_package`. Builds the `package` table, its
@@ -585,21 +601,21 @@ createsearcherstable :: proc(L: ^lua.State) {
 open_package :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	aux_getsubtable(L, lua.REGISTRYINDEX, CLIBS) // create CLIBS table
-	lua.api_pop(L, 1) // (unused in this build, but created for structural parity)
+	aux_getsubtable(L, kernel.REGISTRYINDEX, CLIBS) // create CLIBS table
+	kernel.api_pop(L, 1) // (unused in this build, but created for structural parity)
 	aux_newlib(L, pk_funcs) // the `package` table
 	createsearcherstable(L)
-	setpath(L, "path", "PATH", PATH_DEFAULT)
-	setpath(L, "cpath", "CPATH", CPATH_DEFAULT)
-	lua.api_pushstring(L, CONFIG) // store config information
-	lua.api_setfield(L, -2, "config")
-	aux_getsubtable(L, lua.REGISTRYINDEX, LOADED_TABLE) // package.loaded
-	lua.api_setfield(L, -2, "loaded")
-	aux_getsubtable(L, lua.REGISTRYINDEX, PRELOAD_TABLE) // package.preload
-	lua.api_setfield(L, -2, "preload")
-	lua.api_pushglobaltable(L)
-	lua.api_pushvalue(L, -2) // set `package` as the upvalue for `require`
+	setpath(L, "path", kernel.ENV_PATH, PATH_DEFAULT)
+	setpath(L, "cpath", kernel.ENV_CPATH, CPATH_DEFAULT)
+	kernel.api_pushstring(L, CONFIG) // store config information
+	kernel.api_setfield(L, -2, "config")
+	aux_getsubtable(L, kernel.REGISTRYINDEX, LOADED_TABLE) // package.loaded
+	kernel.api_setfield(L, -2, "loaded")
+	aux_getsubtable(L, kernel.REGISTRYINDEX, PRELOAD_TABLE) // package.preload
+	kernel.api_setfield(L, -2, "preload")
+	kernel.api_pushglobaltable(L)
+	kernel.api_pushvalue(L, -2) // set `package` as the upvalue for `require`
 	aux_setfuncs(L, ll_funcs, 1) // open `require` into the global table
-	lua.api_pop(L, 1) // pop the global table
+	kernel.api_pop(L, 1) // pop the global table
 	return 1 // return the `package` table
 }

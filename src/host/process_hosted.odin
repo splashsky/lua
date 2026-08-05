@@ -3,7 +3,7 @@
 package host
 
 import "core:os"
-import stream "luao:stream"
+import stream "lang:stream"
 
 process_exit :: proc(status: int) -> ! {
 	restore_terminal()

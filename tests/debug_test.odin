@@ -13,7 +13,7 @@ package tests
 
 import "core:testing"
 import "base:runtime"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // ---------------------------------------------------------------------------
 // Line hook: shared capture buffer (C hooks cannot close over locals).
@@ -31,8 +31,8 @@ dbg_reset :: proc() {
 // that luaD_hook filled into the activation record it hands us.
 dbg_line_hook :: proc "c" (Lp: rawptr, arp: rawptr) {
 	context = runtime.default_context()
-	ar := (^lua.Debug_Info)(arp)
-	if ar.event == lua.HOOKLINE && dbg_line_count < len(dbg_lines) {
+	ar := (^kernel.Debug_Info)(arp)
+	if ar.event == kernel.HOOKLINE && dbg_line_count < len(dbg_lines) {
 		dbg_lines[dbg_line_count] = ar.currentline
 		dbg_line_count += 1
 	}
@@ -41,18 +41,18 @@ dbg_line_hook :: proc "c" (Lp: rawptr, arp: rawptr) {
 @(test)
 test_debug_line_hook_fires :: proc(t: ^testing.T) {
 	L := api_new()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	dbg_reset()
 	rd: Src_Reader
 
 	// Three statements on three distinct lines. A faithful line hook must fire on
 	// each new source line as execution reaches it.
 	src := "a = 1\nb = 2\nc = a + b\n"
-	testing.expect_value(t, api_load(L, src, &rd), lua.Thread_Status.Ok)
+	testing.expect_value(t, api_load(L, src, &rd), kernel.Thread_Status.Ok)
 
-	lua.api_sethook(L, dbg_line_hook, lua.MASKLINE, 0)
-	testing.expect_value(t, lua.api_pcall(L, 0, 0, 0), lua.Thread_Status.Ok)
-	lua.api_sethook(L, nil, 0, 0) // uninstall
+	kernel.api_sethook(L, dbg_line_hook, kernel.MASKLINE, 0)
+	testing.expect_value(t, kernel.api_pcall(L, 0, 0, 0), kernel.Thread_Status.Ok)
+	kernel.api_sethook(L, nil, 0, 0) // uninstall
 
 	// We should have seen at least the three assignment lines.
 	testing.expect(t, dbg_line_count >= 3)
@@ -76,11 +76,11 @@ test_debug_line_hook_fires :: proc(t: ^testing.T) {
 
 	// The observable hook state round-trips through the getters.
 	dbg_reset()
-	lua.api_sethook(L, dbg_line_hook, lua.MASKLINE, 0)
-	testing.expect(t, lua.api_gethook(L) != nil)
-	testing.expect_value(t, lua.api_gethookmask(L), lua.MASKLINE)
-	lua.api_sethook(L, nil, 0, 0)
-	testing.expect(t, lua.api_gethook(L) == nil)
+	kernel.api_sethook(L, dbg_line_hook, kernel.MASKLINE, 0)
+	testing.expect(t, kernel.api_gethook(L) != nil)
+	testing.expect_value(t, kernel.api_gethookmask(L), kernel.MASKLINE)
+	kernel.api_sethook(L, nil, 0, 0)
+	testing.expect(t, kernel.api_gethook(L) == nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -91,8 +91,8 @@ dbg_count_hits: int
 
 dbg_count_hook :: proc "c" (Lp: rawptr, arp: rawptr) {
 	context = runtime.default_context()
-	ar := (^lua.Debug_Info)(arp)
-	if ar.event == lua.HOOKCOUNT {
+	ar := (^kernel.Debug_Info)(arp)
+	if ar.event == kernel.HOOKCOUNT {
 		dbg_count_hits += 1
 	}
 }
@@ -100,22 +100,22 @@ dbg_count_hook :: proc "c" (Lp: rawptr, arp: rawptr) {
 @(test)
 test_debug_count_hook_fires :: proc(t: ^testing.T) {
 	L := api_new()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	dbg_count_hits = 0
 	rd: Src_Reader
 
 	// A loop that executes many instructions, so a per-instruction count hook is
 	// guaranteed to trip repeatedly.
 	src := "local s = 0\nfor i = 1, 50 do s = s + i end\nreturn s"
-	testing.expect_value(t, api_load(L, src, &rd), lua.Thread_Status.Ok)
+	testing.expect_value(t, api_load(L, src, &rd), kernel.Thread_Status.Ok)
 
-	lua.api_sethook(L, dbg_count_hook, lua.MASKCOUNT, 1)
-	testing.expect_value(t, lua.api_pcall(L, 0, 1, 0), lua.Thread_Status.Ok)
-	lua.api_sethook(L, nil, 0, 0)
+	kernel.api_sethook(L, dbg_count_hook, kernel.MASKCOUNT, 1)
+	testing.expect_value(t, kernel.api_pcall(L, 0, 1, 0), kernel.Thread_Status.Ok)
+	kernel.api_sethook(L, nil, 0, 0)
 
 	testing.expect(t, dbg_count_hits > 0)
 	// The chunk still produced the right answer: 1+2+...+50 == 1275.
-	testing.expect_value(t, lua.api_tointeger(L, -1), 1275)
+	testing.expect_value(t, kernel.api_tointeger(L, -1), 1275)
 }
 
 // ---------------------------------------------------------------------------
@@ -125,15 +125,15 @@ test_debug_count_hook_fires :: proc(t: ^testing.T) {
 @(test)
 test_debug_getinfo_function :: proc(t: ^testing.T) {
 	L := api_new()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	rd: Src_Reader
 
 	// Load a chunk (leaves the main function on the stack) and interrogate it.
-	testing.expect_value(t, api_load(L, "return 1", &rd), lua.Thread_Status.Ok)
+	testing.expect_value(t, api_load(L, "return 1", &rd), kernel.Thread_Status.Ok)
 
-	ar: lua.Debug_Info
+	ar: kernel.Debug_Info
 	// ">" consumes the function on top of the stack, then fills the record.
-	ok := lua.api_getinfo(L, ">Slu", &ar)
+	ok := kernel.api_getinfo(L, ">Slu", &ar)
 	testing.expect(t, ok)
 	testing.expect_value(t, ar.what, "main") // the main chunk of a loaded file
 	testing.expect_value(t, ar.linedefined, 0) // main chunks define at line 0
@@ -158,10 +158,10 @@ dbg_stack_hook :: proc "c" (Lp: rawptr, arp: rawptr) {
 	if dbg_stack_ok {
 		return // only sample once
 	}
-	L := (^lua.State)(Lp)
-	frame: lua.Debug_Info
-	if lua.api_getstack(L, 0, &frame) {
-		if lua.api_getinfo(L, "Sl", &frame) {
+	L := (^kernel.State)(Lp)
+	frame: kernel.Debug_Info
+	if kernel.api_getstack(L, 0, &frame) {
+		if kernel.api_getinfo(L, "Sl", &frame) {
 			dbg_stack_currentline = frame.currentline
 			dbg_stack_what = frame.what
 			dbg_stack_ok = true
@@ -172,16 +172,16 @@ dbg_stack_hook :: proc "c" (Lp: rawptr, arp: rawptr) {
 @(test)
 test_debug_getstack_currentline :: proc(t: ^testing.T) {
 	L := api_new()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	dbg_stack_ok = false
 	dbg_stack_currentline = 0
 	dbg_stack_what = ""
 	rd: Src_Reader
 
-	testing.expect_value(t, api_load(L, "local x = 10\nreturn x", &rd), lua.Thread_Status.Ok)
-	lua.api_sethook(L, dbg_stack_hook, lua.MASKLINE, 0)
-	testing.expect_value(t, lua.api_pcall(L, 0, 1, 0), lua.Thread_Status.Ok)
-	lua.api_sethook(L, nil, 0, 0)
+	testing.expect_value(t, api_load(L, "local x = 10\nreturn x", &rd), kernel.Thread_Status.Ok)
+	kernel.api_sethook(L, dbg_stack_hook, kernel.MASKLINE, 0)
+	testing.expect_value(t, kernel.api_pcall(L, 0, 1, 0), kernel.Thread_Status.Ok)
+	kernel.api_sethook(L, nil, 0, 0)
 
 	testing.expect(t, dbg_stack_ok)
 	testing.expect_value(t, dbg_stack_what, "main")

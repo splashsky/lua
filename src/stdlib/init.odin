@@ -7,7 +7,7 @@ package stdlib
 // freestanding machine has no files, environment, process, or terminal, so its
 // list contains only the kernel-backed, pure libraries.
 
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // The standard libraries, in the exact ORDER reference Lua's `linit.c` lists them
 // (matching the LUA_<lib>K constants). `require`-ing them in this order means the
@@ -46,9 +46,9 @@ when ODIN_OS == .Freestanding {
 // is `luaL_openselectedlibs(L, ~0, 0)`: require them all, preload none). The
 // registry's loaded-module table is part of auxlib and does not require the
 // package library itself, so this same mechanism works on bare metal.
-aux_openlibs :: proc(L: ^lua.State) {
+aux_openlibs :: proc(L: ^kernel.State) {
 	for lib in stdlibs {
 		aux_requiref(L, lib.name, lib.func, true) // require + set as global
-		lua.api_pop(L, 1) // remove the library table left on the stack
+		kernel.api_pop(L, 1) // remove the library table left on the stack
 	}
 }

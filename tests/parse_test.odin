@@ -17,7 +17,7 @@ package tests
 // lex_test.odin (same `tests` package).
 
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // ---------------------------------------------------------------------------
 // Fixture: stand up a state, stream a chunk, and drive the parser under the
@@ -25,12 +25,12 @@ import lua "luao:lua"
 // ---------------------------------------------------------------------------
 
 Parse_Fixture :: struct {
-	L:    ^lua.State,
-	z:    lua.Zio,
-	buff: lua.Mbuffer,
-	dyd:  lua.Dyndata,
+	L:    ^kernel.State,
+	z:    kernel.Zio,
+	buff: kernel.Mbuffer,
+	dyd:  kernel.Dyndata,
 	rd:   Src_Reader,
-	cl:   ^lua.LClosure, // the compiled main closure (nil on error)
+	cl:   ^kernel.LClosure, // the compiled main closure (nil on error)
 }
 
 // The protected job: compile the whole chunk. `luaY_parser` may longjmp on a
@@ -41,24 +41,24 @@ Parse_Job :: struct {
 	first: int,
 }
 
-parse_job_run :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
+parse_job_run :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
 	job := (^Parse_Job)(ud)
 	fx := job.fx
-	fx.cl = lua.parse_parser(L, &fx.z, &fx.buff, &fx.dyd, job.name, job.first)
+	fx.cl = kernel.parse_parser(L, &fx.z, &fx.buff, &fx.dyd, job.name, job.first)
 	return .Ok
 }
 
 // Bring up a fresh fixture pointed at `source`.
 setup_parser :: proc(fx: ^Parse_Fixture, source: string) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	fx.L = L
-	lua.mbuffer_init(&fx.buff)
+	kernel.mbuffer_init(&fx.buff)
 	fx.rd = Src_Reader {
 		data = ([^]u8)(raw_data(source)),
 		len  = uint(len(source)),
 		done = false,
 	}
-	lua.zio_init(L, &fx.z, src_read, &fx.rd)
+	kernel.zio_init(L, &fx.z, src_read, &fx.rd)
 	fx.dyd = {}
 	fx.cl = nil
 }
@@ -66,15 +66,15 @@ setup_parser :: proc(fx: ^Parse_Fixture, source: string) {
 // Compile `source`, returning the protected status. On success `fx.cl` holds the
 // main closure (which stays anchored on the Lua stack for the duration of the
 // fixture, so its Proto is safe to inspect).
-compile :: proc(fx: ^Parse_Fixture, source: string) -> lua.Thread_Status {
+compile :: proc(fx: ^Parse_Fixture, source: string) -> kernel.Thread_Status {
 	setup_parser(fx, source)
-	first := lua.zio_getc(&fx.z)
+	first := kernel.zio_getc(&fx.z)
 	job := Parse_Job {
 		fx    = fx,
 		name  = "=t",
 		first = first,
 	}
-	return lua.run_protected(fx.L, parse_job_run, &job)
+	return kernel.run_protected(fx.L, parse_job_run, &job)
 }
 
 // Free everything the fixture owns. The parser allocates the `Dyndata` scratch
@@ -84,16 +84,16 @@ compile :: proc(fx: ^Parse_Fixture, source: string) -> lua.Thread_Status {
 teardown_parser :: proc(fx: ^Parse_Fixture) {
 	d := &fx.dyd
 	if d.actvar.arr != nil {
-		lua.state_free(fx.L, d.actvar.arr, uint(d.actvar.size) * size_of(lua.Vardesc))
+		kernel.state_free(fx.L, d.actvar.arr, uint(d.actvar.size) * size_of(kernel.Vardesc))
 	}
 	if d.gt.arr != nil {
-		lua.state_free(fx.L, d.gt.arr, uint(d.gt.size) * size_of(lua.Labeldesc))
+		kernel.state_free(fx.L, d.gt.arr, uint(d.gt.size) * size_of(kernel.Labeldesc))
 	}
 	if d.label.arr != nil {
-		lua.state_free(fx.L, d.label.arr, uint(d.label.size) * size_of(lua.Labeldesc))
+		kernel.state_free(fx.L, d.label.arr, uint(d.label.size) * size_of(kernel.Labeldesc))
 	}
-	lua.mbuffer_free(fx.L, &fx.buff)
-	lua.close_state(fx.L)
+	kernel.mbuffer_free(fx.L, &fx.buff)
+	kernel.close_state(fx.L)
 }
 
 // ---------------------------------------------------------------------------
@@ -101,14 +101,14 @@ teardown_parser :: proc(fx: ^Parse_Fixture) {
 // ---------------------------------------------------------------------------
 
 // The main chunk's prototype.
-main_proto :: proc(fx: ^Parse_Fixture) -> ^lua.Proto {
+main_proto :: proc(fx: ^Parse_Fixture) -> ^kernel.Proto {
 	return fx.cl.p
 }
 
 // Does `f` contain at least one instruction with opcode `op`?
-has_op :: proc(f: ^lua.Proto, op: lua.Op_Code) -> bool {
+has_op :: proc(f: ^kernel.Proto, op: kernel.Op_Code) -> bool {
 	for i in 0 ..< f.sizecode {
-		if lua.get_opcode(f.code[i]) == op {
+		if kernel.get_opcode(f.code[i]) == op {
 			return true
 		}
 	}
@@ -116,22 +116,22 @@ has_op :: proc(f: ^lua.Proto, op: lua.Op_Code) -> bool {
 }
 
 // The signed immediate of the first LOADI, and whether one was found.
-first_loadi :: proc(f: ^lua.Proto) -> (val: int, found: bool) {
+first_loadi :: proc(f: ^kernel.Proto) -> (val: int, found: bool) {
 	for i in 0 ..< f.sizecode {
-		if lua.get_opcode(f.code[i]) == .LOADI {
-			return lua.getarg_sBx(f.code[i]), true
+		if kernel.get_opcode(f.code[i]) == .LOADI {
+			return kernel.getarg_sBx(f.code[i]), true
 		}
 	}
 	return 0, false
 }
 
 // Does the constant table hold the string `s`?
-k_has_string :: proc(f: ^lua.Proto, s: string) -> bool {
+k_has_string :: proc(f: ^kernel.Proto, s: string) -> bool {
 	for i in 0 ..< f.sizek {
 		v := &f.k[i]
-		if lua.base_type(v) == lua.TSTRING {
-			ts := lua.str_value(v)
-			if string(lua.str_bytes(ts)[:ts.len]) == s {
+		if kernel.base_type(v) == kernel.TSTRING {
+			ts := kernel.str_value(v)
+			if string(kernel.str_bytes(ts)[:ts.len]) == s {
 				return true
 			}
 		}
@@ -141,14 +141,14 @@ k_has_string :: proc(f: ^lua.Proto, s: string) -> bool {
 
 // Whether prototype `f` is a vararg function (uses hidden vararg slots or a
 // vararg table). Mirrors the language-level `isvararg` predicate.
-proto_is_vararg :: proc(f: ^lua.Proto) -> bool {
-	return (f.flag & u8(lua.PF_VAHID | lua.PF_VATAB)) != 0
+proto_is_vararg :: proc(f: ^kernel.Proto) -> bool {
+	return (f.flag & u8(kernel.PF_VAHID | kernel.PF_VATAB)) != 0
 }
 
 // The interned bytes of an upvalue's name.
-upval_name :: proc(f: ^lua.Proto, idx: int) -> string {
+upval_name :: proc(f: ^kernel.Proto, idx: int) -> string {
 	ts := f.upvalues[idx].name
-	return string(lua.str_bytes(ts)[:ts.len])
+	return string(kernel.str_bytes(ts)[:ts.len])
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ upval_name :: proc(f: ^lua.Proto, idx: int) -> string {
 @(test)
 parse_empty_chunk_is_vararg_main :: proc(t: ^testing.T) {
 	fx: Parse_Fixture
-	testing.expect_value(t, compile(&fx, ""), lua.Thread_Status.Ok)
+	testing.expect_value(t, compile(&fx, ""), kernel.Thread_Status.Ok)
 	defer teardown_parser(&fx)
 
 	f := main_proto(&fx)
@@ -171,8 +171,8 @@ parse_empty_chunk_is_vararg_main :: proc(t: ^testing.T) {
 	testing.expect_value(t, upval_name(f, 0), "_ENV")
 
 	testing.expect(t, f.sizecode >= 2, "expected at least VARARGPREP + return")
-	testing.expect_value(t, lua.get_opcode(f.code[0]), lua.Op_Code.VARARGPREP)
-	last := lua.get_opcode(f.code[f.sizecode - 1])
+	testing.expect_value(t, kernel.get_opcode(f.code[0]), kernel.Op_Code.VARARGPREP)
+	last := kernel.get_opcode(f.code[f.sizecode - 1])
 	is_ret := last == .RETURN0 || last == .RETURN1 || last == .RETURN
 	testing.expect(t, is_ret, "main chunk must end in a return")
 }
@@ -186,7 +186,7 @@ parse_empty_chunk_is_vararg_main :: proc(t: ^testing.T) {
 @(test)
 parse_folds_constant_arithmetic :: proc(t: ^testing.T) {
 	fx: Parse_Fixture
-	testing.expect_value(t, compile(&fx, "local a = 1 + 2"), lua.Thread_Status.Ok)
+	testing.expect_value(t, compile(&fx, "local a = 1 + 2"), kernel.Thread_Status.Ok)
 	defer teardown_parser(&fx)
 
 	f := main_proto(&fx)
@@ -199,7 +199,7 @@ parse_folds_constant_arithmetic :: proc(t: ^testing.T) {
 @(test)
 parse_string_literal_becomes_constant :: proc(t: ^testing.T) {
 	fx: Parse_Fixture
-	testing.expect_value(t, compile(&fx, "local s = \"hello\""), lua.Thread_Status.Ok)
+	testing.expect_value(t, compile(&fx, "local s = \"hello\""), kernel.Thread_Status.Ok)
 	defer teardown_parser(&fx)
 
 	testing.expect(t, k_has_string(main_proto(&fx), "hello"), "constant 'hello' expected")
@@ -214,7 +214,7 @@ parse_string_literal_becomes_constant :: proc(t: ^testing.T) {
 @(test)
 parse_global_assignment_uses_env :: proc(t: ^testing.T) {
 	fx: Parse_Fixture
-	testing.expect_value(t, compile(&fx, "x = 1"), lua.Thread_Status.Ok)
+	testing.expect_value(t, compile(&fx, "x = 1"), kernel.Thread_Status.Ok)
 	defer teardown_parser(&fx)
 
 	f := main_proto(&fx)
@@ -227,7 +227,7 @@ parse_global_assignment_uses_env :: proc(t: ^testing.T) {
 @(test)
 parse_call_statement_shape :: proc(t: ^testing.T) {
 	fx: Parse_Fixture
-	testing.expect_value(t, compile(&fx, "print(\"hi\")"), lua.Thread_Status.Ok)
+	testing.expect_value(t, compile(&fx, "print(\"hi\")"), kernel.Thread_Status.Ok)
 	defer teardown_parser(&fx)
 
 	f := main_proto(&fx)
@@ -249,7 +249,7 @@ parse_nested_function_params :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		compile(&fx, "local function f(a, b) return a + b end"),
-		lua.Thread_Status.Ok,
+		kernel.Thread_Status.Ok,
 	)
 	defer teardown_parser(&fx)
 
@@ -270,14 +270,14 @@ parse_nested_vararg_function :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		compile(&fx, "local f = function(...) return ... end"),
-		lua.Thread_Status.Ok,
+		kernel.Thread_Status.Ok,
 	)
 	defer teardown_parser(&fx)
 
 	inner := main_proto(&fx).p[0]
 	testing.expect_value(t, int(inner.numparams), 0)
 	testing.expect(t, proto_is_vararg(inner), "'...' function must be vararg")
-	testing.expect_value(t, lua.get_opcode(inner.code[0]), lua.Op_Code.VARARGPREP)
+	testing.expect_value(t, kernel.get_opcode(inner.code[0]), kernel.Op_Code.VARARGPREP)
 }
 
 // A nested function that reads an enclosing local captures it as an upvalue: the
@@ -288,7 +288,7 @@ parse_upvalue_capture :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		compile(&fx, "local x = 1\nlocal function f() return x end"),
-		lua.Thread_Status.Ok,
+		kernel.Thread_Status.Ok,
 	)
 	defer teardown_parser(&fx)
 
@@ -309,7 +309,7 @@ parse_numeric_for_brackets :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		compile(&fx, "local s = 0\nfor i = 1, 10 do s = s + i end"),
-		lua.Thread_Status.Ok,
+		kernel.Thread_Status.Ok,
 	)
 	defer teardown_parser(&fx)
 
@@ -325,7 +325,7 @@ parse_generic_for_opcodes :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		compile(&fx, "for k, v in pairs(t) do end"),
-		lua.Thread_Status.Ok,
+		kernel.Thread_Status.Ok,
 	)
 	defer teardown_parser(&fx)
 
@@ -343,7 +343,7 @@ parse_table_constructor :: proc(t: ^testing.T) {
 	testing.expect_value(
 		t,
 		compile(&fx, "local t = {10, 20, x = 30}"),
-		lua.Thread_Status.Ok,
+		kernel.Thread_Status.Ok,
 	)
 	defer teardown_parser(&fx)
 
@@ -365,8 +365,8 @@ expect_parse_error :: proc(t: ^testing.T, source: string, needle: string) {
 	defer teardown_parser(&fx)
 
 	testing.expectf(t, status == .Err_Syntax, "want Err_Syntax for %q, got %v", source, status)
-	msg := lua.str_value(lua.stack_value(fx.L, fx.L.top - 1))
-	text := string(lua.str_bytes(msg)[:msg.len])
+	msg := kernel.str_value(kernel.stack_value(fx.L, fx.L.top - 1))
+	text := string(kernel.str_bytes(msg)[:msg.len])
 	testing.expectf(t, contains(text, needle), "message %q should contain %q", text, needle)
 }
 

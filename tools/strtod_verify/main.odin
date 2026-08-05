@@ -2,7 +2,7 @@ package main
 
 import "core:fmt"
 import "core:os"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 State :: struct {
 	random_roundtrips: u64,
@@ -54,8 +54,8 @@ append_exp :: proc(buf: []byte, at: int, exponent: int) -> int {
 }
 
 verify_case :: proc(text: []byte, category: string, index: u64) {
-	fast, fast_end := lua.parse_decimal_slice_for_verification(text)
-	oracle, oracle_end := lua.parse_decimal_slice_forced_slow(text)
+	fast, fast_end := kernel.parse_decimal_slice_for_verification(text)
+	oracle, oracle_end := kernel.parse_decimal_slice_forced_slow(text)
 	fast_bits, oracle_bits := transmute(u64)fast, transmute(u64)oracle
 	if fast_end != oracle_end || fast_bits != oracle_bits {
 		fmt.eprintf(
@@ -87,7 +87,7 @@ main :: proc() {
 		bits := next_random(&random)
 		if !finite(bits) {continue}
 		value := transmute(f64)bits
-		n := lua.format_float_decimal(buf[:], value, 'g', 17)
+		n := kernel.format_float_decimal(buf[:], value, 'g', 17)
 		verify_case(buf[:n], "random-roundtrip", counts.random_roundtrips)
 		counts.random_roundtrips += 1
 	}
@@ -127,7 +127,7 @@ main :: proc() {
 				(delta > 0 ? bits + 1 : bits)
 			if !finite(candidate) {continue}
 			value := transmute(f64)candidate
-			n := lua.format_float_decimal(buf[:], value, 'g', 17)
+			n := kernel.format_float_decimal(buf[:], value, 'g', 17)
 			verify_case(buf[:n], "neighbour", counts.neighbour_boundaries)
 			counts.neighbour_boundaries += 1
 		}
@@ -140,7 +140,7 @@ main :: proc() {
 		signed_variants := [2]u64 {bits, bits | (u64(1) << 63)}
 		for signed_bits in signed_variants {
 			value := transmute(f64)signed_bits
-			n := lua.format_float_decimal(buf[:], value, 'g', 17)
+			n := kernel.format_float_decimal(buf[:], value, 'g', 17)
 			verify_case(buf[:n], "subnormal-extreme", counts.subnormals_extremes)
 			counts.subnormals_extremes += 1
 		}
@@ -148,7 +148,7 @@ main :: proc() {
 	for _ in 0 ..< 100_000 {
 		bits := next_random(&random) & 0x000f_ffff_ffff_ffff
 		value := transmute(f64)bits
-		n := lua.format_float_decimal(buf[:], value, 'g', 17)
+		n := kernel.format_float_decimal(buf[:], value, 'g', 17)
 		verify_case(buf[:n], "subnormal-extreme", counts.subnormals_extremes)
 		counts.subnormals_extremes += 1
 	}
@@ -160,7 +160,7 @@ main :: proc() {
 	}
 	for bits in extreme_bits {
 		value := transmute(f64)bits
-		n := lua.format_float_decimal(buf[:], value, 'g', 17)
+		n := kernel.format_float_decimal(buf[:], value, 'g', 17)
 		verify_case(buf[:n], "subnormal-extreme", counts.subnormals_extremes)
 		counts.subnormals_extremes += 1
 	}

@@ -23,7 +23,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
 $TestsDir = Join-Path $RepoRoot 'tests'
 
-$Collection = "-collection:luao=$SrcDir"
+$Collection = "-collection:lang=$SrcDir"
 
 # Odin's `test` command compiles the test binary and then runs it. If the output
 # path contains a space (as this repo's "OneDrive - Microsoft" path does), Odin's

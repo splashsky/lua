@@ -24,9 +24,9 @@ package stdlib
 
 import "base:runtime"
 import "core:os"
-import lua "luao:lua"
-import shellproc "luao:shellproc"
-import stream "luao:stream"
+import kernel "lang:kernel"
+import shellproc "lang:shellproc"
+import stream "lang:stream"
 
 // The registry keys under which the default input/output handles live, and the
 // length of the shared "_IO_" prefix (used to name the file in error messages) --
@@ -54,13 +54,13 @@ FILEHANDLE :: "FILE*"
 @(private = "file")
 LStream :: struct {
 	f:      ^stream.Stream,
-	closef: lua.C_Function,
+	closef: kernel.C_Function,
 	popen:  ^shellproc.Handle,
 }
 
 @(private = "file")
-state :: #force_inline proc "contextless" (Lp: rawptr) -> ^lua.State {
-	return (^lua.State)(Lp)
+state :: #force_inline proc "contextless" (Lp: rawptr) -> ^kernel.State {
+	return (^kernel.State)(Lp)
 }
 
 // --------------------------------------------------------------------------------
@@ -76,14 +76,14 @@ isclosed :: #force_inline proc "contextless" (p: ^LStream) -> bool {
 // Fetch the LStream at stack slot 1, raising a type error if it isn't a file
 // handle -- reference `tolstream`.
 @(private = "file")
-tolstream :: proc(L: ^lua.State) -> ^LStream {
+tolstream :: proc(L: ^kernel.State) -> ^LStream {
 	return (^LStream)(aux_checkudata(L, 1, FILEHANDLE))
 }
 
 // Fetch the underlying FILE* at slot 1, raising if the handle is closed --
 // reference `tofile`.
 @(private = "file")
-tofile :: proc(L: ^lua.State) -> ^stream.Stream {
+tofile :: proc(L: ^kernel.State) -> ^stream.Stream {
 	p := tolstream(L)
 	if isclosed(p) {
 		aux_error(L, "attempt to use a closed file")
@@ -95,8 +95,8 @@ tofile :: proc(L: ^lua.State) -> ^stream.Stream {
 // Building it closed first means a later allocation failure can never leave a
 // half-open handle behind -- reference `newprefile`.
 @(private = "file")
-newprefile :: proc(L: ^lua.State) -> ^LStream {
-	p := (^LStream)(lua.api_newuserdatauv(L, size_of(LStream), 0))
+newprefile :: proc(L: ^kernel.State) -> ^LStream {
+	p := (^LStream)(kernel.api_newuserdatauv(L, size_of(LStream), 0))
 	p.f = nil
 	p.closef = nil // mark as closed until a real file is installed
 	p.popen = nil
@@ -107,7 +107,7 @@ newprefile :: proc(L: ^lua.State) -> ^LStream {
 // A prefile destined to hold a regular fopen'd file: closed via io_fclose --
 // reference `newfile`.
 @(private = "file")
-newfile :: proc(L: ^lua.State) -> ^LStream {
+newfile :: proc(L: ^kernel.State) -> ^LStream {
 	p := newprefile(L)
 	p.f = nil
 	p.closef = io_fclose
@@ -117,7 +117,7 @@ newfile :: proc(L: ^lua.State) -> ^LStream {
 // Invoke a handle's close function, first clearing the pointer so the handle is
 // marked closed even if the close itself fails -- reference `aux_close`.
 @(private = "file")
-aux_close :: proc(L: ^lua.State) -> i32 {
+aux_close :: proc(L: ^kernel.State) -> i32 {
 	p := tolstream(L)
 	cf := p.closef
 	p.closef = nil // mark stream as closed before calling
@@ -164,7 +164,7 @@ io_noclose :: proc "c" (Lp: rawptr) -> i32 {
 	p := tolstream(L)
 	p.closef = io_noclose // keep the file open
 	aux_pushfail(L)
-	lua.api_pushstring(L, "cannot close standard file")
+	kernel.api_pushstring(L, "cannot close standard file")
 	return 2
 }
 
@@ -182,9 +182,9 @@ io_type :: proc "c" (Lp: rawptr) -> i32 {
 	if p == nil {
 		aux_pushfail(L) // not a file handle at all
 	} else if isclosed(p) {
-		lua.api_pushstring(L, "closed file")
+		kernel.api_pushstring(L, "closed file")
 	} else {
-		lua.api_pushstring(L, "file")
+		kernel.api_pushstring(L, "file")
 	}
 	return 1
 }
@@ -195,9 +195,9 @@ f_tostring :: proc "c" (Lp: rawptr) -> i32 {
 	L := state(Lp)
 	p := tolstream(L)
 	if isclosed(p) {
-		lua.api_pushstring(L, "file (closed)")
+		kernel.api_pushstring(L, "file (closed)")
 	} else {
-		lua.api_pushfstring(L, "file (%p)", rawptr(p.f))
+		kernel.api_pushfstring(L, "file (%p)", rawptr(p.f))
 	}
 	return 1
 }
@@ -231,8 +231,8 @@ f_close :: proc "c" (Lp: rawptr) -> i32 {
 io_close :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	if lua.api_isnone(L, 1) { // no argument: close the default output
-		lua.api_getfield(L, lua.REGISTRYINDEX, IO_OUTPUT)
+	if kernel.api_isnone(L, 1) { // no argument: close the default output
+		kernel.api_getfield(L, kernel.REGISTRYINDEX, IO_OUTPUT)
 	}
 	return f_close(Lp)
 }
@@ -331,9 +331,9 @@ io_tmpfile :: proc "c" (Lp: rawptr) -> i32 {
 // been closed -- reference `getiofile`. The handle is left on the stack (as the
 // implicit "self" that g_read/g_write count), exactly as reference does.
 @(private = "file")
-getiofile :: proc(L: ^lua.State, findex: string) -> ^stream.Stream {
-	lua.api_getfield(L, lua.REGISTRYINDEX, findex)
-	p := (^LStream)(lua.api_touserdata(L, -1))
+getiofile :: proc(L: ^kernel.State, findex: string) -> ^stream.Stream {
+	kernel.api_getfield(L, kernel.REGISTRYINDEX, findex)
+	p := (^LStream)(kernel.api_touserdata(L, -1))
 	if isclosed(p) {
 		aux_error(L, "default %s file is closed", findex[IOPREF_LEN:])
 	}
@@ -343,9 +343,9 @@ getiofile :: proc(L: ^lua.State, findex: string) -> ^stream.Stream {
 // Open (or set) the default file stored under registry key `f` -- reference
 // `g_iofile`. With no usable argument it just returns the current handle.
 @(private = "file")
-g_iofile :: proc(L: ^lua.State, f: string, mode: string) -> i32 {
-	if !lua.api_isnoneornil(L, 1) {
-		filename, is_str := lua.api_tostring(L, 1)
+g_iofile :: proc(L: ^kernel.State, f: string, mode: string) -> i32 {
+	if !kernel.api_isnoneornil(L, 1) {
+		filename, is_str := kernel.api_tostring(L, 1)
 		if is_str {
 			// Open the named file, raising a descriptive error on failure.
 			p := newfile(L)
@@ -360,12 +360,12 @@ g_iofile :: proc(L: ^lua.State, f: string, mode: string) -> i32 {
 			}
 		} else {
 			tofile(L) // check that argument 1 is a valid file handle
-			lua.api_pushvalue(L, 1)
+			kernel.api_pushvalue(L, 1)
 		}
-		lua.api_setfield(L, lua.REGISTRYINDEX, f)
+		kernel.api_setfield(L, kernel.REGISTRYINDEX, f)
 	}
 	// Return the current value.
-	lua.api_getfield(L, lua.REGISTRYINDEX, f)
+	kernel.api_getfield(L, kernel.REGISTRYINDEX, f)
 	return 1
 }
 
@@ -396,14 +396,14 @@ MAXARGLINE :: 250
 // the number of formats, a boolean "close when done", then the formats themselves
 // -- reference `aux_lines`.
 @(private = "file")
-aux_lines :: proc(L: ^lua.State, toclose: bool) {
-	n := lua.api_gettop(L) - 1 // number of format arguments
+aux_lines :: proc(L: ^kernel.State, toclose: bool) {
+	n := kernel.api_gettop(L) - 1 // number of format arguments
 	aux_argcheck(L, n <= MAXARGLINE, MAXARGLINE + 2, "too many arguments")
-	lua.api_pushvalue(L, 1) // the file
-	lua.api_pushinteger(L, lua.Integer(n)) // number of formats
-	lua.api_pushboolean(L, toclose) // close/keep the file when finished
-	lua.api_rotate(L, 2, 3) // move the three fixed values ahead of the formats
-	lua.api_pushcclosure(L, io_readline, 3 + n)
+	kernel.api_pushvalue(L, 1) // the file
+	kernel.api_pushinteger(L, kernel.Integer(n)) // number of formats
+	kernel.api_pushboolean(L, toclose) // close/keep the file when finished
+	kernel.api_rotate(L, 2, 3) // move the three fixed values ahead of the formats
+	kernel.api_pushcclosure(L, io_readline, 3 + n)
 }
 
 @(private = "file")
@@ -420,12 +420,12 @@ io_lines :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	toclose: bool
-	if lua.api_isnone(L, 1) {
-		lua.api_pushnil(L) // ensure there is at least one argument
+	if kernel.api_isnone(L, 1) {
+		kernel.api_pushnil(L) // ensure there is at least one argument
 	}
-	if lua.api_isnil(L, 1) { // no filename: iterate the default input
-		lua.api_getfield(L, lua.REGISTRYINDEX, IO_INPUT)
-		lua.api_replace(L, 1) // move it to slot 1
+	if kernel.api_isnil(L, 1) { // no filename: iterate the default input
+		kernel.api_getfield(L, kernel.REGISTRYINDEX, IO_INPUT)
+		kernel.api_replace(L, 1) // move it to slot 1
 		tofile(L) // check that it's a valid file handle
 		toclose = false // do not close the shared default input
 	} else { // open a named file just for this iteration
@@ -440,14 +440,14 @@ io_lines :: proc "c" (Lp: rawptr) -> i32 {
 				os.error_string(stream.last_error()),
 			)
 		}
-		lua.api_replace(L, 1) // move the new file to slot 1
+		kernel.api_replace(L, 1) // move the new file to slot 1
 		toclose = true // close it once iteration finishes
 	}
 	aux_lines(L, toclose) // push the iterator function
 	if toclose {
-		lua.api_pushnil(L) // state
-		lua.api_pushnil(L) // control
-		lua.api_pushvalue(L, 1) // the file is the to-be-closed 4th result
+		kernel.api_pushnil(L) // state
+		kernel.api_pushnil(L) // control
+		kernel.api_pushvalue(L, 1) // the file is the to-be-closed 4th result
 		return 4
 	}
 	return 1
@@ -499,7 +499,7 @@ test2 :: proc(rn: ^RN, a: u8, b: u8) -> bool {
 readdigits :: proc(rn: ^RN, hex: bool) -> int {
 	count := 0
 	for {
-		is_digit := hex ? lua.is_xdigit(int(rn.c)) : lua.is_digit(int(rn.c))
+		is_digit := hex ? kernel.is_xdigit(int(rn.c)) : kernel.is_digit(int(rn.c))
 		if !is_digit || !nextc(rn) {
 			break
 		}
@@ -512,7 +512,7 @@ readdigits :: proc(rn: ^RN, hex: bool) -> int {
 // lua_stringtonumber -- reference `read_number`. On success the conversion itself
 // pushes the number; on failure we push a placeholder nil that g_read discards.
 @(private = "file")
-read_number :: proc(L: ^lua.State, f: ^stream.Stream) -> bool {
+read_number :: proc(L: ^kernel.State, f: ^stream.Stream) -> bool {
 	rn: RN
 	count := 0
 	hex := false
@@ -521,7 +521,7 @@ read_number :: proc(L: ^lua.State, f: ^stream.Stream) -> bool {
 	// C locale: the decimal separator is '.', which we always accept anyway.
 	for {
 		rn.c = stream.getc(f)
-		if !lua.is_space(int(rn.c)) {
+		if !kernel.is_space(int(rn.c)) {
 			break
 		}
 	}
@@ -543,27 +543,27 @@ read_number :: proc(L: ^lua.State, f: ^stream.Stream) -> bool {
 	}
 	stream.ungetc(rn.c, f) // unread the look-ahead char (a no-op for EOF)
 	rn.buff[rn.n] = 0 // terminate the string
-	if lua.api_stringtonumber(L, string(cstring(&rn.buff[0]))) != 0 {
+	if kernel.api_stringtonumber(L, string(cstring(&rn.buff[0]))) != 0 {
 		return true // a valid number was pushed
 	}
-	lua.api_pushnil(L) // provisional result to be removed by g_read
+	kernel.api_pushnil(L) // provisional result to be removed by g_read
 	return false
 }
 
 // Peek one byte to detect EOF without consuming input, always pushing "" --
 // reference `test_eof`.
 @(private = "file")
-test_eof :: proc(L: ^lua.State, f: ^stream.Stream) -> bool {
+test_eof :: proc(L: ^kernel.State, f: ^stream.Stream) -> bool {
 	c := stream.getc(f)
 	stream.ungetc(c, f) // no-op when c == EOF
-	lua.api_pushstring(L, "")
+	kernel.api_pushstring(L, "")
 	return c != stream.EOF
 }
 
 // Read one line, with `chop` controlling whether the trailing newline is kept --
 // reference `read_line`. Always pushes a string; returns whether anything was read.
 @(private = "file")
-read_line :: proc(L: ^lua.State, f: ^stream.Stream, chop: bool) -> bool {
+read_line :: proc(L: ^kernel.State, f: ^stream.Stream, chop: bool) -> bool {
 	b: Buffer
 	aux_buffinit(L, &b)
 	found_newline := false
@@ -584,12 +584,12 @@ read_line :: proc(L: ^lua.State, f: ^stream.Stream, chop: bool) -> bool {
 	}
 	aux_pushresult(&b)
 	// Success if we read a newline or produced any bytes at all.
-	return found_newline || lua.api_rawlen(L, -1) > 0
+	return found_newline || kernel.api_rawlen(L, -1) > 0
 }
 
 // Read the entire remaining file in buffer-sized chunks -- reference `read_all`.
 @(private = "file")
-read_all :: proc(L: ^lua.State, f: ^stream.Stream) {
+read_all :: proc(L: ^kernel.State, f: ^stream.Stream) {
 	b: Buffer
 	aux_buffinit(L, &b)
 	for {
@@ -607,7 +607,7 @@ read_all :: proc(L: ^lua.State, f: ^stream.Stream) {
 // `read_chars`. Success is "read at least one byte", so a partial read at EOF
 // still succeeds.
 @(private = "file")
-read_chars :: proc(L: ^lua.State, f: ^stream.Stream, n: uint) -> bool {
+read_chars :: proc(L: ^kernel.State, f: ^stream.Stream, n: uint) -> bool {
 	b: Buffer
 	aux_buffinit(L, &b)
 	p := aux_prepbuffsize(&b, n)
@@ -621,8 +621,8 @@ read_chars :: proc(L: ^lua.State, f: ^stream.Stream, n: uint) -> bool {
 // is the stack index of the first format (2 for file:read's self, 1 for io.read's
 // default handle).
 @(private = "file")
-g_read :: proc(L: ^lua.State, f: ^stream.Stream, first: i32) -> i32 {
-	nargs := lua.api_gettop(L) - 1
+g_read :: proc(L: ^kernel.State, f: ^stream.Stream, first: i32) -> i32 {
+	nargs := kernel.api_gettop(L) - 1
 	n: i32
 	success: bool
 	stream.clearerr(f)
@@ -632,12 +632,12 @@ g_read :: proc(L: ^lua.State, f: ^stream.Stream, first: i32) -> i32 {
 		n = first + 1 // one result
 	} else {
 		// Reserve stack for every result plus auxlib's buffer.
-		aux_checkstack(L, nargs + lua.MINSTACK, "too many arguments")
+		aux_checkstack(L, nargs + kernel.MINSTACK, "too many arguments")
 		success = true
 		n = first
 		for nargs > 0 && success {
 			nargs -= 1
-			if lua.api_type(L, int(n)) == lua.TNUMBER {
+			if kernel.api_type(L, int(n)) == kernel.TNUMBER {
 				l := uint(aux_checkinteger(L, int(n)))
 				success = l == 0 ? test_eof(L, f) : read_chars(L, f, l)
 			} else {
@@ -668,7 +668,7 @@ g_read :: proc(L: ^lua.State, f: ^stream.Stream, first: i32) -> i32 {
 		return aux_fileresult(L, false, "", false, stream.last_error())
 	}
 	if !success {
-		lua.api_pop(L, 1) // drop the failed provisional result
+		kernel.api_pop(L, 1) // drop the failed provisional result
 		aux_pushfail(L) // and report nil in its place
 	}
 	return n - first
@@ -694,28 +694,28 @@ f_read :: proc "c" (Lp: rawptr) -> i32 {
 io_readline :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
-	p := (^LStream)(lua.api_touserdata(L, lua.upvalueindex(1)))
-	n := int(lua.api_tointeger(L, lua.upvalueindex(2)))
+	p := (^LStream)(kernel.api_touserdata(L, kernel.upvalueindex(1)))
+	n := int(kernel.api_tointeger(L, kernel.upvalueindex(2)))
 	if isclosed(p) {
 		aux_error(L, "file is already closed")
 	}
-	lua.api_settop(L, 1)
+	kernel.api_settop(L, 1)
 	aux_checkstack(L, n, "too many arguments")
 	for i := 1; i <= n; i += 1 { // re-push the captured formats for g_read
-		lua.api_pushvalue(L, lua.upvalueindex(3 + i))
+		kernel.api_pushvalue(L, kernel.upvalueindex(3 + i))
 	}
 	nres := g_read(L, p.f, 2) // number of results g_read produced
-	if lua.api_toboolean(L, -int(nres)) { // read at least one value?
+	if kernel.api_toboolean(L, -int(nres)) { // read at least one value?
 		return nres
 	}
 	// First result is falsy: EOF or error.
 	if nres > 1 { // there is error information (2nd result)
-		msg, _ := lua.api_tostring(L, -int(nres) + 1)
+		msg, _ := kernel.api_tostring(L, -int(nres) + 1)
 		aux_error(L, "%s", msg)
 	}
-	if lua.api_toboolean(L, lua.upvalueindex(3)) { // did we open the file?
-		lua.api_settop(L, 0)
-		lua.api_pushvalue(L, lua.upvalueindex(1)) // put the file at slot 1
+	if kernel.api_toboolean(L, kernel.upvalueindex(3)) { // did we open the file?
+		kernel.api_settop(L, 0)
+		kernel.api_pushvalue(L, kernel.upvalueindex(1)) // put the file at slot 1
 		aux_close(L) // close it
 	}
 	return 0
@@ -730,9 +730,9 @@ io_readline :: proc "c" (Lp: rawptr) -> i32 {
 // (exactly what reference's lua_numbertocstring produces) and rejects non-string,
 // non-number arguments with the standard "string expected" error.
 @(private = "file")
-g_write :: proc(L: ^lua.State, f: ^stream.Stream, arg_start: i32) -> i32 {
+g_write :: proc(L: ^kernel.State, f: ^stream.Stream, arg_start: i32) -> i32 {
 	arg := int(arg_start)
-	nargs := lua.api_gettop(L) - arg
+	nargs := kernel.api_gettop(L) - arg
 	totalbytes: uint = 0
 	stream.clear_error()
 	for nargs > 0 {
@@ -746,7 +746,7 @@ g_write :: proc(L: ^lua.State, f: ^stream.Stream, arg_start: i32) -> i32 {
 		totalbytes += numbytes
 		if numbytes < l { // short write: report the error and bytes-so-far
 			nr := aux_fileresult(L, false, "", false, stream.last_error())
-			lua.api_pushinteger(L, lua.Integer(totalbytes))
+			kernel.api_pushinteger(L, kernel.Integer(totalbytes))
 			return nr + 1
 		}
 		arg += 1
@@ -766,7 +766,7 @@ f_write :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	f := tofile(L)
-	lua.api_pushvalue(L, 1) // push the file to be returned on success
+	kernel.api_pushvalue(L, 1) // push the file to be returned on success
 	return g_write(L, f, 2)
 }
 
@@ -793,7 +793,7 @@ f_seek :: proc "c" (Lp: rawptr) -> i32 {
 	if !ok {
 		return aux_fileresult(L, false, "", false, stream.last_error())
 	}
-	lua.api_pushinteger(L, lua.Integer(pos))
+	kernel.api_pushinteger(L, kernel.Integer(pos))
 	return 1
 }
 
@@ -816,7 +816,7 @@ f_setvbuf :: proc "c" (Lp: rawptr) -> i32 {
 }
 
 @(private = "file")
-aux_flush :: proc(L: ^lua.State, f: ^stream.Stream) -> i32 {
+aux_flush :: proc(L: ^kernel.State, f: ^stream.Stream) -> i32 {
 	stream.clear_error()
 	res := stream.flush(f)
 	return aux_fileresult(L, res, "", false, stream.last_error())
@@ -882,26 +882,26 @@ metameth := []Reg {
 // Build the FILE* metatable and wire its __index to the method table -- reference
 // `createmeta`.
 @(private = "file")
-createmeta :: proc(L: ^lua.State) {
+createmeta :: proc(L: ^kernel.State) {
 	aux_newmetatable(L, FILEHANDLE) // metatable for file handles
 	aux_setfuncs(L, metameth, 0) // add metamethods (leaves __index = false)
 	aux_newlib(L, methlib) // create the method table
-	lua.api_setfield(L, -2, "__index") // metatable.__index = method table
-	lua.api_pop(L, 1) // pop the metatable
+	kernel.api_setfield(L, -2, "__index") // metatable.__index = method table
+	kernel.api_pop(L, 1) // pop the metatable
 }
 
 // Create a standard stream, register it in the module (and, for stdin/stdout,
 // under its registry default key) -- reference `createstdfile`.
 @(private = "file")
-createstdfile :: proc(L: ^lua.State, f: ^stream.Stream, k: string, has_key: bool, fname: string) {
+createstdfile :: proc(L: ^kernel.State, f: ^stream.Stream, k: string, has_key: bool, fname: string) {
 	p := newprefile(L)
 	p.f = f
 	p.closef = io_noclose // standard streams are never closed
 	if has_key {
-		lua.api_pushvalue(L, -1)
-		lua.api_setfield(L, lua.REGISTRYINDEX, k) // add to registry
+		kernel.api_pushvalue(L, -1)
+		kernel.api_setfield(L, kernel.REGISTRYINDEX, k) // add to registry
 	}
-	lua.api_setfield(L, -2, fname) // add to the module table
+	kernel.api_setfield(L, -2, fname) // add to the module table
 }
 
 // `luaopen_io` -- build and return the io table.

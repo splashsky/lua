@@ -3,7 +3,7 @@
 package shellproc
 
 import "core:os"
-import stream "luao:stream"
+import stream "lang:stream"
 
 // A popen handle deliberately keeps process ownership separate from stream
 // ownership. The stream closes the parent's pipe end; only after that happens is

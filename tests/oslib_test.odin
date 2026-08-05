@@ -7,30 +7,30 @@ package tests
 // host time zone cancels out. We never assert on the wall clock's actual value.
 
 import "core:testing"
-import lua "luao:lua"
-import aux "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
-oslib_state :: proc() -> ^lua.State {
-	L := lua.new_state(lua.default_allocator())
-	lua.api_pushcfunction(L, aux.open_base)
-	lua.api_call(L, 0, 0)
-	lua.api_pushcfunction(L, aux.open_os)
-	lua.api_call(L, 0, 1)
-	lua.api_setglobal(L, "os")
+oslib_state :: proc() -> ^kernel.State {
+	L := kernel.new_state(kernel.default_allocator())
+	kernel.api_pushcfunction(L, stdlib.open_base)
+	kernel.api_call(L, 0, 0)
+	kernel.api_pushcfunction(L, stdlib.open_os)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "os")
 	return L
 }
 
-oslib_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
-	if st := aux.aux_loadstring(L, src); st != .Ok {
+oslib_run :: proc(L: ^kernel.State, src: string) -> kernel.Thread_Status {
+	if st := stdlib.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.api_pcall(L, 0, lua.MULTRET, 0)
+	return kernel.api_pcall(L, 0, kernel.MULTRET, 0)
 }
 
 @(test)
 oslib_date_epoch_utc :: proc(t: ^testing.T) {
 	L := oslib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// The UTC epoch is 1970-01-01 00:00:00 on every machine, so "!" (UTC) date
 	// results are fully deterministic.
 	st := oslib_run(
@@ -48,7 +48,7 @@ oslib_date_epoch_utc :: proc(t: ^testing.T) {
 @(test)
 oslib_time_roundtrip :: proc(t: ^testing.T) {
 	L := oslib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// os.time interprets the table in local time and os.date('*t') converts back
 	// in local time, so the fields round-trip regardless of the host time zone.
 	st := oslib_run(
@@ -66,7 +66,7 @@ oslib_time_roundtrip :: proc(t: ^testing.T) {
 @(test)
 oslib_difftime :: proc(t: ^testing.T) {
 	L := oslib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// Both times share a time zone, so their difference is exact and tz-independent.
 	st := oslib_run(
 		L,
@@ -81,7 +81,7 @@ oslib_difftime :: proc(t: ^testing.T) {
 @(test)
 oslib_getenv_and_clock :: proc(t: ^testing.T) {
 	L := oslib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	st := oslib_run(
 		L,
 		"assert(os.getenv('ODIN_DEFINITELY_NOT_SET_9F3A') == nil, 'unset env is nil')\n" +
@@ -97,7 +97,7 @@ oslib_getenv_and_clock :: proc(t: ^testing.T) {
 @(test)
 oslib_date_bad_specifier :: proc(t: ^testing.T) {
 	L := oslib_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// An unknown conversion specifier must raise, not silently pass through.
 	st := oslib_run(L, "return os.date('!%Q', 0)")
 	testing.expect(t, st != .Ok, "an invalid strftime specifier is rejected")

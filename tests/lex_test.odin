@@ -16,7 +16,7 @@ package tests
 // about Lua's documented lexical grammar.
 
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // ---------------------------------------------------------------------------
 // In-memory input plumbing
@@ -31,7 +31,7 @@ Src_Reader :: struct {
 	done: bool,
 }
 
-src_read :: proc "c" (L: ^lua.State, data: rawptr, size: ^uint) -> [^]u8 {
+src_read :: proc "c" (L: ^kernel.State, data: rawptr, size: ^uint) -> [^]u8 {
 	r := (^Src_Reader)(data)
 	if r.done {
 		size^ = 0
@@ -46,10 +46,10 @@ src_read :: proc "c" (L: ^lua.State, data: rawptr, size: ^uint) -> [^]u8 {
 // `buff`/`z`/`rd`, so this struct must outlive the scan (it lives on the test's
 // stack, which it does).
 Lexer_Fixture :: struct {
-	L:    ^lua.State,
-	ls:   lua.LexState,
-	z:    lua.Zio,
-	buff: lua.Mbuffer,
+	L:    ^kernel.State,
+	ls:   kernel.LexState,
+	z:    kernel.Zio,
+	buff: kernel.Mbuffer,
 	rd:   Src_Reader,
 }
 
@@ -57,52 +57,52 @@ Lexer_Fixture :: struct {
 // name and the anchor table on the Lua stack -- exactly as the real parser does --
 // so that an emergency collection mid-scan can never reclaim them.
 setup_lexer :: proc(fx: ^Lexer_Fixture, source: string, chunkname: string) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	fx.L = L
 
 	// Source name, rooted on the stack.
-	srcname := lua.string_newlstr(L, ([^]u8)(raw_data(chunkname)), uint(len(chunkname)))
-	sv := lua.stack_value(L, L.top)
-	lua.set_string(sv, srcname)
+	srcname := kernel.string_newlstr(L, ([^]u8)(raw_data(chunkname)), uint(len(chunkname)))
+	sv := kernel.stack_value(L, L.top)
+	kernel.set_string(sv, srcname)
 	L.top += 1
 
 	// Anchor table, rooted on the stack.
-	h := lua.table_new(L)
-	hv := lua.stack_value(L, L.top)
-	lua.set_gc(hv, lua.obj2gco(h))
+	h := kernel.table_new(L)
+	hv := kernel.stack_value(L, L.top)
+	kernel.set_gc(hv, kernel.obj2gco(h))
 	L.top += 1
 
-	lua.mbuffer_init(&fx.buff)
+	kernel.mbuffer_init(&fx.buff)
 	fx.rd = Src_Reader {
 		data = ([^]u8)(raw_data(source)),
 		len  = uint(len(source)),
 		done = false,
 	}
-	lua.zio_init(L, &fx.z, src_read, &fx.rd)
+	kernel.zio_init(L, &fx.z, src_read, &fx.rd)
 
 	fx.ls.buff = &fx.buff
 	fx.ls.h = h
-	first := lua.zio_getc(&fx.z)
-	lua.lex_setinput(L, &fx.ls, &fx.z, srcname, first)
+	first := kernel.zio_getc(&fx.z)
+	kernel.lex_setinput(L, &fx.ls, &fx.z, srcname, first)
 }
 
 // Release everything the fixture owns. `close_state` frees all remaining objects
 // (including anchored strings) and verifies the byte accounting unwinds to zero.
 teardown_lexer :: proc(fx: ^Lexer_Fixture) {
-	lua.mbuffer_free(fx.L, &fx.buff)
-	lua.close_state(fx.L)
+	kernel.mbuffer_free(fx.L, &fx.buff)
+	kernel.close_state(fx.L)
 }
 
 // Pull the next token and hand back the whole Token (code + seminfo).
-scan :: proc(fx: ^Lexer_Fixture) -> lua.Token {
-	lua.lex_next(&fx.ls)
+scan :: proc(fx: ^Lexer_Fixture) -> kernel.Token {
+	kernel.lex_next(&fx.ls)
 	return fx.ls.t
 }
 
 // A NAME/STRING token's text as an ordinary Odin string.
-tok_text :: proc(tok: lua.Token) -> string {
+tok_text :: proc(tok: kernel.Token) -> string {
 	ts := tok.seminfo.ts
-	return string(lua.str_bytes(ts)[:ts.len])
+	return string(kernel.str_bytes(ts)[:ts.len])
 }
 
 // ---------------------------------------------------------------------------
@@ -120,19 +120,19 @@ lex_operators_and_symbols :: proc(t: ^testing.T) {
 		'-',
 		'*',
 		'/',
-		lua.TK_IDIV,
+		kernel.TK_IDIV,
 		'%',
 		'^',
 		'#',
 		'&',
 		'~',
 		'|',
-		lua.TK_SHL,
-		lua.TK_SHR,
-		lua.TK_EQ,
-		lua.TK_NE,
-		lua.TK_LE,
-		lua.TK_GE,
+		kernel.TK_SHL,
+		kernel.TK_SHR,
+		kernel.TK_EQ,
+		kernel.TK_NE,
+		kernel.TK_LE,
+		kernel.TK_GE,
 		'<',
 		'>',
 		'=',
@@ -142,17 +142,17 @@ lex_operators_and_symbols :: proc(t: ^testing.T) {
 		'}',
 		';',
 		':',
-		lua.TK_DBCOLON,
+		kernel.TK_DBCOLON,
 		',',
 		'.',
-		lua.TK_CONCAT,
-		lua.TK_DOTS,
+		kernel.TK_CONCAT,
+		kernel.TK_DOTS,
 	}
 	for want, i in expected {
 		got := scan(&fx)
 		testing.expectf(t, got.token == want, "token %d: want %d got %d", i, want, got.token)
 	}
-	testing.expect_value(t, scan(&fx).token, lua.TK_EOS)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_EOS)
 }
 
 // Lua has no '->' token: it must come back as '-' followed by '>'.
@@ -164,7 +164,7 @@ lex_arrow_is_two_tokens :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, scan(&fx).token, int('-'))
 	testing.expect_value(t, scan(&fx).token, int('>'))
-	testing.expect_value(t, scan(&fx).token, lua.TK_EOS)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_EOS)
 }
 
 // ---------------------------------------------------------------------------
@@ -177,20 +177,20 @@ lex_reserved_vs_names :: proc(t: ^testing.T) {
 	setup_lexer(&fx, "and while function foo _ENV goto", "=t")
 	defer teardown_lexer(&fx)
 
-	testing.expect_value(t, scan(&fx).token, lua.TK_AND)
-	testing.expect_value(t, scan(&fx).token, lua.TK_WHILE)
-	testing.expect_value(t, scan(&fx).token, lua.TK_FUNCTION)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_AND)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_WHILE)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_FUNCTION)
 
 	foo := scan(&fx)
-	testing.expect_value(t, foo.token, lua.TK_NAME)
+	testing.expect_value(t, foo.token, kernel.TK_NAME)
 	testing.expect_value(t, tok_text(foo), "foo")
 
 	env := scan(&fx)
 	// _ENV is fixed but NOT reserved, so it lexes as a plain name.
-	testing.expect_value(t, env.token, lua.TK_NAME)
+	testing.expect_value(t, env.token, kernel.TK_NAME)
 	testing.expect_value(t, tok_text(env), "_ENV")
 
-	testing.expect_value(t, scan(&fx).token, lua.TK_GOTO)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_GOTO)
 }
 
 // Under LUA_COMPAT_GLOBAL (the default in this tree), "global" is a normal name.
@@ -201,7 +201,7 @@ lex_global_is_name_under_compat :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	tok := scan(&fx)
-	testing.expect_value(t, tok.token, lua.TK_NAME)
+	testing.expect_value(t, tok.token, kernel.TK_NAME)
 	testing.expect_value(t, tok_text(tok), "global")
 }
 
@@ -214,10 +214,10 @@ lex_identifier_shape :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	a := scan(&fx)
-	testing.expect_value(t, a.token, lua.TK_NAME)
+	testing.expect_value(t, a.token, kernel.TK_NAME)
 	testing.expect_value(t, tok_text(a), "_x1")
 	b := scan(&fx)
-	testing.expect_value(t, b.token, lua.TK_NAME)
+	testing.expect_value(t, b.token, kernel.TK_NAME)
 	testing.expect_value(t, tok_text(b), "Abc_9")
 }
 
@@ -231,18 +231,18 @@ lex_integer_and_float_literals :: proc(t: ^testing.T) {
 	setup_lexer(&fx, "0 42 0xff 3.5 .5 5. 1e3 0x1p4 0x.8p1", "=t")
 	defer teardown_lexer(&fx)
 
-	i0 := scan(&fx);testing.expect_value(t, i0.token, lua.TK_INT);testing.expect_value(t, i0.seminfo.i, 0)
-	i1 := scan(&fx);testing.expect_value(t, i1.token, lua.TK_INT);testing.expect_value(t, i1.seminfo.i, 42)
-	i2 := scan(&fx);testing.expect_value(t, i2.token, lua.TK_INT);testing.expect_value(t, i2.seminfo.i, 255)
+	i0 := scan(&fx);testing.expect_value(t, i0.token, kernel.TK_INT);testing.expect_value(t, i0.seminfo.i, 0)
+	i1 := scan(&fx);testing.expect_value(t, i1.token, kernel.TK_INT);testing.expect_value(t, i1.seminfo.i, 42)
+	i2 := scan(&fx);testing.expect_value(t, i2.token, kernel.TK_INT);testing.expect_value(t, i2.seminfo.i, 255)
 
-	f0 := scan(&fx);testing.expect_value(t, f0.token, lua.TK_FLT);testing.expect_value(t, f0.seminfo.r, 3.5)
-	f1 := scan(&fx);testing.expect_value(t, f1.token, lua.TK_FLT);testing.expect_value(t, f1.seminfo.r, 0.5)
-	f2 := scan(&fx);testing.expect_value(t, f2.token, lua.TK_FLT);testing.expect_value(t, f2.seminfo.r, 5.0)
-	f3 := scan(&fx);testing.expect_value(t, f3.token, lua.TK_FLT);testing.expect_value(t, f3.seminfo.r, 1000.0)
-	f4 := scan(&fx);testing.expect_value(t, f4.token, lua.TK_FLT);testing.expect_value(t, f4.seminfo.r, 16.0)
-	f5 := scan(&fx);testing.expect_value(t, f5.token, lua.TK_FLT);testing.expect_value(t, f5.seminfo.r, 1.0) // 0x.8p1 = 0.5*2
+	f0 := scan(&fx);testing.expect_value(t, f0.token, kernel.TK_FLT);testing.expect_value(t, f0.seminfo.r, 3.5)
+	f1 := scan(&fx);testing.expect_value(t, f1.token, kernel.TK_FLT);testing.expect_value(t, f1.seminfo.r, 0.5)
+	f2 := scan(&fx);testing.expect_value(t, f2.token, kernel.TK_FLT);testing.expect_value(t, f2.seminfo.r, 5.0)
+	f3 := scan(&fx);testing.expect_value(t, f3.token, kernel.TK_FLT);testing.expect_value(t, f3.seminfo.r, 1000.0)
+	f4 := scan(&fx);testing.expect_value(t, f4.token, kernel.TK_FLT);testing.expect_value(t, f4.seminfo.r, 16.0)
+	f5 := scan(&fx);testing.expect_value(t, f5.token, kernel.TK_FLT);testing.expect_value(t, f5.seminfo.r, 1.0) // 0x.8p1 = 0.5*2
 
-	testing.expect_value(t, scan(&fx).token, lua.TK_EOS)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_EOS)
 }
 
 // A decimal integer literal too large for a 64-bit integer becomes a float, just
@@ -254,7 +254,7 @@ lex_integer_overflow_becomes_float :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	tok := scan(&fx)
-	testing.expect_value(t, tok.token, lua.TK_FLT)
+	testing.expect_value(t, tok.token, kernel.TK_FLT)
 	testing.expect(t, tok.seminfo.r > 9.9e22, "overflowed literal should be a large float")
 }
 
@@ -267,11 +267,11 @@ lex_number_then_concat :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	a := scan(&fx)
-	testing.expect_value(t, a.token, lua.TK_INT)
+	testing.expect_value(t, a.token, kernel.TK_INT)
 	testing.expect_value(t, a.seminfo.i, 1)
-	testing.expect_value(t, scan(&fx).token, lua.TK_CONCAT)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_CONCAT)
 	c := scan(&fx)
-	testing.expect_value(t, c.token, lua.TK_INT)
+	testing.expect_value(t, c.token, kernel.TK_INT)
 	testing.expect_value(t, c.seminfo.i, 2)
 }
 
@@ -287,9 +287,9 @@ lex_short_string_escapes :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	tok := scan(&fx)
-	testing.expect_value(t, tok.token, lua.TK_STRING)
+	testing.expect_value(t, tok.token, kernel.TK_STRING)
 	testing.expect_value(t, tok_text(tok), "a\tbACH")
-	testing.expect_value(t, scan(&fx).token, lua.TK_EOS)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_EOS)
 }
 
 // The '\z' escape zaps the following run of whitespace (including newlines).
@@ -300,7 +300,7 @@ lex_zap_escape :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	tok := scan(&fx)
-	testing.expect_value(t, tok.token, lua.TK_STRING)
+	testing.expect_value(t, tok.token, kernel.TK_STRING)
 	testing.expect_value(t, tok_text(tok), "ab")
 }
 
@@ -313,7 +313,7 @@ lex_string_line_continuation :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	tok := scan(&fx)
-	testing.expect_value(t, tok.token, lua.TK_STRING)
+	testing.expect_value(t, tok.token, kernel.TK_STRING)
 	testing.expect_value(t, tok_text(tok), "a\nb")
 	testing.expect_value(t, fx.ls.linenumber, 2)
 }
@@ -327,7 +327,7 @@ lex_quote_flavors :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	tok := scan(&fx)
-	testing.expect_value(t, tok.token, lua.TK_STRING)
+	testing.expect_value(t, tok.token, kernel.TK_STRING)
 	testing.expect_value(t, tok_text(tok), "he said \"hi\"")
 }
 
@@ -342,12 +342,12 @@ lex_long_string_basic :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	a := scan(&fx)
-	testing.expect_value(t, a.token, lua.TK_STRING)
+	testing.expect_value(t, a.token, kernel.TK_STRING)
 	testing.expect_value(t, tok_text(a), "hello")
 
 	// The inner "]b]" is content because it doesn't match the level-2 close.
 	b := scan(&fx)
-	testing.expect_value(t, b.token, lua.TK_STRING)
+	testing.expect_value(t, b.token, kernel.TK_STRING)
 	testing.expect_value(t, tok_text(b), "a]b")
 }
 
@@ -360,7 +360,7 @@ lex_long_string_newline_rules :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	tok := scan(&fx)
-	testing.expect_value(t, tok.token, lua.TK_STRING)
+	testing.expect_value(t, tok.token, kernel.TK_STRING)
 	testing.expect_value(t, tok_text(tok), "line1\nline2")
 }
 
@@ -371,9 +371,9 @@ lex_comments_are_skipped :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	tok := scan(&fx)
-	testing.expect_value(t, tok.token, lua.TK_INT)
+	testing.expect_value(t, tok.token, kernel.TK_INT)
 	testing.expect_value(t, tok.seminfo.i, 42)
-	testing.expect_value(t, scan(&fx).token, lua.TK_EOS)
+	testing.expect_value(t, scan(&fx).token, kernel.TK_EOS)
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +389,7 @@ lex_line_numbers_and_lastline :: proc(t: ^testing.T) {
 	scan(&fx) // 'a' on line 1
 	testing.expect_value(t, fx.ls.linenumber, 1)
 	b := scan(&fx) // 'b' on line 3
-	testing.expect_value(t, b.token, lua.TK_NAME)
+	testing.expect_value(t, b.token, kernel.TK_NAME)
 	testing.expect_value(t, fx.ls.linenumber, 3)
 	// lastline is snapshotted at the START of the scan for 'b', so it records the
 	// line of the previously consumed token ('a', line 1).
@@ -403,11 +403,11 @@ lex_lookahead_does_not_consume :: proc(t: ^testing.T) {
 	defer teardown_lexer(&fx)
 
 	scan(&fx) // consume 'local' as the current token
-	ahead := lua.lex_lookahead(&fx.ls)
-	testing.expect_value(t, ahead, lua.TK_NAME)
+	ahead := kernel.lex_lookahead(&fx.ls)
+	testing.expect_value(t, ahead, kernel.TK_NAME)
 	// The following next() must return the same token the look-ahead peeked.
 	nxt := scan(&fx)
-	testing.expect_value(t, nxt.token, lua.TK_NAME)
+	testing.expect_value(t, nxt.token, kernel.TK_NAME)
 	testing.expect_value(t, tok_text(nxt), "x")
 }
 
@@ -419,15 +419,15 @@ lex_lookahead_does_not_consume :: proc(t: ^testing.T) {
 // `run_protected` catches it, returning the status. The formatted error message is
 // left by the lexer at the top of the stack for us to inspect.
 Lex_Job :: struct {
-	ls: ^lua.LexState,
+	ls: ^kernel.LexState,
 	n:  int,
 }
 
-lex_job_run :: proc(L: ^lua.State, ud: rawptr) -> lua.Thread_Status {
+lex_job_run :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
 	job := (^Lex_Job)(ud)
 	for _ in 0 ..< job.n {
-		lua.lex_next(job.ls)
-		if job.ls.t.token == lua.TK_EOS {
+		kernel.lex_next(job.ls)
+		if job.ls.t.token == kernel.TK_EOS {
 			break
 		}
 	}
@@ -445,12 +445,12 @@ expect_syntax_error :: proc(t: ^testing.T, source: string, needle: string) {
 		ls = &fx.ls,
 		n  = 16,
 	}
-	status := lua.run_protected(fx.L, lex_job_run, &job)
+	status := kernel.run_protected(fx.L, lex_job_run, &job)
 	testing.expectf(t, status == .Err_Syntax, "want Err_Syntax for %q, got %v", source, status)
 
 	// The error message string is the last thing the lexer pushed.
-	msg := lua.str_value(lua.stack_value(fx.L, fx.L.top - 1))
-	text := string(lua.str_bytes(msg)[:msg.len])
+	msg := kernel.str_value(kernel.stack_value(fx.L, fx.L.top - 1))
+	text := string(kernel.str_bytes(msg)[:msg.len])
 	testing.expectf(t, contains(text, needle), "message %q should contain %q", text, needle)
 }
 
@@ -504,12 +504,12 @@ utf8esc_encodes_right_justified :: proc(t: ^testing.T) {
 	buff: [8]u8
 
 	// ASCII: one byte at the very end.
-	n := lua.object_utf8esc(buff[:], 0x48) // 'H'
+	n := kernel.object_utf8esc(buff[:], 0x48) // 'H'
 	testing.expect_value(t, n, 1)
 	testing.expect_value(t, buff[8 - 1], 0x48)
 
 	// Euro sign U+20AC -> E2 82 AC, right-justified.
-	n = lua.object_utf8esc(buff[:], 0x20AC)
+	n = kernel.object_utf8esc(buff[:], 0x20AC)
 	testing.expect_value(t, n, 3)
 	testing.expect_value(t, buff[8 - 3], 0xE2)
 	testing.expect_value(t, buff[8 - 2], 0x82)
@@ -518,38 +518,38 @@ utf8esc_encodes_right_justified :: proc(t: ^testing.T) {
 
 @(test)
 pushfstring_formats_faithfully :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
-	defer lua.close_state(L)
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
 
-	check :: proc(t: ^testing.T, ts: ^lua.TString, want: string) {
-		got := string(lua.str_bytes(ts)[:ts.len])
+	check :: proc(t: ^testing.T, ts: ^kernel.TString, want: string) {
+		got := string(kernel.str_bytes(ts)[:ts.len])
 		testing.expect_value(t, got, want)
 	}
 
-	check(t, lua.object_pushfstring(L, "%s=%d", "x", 42), "x=42")
-	check(t, lua.object_pushfstring(L, "%c%c", 65, 66), "AB")
-	check(t, lua.object_pushfstring(L, "100%%"), "100%")
-	check(t, lua.object_pushfstring(L, "U+%U", 0x48), "U+H")
-	check(t, lua.object_pushfstring(L, "%f", 1.5), "1.5")
+	check(t, kernel.object_pushfstring(L, "%s=%d", "x", 42), "x=42")
+	check(t, kernel.object_pushfstring(L, "%c%c", 65, 66), "AB")
+	check(t, kernel.object_pushfstring(L, "100%%"), "100%")
+	check(t, kernel.object_pushfstring(L, "U+%U", 0x48), "U+H")
+	check(t, kernel.object_pushfstring(L, "%f", 1.5), "1.5")
 }
 
 @(test)
 chunkid_renders_markers :: proc(t: ^testing.T) {
-	out: [lua.IDSIZE]u8
+	out: [kernel.IDSIZE]u8
 
 	// '=' : verbatim name.
-	w := lua.object_chunkid(out[:], "=stdin")
+	w := kernel.object_chunkid(out[:], "=stdin")
 	testing.expect_value(t, string(out[:w]), "stdin")
 
 	// '@' : file name shown as-is when short.
-	w = lua.object_chunkid(out[:], "@main.lua")
+	w = kernel.object_chunkid(out[:], "@main.lua")
 	testing.expect_value(t, string(out[:w]), "main.lua")
 
 	// literal source : wrapped as [string "..."].
-	w = lua.object_chunkid(out[:], "print(1)")
+	w = kernel.object_chunkid(out[:], "print(1)")
 	testing.expect_value(t, string(out[:w]), "[string \"print(1)\"]")
 
 	// literal multi-line source : only the first line, then "...".
-	w = lua.object_chunkid(out[:], "line1\nline2")
+	w = kernel.object_chunkid(out[:], "line1\nline2")
 	testing.expect_value(t, string(out[:w]), "[string \"line1...\"]")
 }

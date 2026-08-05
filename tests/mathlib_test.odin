@@ -6,49 +6,49 @@ package tests
 // and range membership, never a hard-coded magic draw.
 
 import "core:testing"
-import lua "luao:lua"
-import aux "luao:stdlib"
+import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
-math_state :: proc() -> ^lua.State {
-	L := lua.new_state(lua.default_allocator())
+math_state :: proc() -> ^kernel.State {
+	L := kernel.new_state(kernel.default_allocator())
 	// base gives us assert/pcall for expressive chunks.
-	lua.api_pushcfunction(L, aux.open_base)
-	lua.api_call(L, 0, 0)
+	kernel.api_pushcfunction(L, stdlib.open_base)
+	kernel.api_call(L, 0, 0)
 	// install math as a global table
-	lua.api_pushcfunction(L, aux.open_math)
-	lua.api_call(L, 0, 1)
-	lua.api_setglobal(L, "math")
+	kernel.api_pushcfunction(L, stdlib.open_math)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "math")
 	return L
 }
 
-math_run :: proc(L: ^lua.State, src: string) -> lua.Thread_Status {
-	if st := aux.aux_loadstring(L, src); st != .Ok {
+math_run :: proc(L: ^kernel.State, src: string) -> kernel.Thread_Status {
+	if st := stdlib.aux_loadstring(L, src); st != .Ok {
 		return st
 	}
-	return lua.api_pcall(L, 0, lua.MULTRET, 0)
+	return kernel.api_pcall(L, 0, kernel.MULTRET, 0)
 }
 
 // Convenience: run a chunk that returns one integer and fetch it.
-math_int :: proc(L: ^lua.State, src: string) -> (lua.Integer, bool) {
+math_int :: proc(L: ^kernel.State, src: string) -> (kernel.Integer, bool) {
 	if math_run(L, src) != .Ok {
 		return 0, false
 	}
-	defer lua.api_settop(L, 0)
-	return lua.api_tointegerx(L, -1)
+	defer kernel.api_settop(L, 0)
+	return kernel.api_tointegerx(L, -1)
 }
 
-math_num :: proc(L: ^lua.State, src: string) -> (lua.Number, bool) {
+math_num :: proc(L: ^kernel.State, src: string) -> (kernel.Number, bool) {
 	if math_run(L, src) != .Ok {
 		return 0, false
 	}
-	defer lua.api_settop(L, 0)
-	return lua.api_tonumberx(L, -1)
+	defer kernel.api_settop(L, 0)
+	return kernel.api_tonumberx(L, -1)
 }
 
 @(test)
 math_rounding_and_type :: proc(t: ^testing.T) {
 	L := math_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	n, ok := math_int(L, "return math.floor(3.7)")
 	testing.expect(t, ok && n == 3, "floor(3.7)==3")
@@ -58,21 +58,21 @@ math_rounding_and_type :: proc(t: ^testing.T) {
 	testing.expect(t, ok && n == 5, "floor(5)==5 as integer")
 
 	testing.expect(t, math_run(L, "return math.type(3)") == .Ok)
-	s, _ := lua.api_tolstring(L, -1)
+	s, _ := kernel.api_tolstring(L, -1)
 	testing.expect(t, s == "integer", "type(3)=='integer'")
-	lua.api_settop(L, 0)
+	kernel.api_settop(L, 0)
 	testing.expect(t, math_run(L, "return math.type(3.0)") == .Ok)
-	s, _ = lua.api_tolstring(L, -1)
+	s, _ = kernel.api_tolstring(L, -1)
 	testing.expect(t, s == "float", "type(3.0)=='float'")
-	lua.api_settop(L, 0)
+	kernel.api_settop(L, 0)
 	testing.expect(t, math_run(L, "return math.type('x')") == .Ok)
-	testing.expect(t, lua.api_isnil(L, -1), "type of non-number is nil")
+	testing.expect(t, kernel.api_isnil(L, -1), "type of non-number is nil")
 }
 
 @(test)
 math_abs_fmod_minmax :: proc(t: ^testing.T) {
 	L := math_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	n, ok := math_int(L, "return math.abs(-5)")
 	testing.expect(t, ok && n == 5, "abs(-5)==5")
@@ -94,13 +94,13 @@ math_abs_fmod_minmax :: proc(t: ^testing.T) {
 @(test)
 math_toint_sqrt_consts :: proc(t: ^testing.T) {
 	L := math_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	n, ok := math_int(L, "return math.tointeger(3.0)")
 	testing.expect(t, ok && n == 3, "tointeger(3.0)==3")
 	testing.expect(t, math_run(L, "return math.tointeger(3.5)") == .Ok)
-	testing.expect(t, lua.api_isnil(L, -1), "tointeger(3.5)==nil")
-	lua.api_settop(L, 0)
+	testing.expect(t, kernel.api_isnil(L, -1), "tointeger(3.5)==nil")
+	kernel.api_settop(L, 0)
 
 	f, okf := math_num(L, "return math.sqrt(16)")
 	testing.expect(t, okf && f == 4.0, "sqrt(16)==4")
@@ -116,13 +116,13 @@ math_toint_sqrt_consts :: proc(t: ^testing.T) {
 	testing.expect(t, okf && f > 3.14159 && f < 3.14160, "pi ~ 3.14159")
 	// huge is +inf: bigger than any finite float.
 	testing.expect(t, math_run(L, "return math.huge > 1e308") == .Ok)
-	testing.expect(t, lua.api_toboolean(L, -1), "huge > 1e308")
+	testing.expect(t, kernel.api_toboolean(L, -1), "huge > 1e308")
 }
 
 @(test)
 math_random_reproducible :: proc(t: ^testing.T) {
 	L := math_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// The same explicit seed must reproduce the same draw -- this proves our
 	// xoshiro256** port is deterministic, without hard-coding any magic value.
 	st := math_run(
@@ -132,14 +132,14 @@ math_random_reproducible :: proc(t: ^testing.T) {
 		"return (a == b) and 1 or 0",
 	)
 	testing.expect(t, st == .Ok)
-	n, _ := lua.api_tointegerx(L, -1)
+	n, _ := kernel.api_tointegerx(L, -1)
 	testing.expect(t, n == 1, "same seed reproduces the same draw")
 }
 
 @(test)
 math_random_ranges :: proc(t: ^testing.T) {
 	L := math_state()
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 	// math.random() must land in [0, 1); math.random(1,6) in [1,6]. We check many
 	// draws so the bounds are meaningfully exercised.
 	st := math_run(

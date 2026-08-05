@@ -17,7 +17,7 @@ package stdlib
 // warning plumbing used by `luaL_newstate`.
 
 import "base:runtime"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // --------------------------------------------------------------------------------
 // Constants and small shared types
@@ -44,7 +44,7 @@ PRELOAD_TABLE :: "_PRELOAD"
 // reserve a field name for later).
 Reg :: struct {
 	name: string,
-	func: lua.C_Function,
+	func: kernel.C_Function,
 }
 
 // --------------------------------------------------------------------------------
@@ -53,7 +53,7 @@ Reg :: struct {
 
 // Render a NUL-terminated `short_src` byte array (as filled by `lua_getinfo`) into
 // an Odin string for use in formatted messages.
-short_src_string :: proc(src: ^[lua.IDSIZE]u8) -> string {
+short_src_string :: proc(src: ^[kernel.IDSIZE]u8) -> string {
 	n := 0
 	for n < len(src) && src[n] != 0 {
 		n += 1
@@ -68,26 +68,26 @@ short_src_string :: proc(src: ^[lua.IDSIZE]u8) -> string {
 // Push a `source:line:` location prefix for the function `level` frames up --
 // reference `luaL_where`. When no line information is available it pushes the empty
 // string, so callers can unconditionally `concat` it in front of a message.
-aux_where :: proc(L: ^lua.State, level: int) {
-	ar: lua.Debug_Info
-	if lua.api_getstack(L, level, &ar) {
-		lua.api_getinfo(L, "Sl", &ar)
+aux_where :: proc(L: ^kernel.State, level: int) {
+	ar: kernel.Debug_Info
+	if kernel.api_getstack(L, level, &ar) {
+		kernel.api_getinfo(L, "Sl", &ar)
 		if ar.currentline > 0 {
-			lua.api_pushfstring(L, "%s:%d: ", short_src_string(&ar.short_src), int(ar.currentline))
+			kernel.api_pushfstring(L, "%s:%d: ", short_src_string(&ar.short_src), int(ar.currentline))
 			return
 		}
 	}
-	lua.api_pushfstring(L, "")
+	kernel.api_pushfstring(L, "")
 }
 
 // Raise a formatted error, prefixed with the caller's `source:line:` -- reference
 // `luaL_error`. Diverges (never returns); it longjmps through the active protected
 // boundary just like `lua_error`.
-aux_error :: proc(L: ^lua.State, fmt: string, args: ..any) -> ! {
+aux_error :: proc(L: ^kernel.State, fmt: string, args: ..any) -> ! {
 	aux_where(L, 1)
-	lua.api_pushfstring(L, fmt, ..args)
-	lua.api_concat(L, 2)
-	lua.api_error(L)
+	kernel.api_pushfstring(L, fmt, ..args)
+	kernel.api_concat(L, 2)
+	kernel.api_error(L)
 }
 
 // Raise a "bad argument" error for argument #`arg` -- reference `luaL_argerror`.
@@ -95,13 +95,13 @@ aux_error :: proc(L: ^lua.State, fmt: string, args: ..any) -> ! {
 // information allows. (Reference 5.5 additionally discounts vararg "extra
 // arguments"; our `Lua_Debug` does not yet carry that count, so we omit that
 // refinement -- the resulting message is still honest, just without that nuance.)
-aux_argerror :: proc(L: ^lua.State, arg: int, extramsg: string) -> ! {
-	ar: lua.Debug_Info
-	if !lua.api_getstack(L, 0, &ar) {
+aux_argerror :: proc(L: ^kernel.State, arg: int, extramsg: string) -> ! {
+	ar: kernel.Debug_Info
+	if !kernel.api_getstack(L, 0, &ar) {
 		// No stack frame (called outside a function): the simplest form.
 		aux_error(L, "bad argument #%d (%s)", arg, extramsg)
 	}
-	lua.api_getinfo(L, "n", &ar)
+	kernel.api_getinfo(L, "n", &ar)
 	a := arg
 	if ar.namewhat == "method" {
 		a -= 1 // do not count the implicit self argument
@@ -115,7 +115,7 @@ aux_argerror :: proc(L: ^lua.State, arg: int, extramsg: string) -> ! {
 		// searching package.loaded for the running function before giving up on
 		// "?". pushglobalfuncname leaves the name on the stack on success.
 		if pushglobalfuncname(L, &ar) {
-			name, _ = lua.api_tostring(L, -1)
+			name, _ = kernel.api_tostring(L, -1)
 		} else {
 			name = "?"
 		}
@@ -126,27 +126,27 @@ aux_argerror :: proc(L: ^lua.State, arg: int, extramsg: string) -> ! {
 // Raise a "wrong type" error for argument #`arg`, naming the type we wanted --
 // reference `luaL_typeerror`. Honors a userdata's `__name` when present so the
 // actual-type portion of the message is as informative as reference Lua's.
-aux_typeerror :: proc(L: ^lua.State, arg: int, tname: string) -> ! {
+aux_typeerror :: proc(L: ^kernel.State, arg: int, tname: string) -> ! {
 	typearg: string
-	if aux_getmetafield(L, arg, "__name") == lua.TSTRING {
-		typearg, _ = lua.api_tostring(L, -1)
-	} else if lua.api_type(L, arg) == lua.TLIGHTUSERDATA {
+	if aux_getmetafield(L, arg, "__name") == kernel.TSTRING {
+		typearg, _ = kernel.api_tostring(L, -1)
+	} else if kernel.api_type(L, arg) == kernel.TLIGHTUSERDATA {
 		typearg = "light userdata"
 	} else {
 		typearg = aux_typename(L, arg)
 	}
-	msg := lua.api_pushfstring(L, "%s expected, got %s", tname, typearg)
+	msg := kernel.api_pushfstring(L, "%s expected, got %s", tname, typearg)
 	aux_argerror(L, arg, msg)
 }
 
 // The internal "wrong tag" helper used by the checkers -- reference `tag_error`.
-tag_error :: proc(L: ^lua.State, arg: int, tag: int) -> ! {
-	aux_typeerror(L, arg, lua.api_typename(L, tag))
+tag_error :: proc(L: ^kernel.State, arg: int, tag: int) -> ! {
+	aux_typeerror(L, arg, kernel.api_typename(L, tag))
 }
 
 // Assert a boolean argument condition, raising `luaL_argerror` if it fails --
 // reference `luaL_argcheck`.
-aux_argcheck :: proc(L: ^lua.State, cond: bool, arg: int, extramsg: string) {
+aux_argcheck :: proc(L: ^kernel.State, cond: bool, arg: int, extramsg: string) {
 	if !cond {
 		aux_argerror(L, arg, extramsg)
 	}
@@ -154,15 +154,15 @@ aux_argcheck :: proc(L: ^lua.State, cond: bool, arg: int, extramsg: string) {
 
 // Assert a condition, raising a `luaL_typeerror` naming `tname` on failure --
 // reference `luaL_argexpected`.
-aux_argexpected :: proc(L: ^lua.State, cond: bool, arg: int, tname: string) {
+aux_argexpected :: proc(L: ^kernel.State, cond: bool, arg: int, tname: string) {
 	if !cond {
 		aux_typeerror(L, arg, tname)
 	}
 }
 
 // The type name of the value at `idx` -- reference `luaL_typename` macro.
-aux_typename :: proc(L: ^lua.State, idx: int) -> string {
-	return lua.api_typename(L, lua.api_type(L, idx))
+aux_typename :: proc(L: ^kernel.State, idx: int) -> string {
+	return kernel.api_typename(L, kernel.api_type(L, idx))
 }
 
 // --------------------------------------------------------------------------------
@@ -171,8 +171,8 @@ aux_typename :: proc(L: ^lua.State, idx: int) -> string {
 
 // Ensure the stack can grow by `space` slots, raising a descriptive stack-overflow
 // error otherwise -- reference `luaL_checkstack`.
-aux_checkstack :: proc(L: ^lua.State, space: int, msg: string) {
-	if !lua.api_checkstack(L, space) {
+aux_checkstack :: proc(L: ^kernel.State, space: int, msg: string) {
+	if !kernel.api_checkstack(L, space) {
 		if msg != "" {
 			aux_error(L, "stack overflow (%s)", msg)
 		} else {
@@ -182,15 +182,15 @@ aux_checkstack :: proc(L: ^lua.State, space: int, msg: string) {
 }
 
 // Demand that argument #`arg` has exactly type `t` -- reference `luaL_checktype`.
-aux_checktype :: proc(L: ^lua.State, arg: int, t: int) {
-	if lua.api_type(L, arg) != t {
+aux_checktype :: proc(L: ^kernel.State, arg: int, t: int) {
+	if kernel.api_type(L, arg) != t {
 		tag_error(L, arg, t)
 	}
 }
 
 // Demand that argument #`arg` exists (is not "none") -- reference `luaL_checkany`.
-aux_checkany :: proc(L: ^lua.State, arg: int) {
-	if lua.api_type(L, arg) == lua.TNONE {
+aux_checkany :: proc(L: ^kernel.State, arg: int) {
+	if kernel.api_type(L, arg) == kernel.TNONE {
 		aux_argerror(L, arg, "value expected")
 	}
 }
@@ -198,42 +198,42 @@ aux_checkany :: proc(L: ^lua.State, arg: int) {
 // Check/convert a string argument, returning its bytes (length carried by the Odin
 // string) -- reference `luaL_checklstring`. A number is silently accepted and
 // stringified, matching reference Lua (the conversion happens in `lua_tolstring`).
-aux_checklstring :: proc(L: ^lua.State, arg: int) -> string {
-	s, ok := lua.api_tolstring(L, arg)
+aux_checklstring :: proc(L: ^kernel.State, arg: int) -> string {
+	s, ok := kernel.api_tolstring(L, arg)
 	if !ok {
-		tag_error(L, arg, lua.TSTRING)
+		tag_error(L, arg, kernel.TSTRING)
 	}
 	return s
 }
 
 // A string argument with a default when absent/nil -- reference `luaL_optlstring`.
-aux_optlstring :: proc(L: ^lua.State, arg: int, def: string) -> string {
-	if lua.api_isnoneornil(L, arg) {
+aux_optlstring :: proc(L: ^kernel.State, arg: int, def: string) -> string {
+	if kernel.api_isnoneornil(L, arg) {
 		return def
 	}
 	return aux_checklstring(L, arg)
 }
 
 // Convenience aliases matching reference's `luaL_checkstring` / `luaL_optstring`.
-aux_checkstring :: proc(L: ^lua.State, arg: int) -> string {
+aux_checkstring :: proc(L: ^kernel.State, arg: int) -> string {
 	return aux_checklstring(L, arg)
 }
-aux_optstring :: proc(L: ^lua.State, arg: int, def: string) -> string {
+aux_optstring :: proc(L: ^kernel.State, arg: int, def: string) -> string {
 	return aux_optlstring(L, arg, def)
 }
 
 // Check/convert a number argument -- reference `luaL_checknumber`.
-aux_checknumber :: proc(L: ^lua.State, arg: int) -> lua.Number {
-	d, ok := lua.api_tonumberx(L, arg)
+aux_checknumber :: proc(L: ^kernel.State, arg: int) -> kernel.Number {
+	d, ok := kernel.api_tonumberx(L, arg)
 	if !ok {
-		tag_error(L, arg, lua.TNUMBER)
+		tag_error(L, arg, kernel.TNUMBER)
 	}
 	return d
 }
 
 // A number argument with a default -- reference `luaL_optnumber`.
-aux_optnumber :: proc(L: ^lua.State, arg: int, def: lua.Number) -> lua.Number {
-	if lua.api_isnoneornil(L, arg) {
+aux_optnumber :: proc(L: ^kernel.State, arg: int, def: kernel.Number) -> kernel.Number {
+	if kernel.api_isnoneornil(L, arg) {
 		return def
 	}
 	return aux_checknumber(L, arg)
@@ -241,17 +241,17 @@ aux_optnumber :: proc(L: ^lua.State, arg: int, def: lua.Number) -> lua.Number {
 
 // The distinct "no integer representation" vs "not a number" split -- reference
 // `interror`.
-interror :: proc(L: ^lua.State, arg: int) -> ! {
-	if lua.api_isnumber(L, arg) {
+interror :: proc(L: ^kernel.State, arg: int) -> ! {
+	if kernel.api_isnumber(L, arg) {
 		aux_argerror(L, arg, "number has no integer representation")
 	} else {
-		tag_error(L, arg, lua.TNUMBER)
+		tag_error(L, arg, kernel.TNUMBER)
 	}
 }
 
 // Check/convert an integer argument -- reference `luaL_checkinteger`.
-aux_checkinteger :: proc(L: ^lua.State, arg: int) -> lua.Integer {
-	d, ok := lua.api_tointegerx(L, arg)
+aux_checkinteger :: proc(L: ^kernel.State, arg: int) -> kernel.Integer {
+	d, ok := kernel.api_tointegerx(L, arg)
 	if !ok {
 		interror(L, arg)
 	}
@@ -259,8 +259,8 @@ aux_checkinteger :: proc(L: ^lua.State, arg: int) -> lua.Integer {
 }
 
 // An integer argument with a default -- reference `luaL_optinteger`.
-aux_optinteger :: proc(L: ^lua.State, arg: int, def: lua.Integer) -> lua.Integer {
-	if lua.api_isnoneornil(L, arg) {
+aux_optinteger :: proc(L: ^kernel.State, arg: int, def: kernel.Integer) -> kernel.Integer {
+	if kernel.api_isnoneornil(L, arg) {
 		return def
 	}
 	return aux_checkinteger(L, arg)
@@ -268,14 +268,14 @@ aux_optinteger :: proc(L: ^lua.State, arg: int, def: lua.Integer) -> lua.Integer
 
 // Match a string argument against a table of allowed options, returning its index
 // -- reference `luaL_checkoption`. Passing `def != ""` makes the argument optional.
-aux_checkoption :: proc(L: ^lua.State, arg: int, def: string, lst: []string) -> int {
+aux_checkoption :: proc(L: ^kernel.State, arg: int, def: string, lst: []string) -> int {
 	name := def != "" ? aux_optstring(L, arg, def) : aux_checkstring(L, arg)
 	for opt, i in lst {
 		if opt == name {
 			return i
 		}
 	}
-	aux_argerror(L, arg, lua.api_pushfstring(L, "invalid option '%s'", name))
+	aux_argerror(L, arg, kernel.api_pushfstring(L, "invalid option '%s'", name))
 }
 
 // --------------------------------------------------------------------------------
@@ -284,16 +284,16 @@ aux_checkoption :: proc(L: ^lua.State, arg: int, def: string, lst: []string) -> 
 
 // Push `obj[metatable][event]` if present, returning its type (or LUA_TNIL and
 // nothing pushed) -- reference `luaL_getmetafield`.
-aux_getmetafield :: proc(L: ^lua.State, obj: int, event: string) -> int {
-	if !lua.api_getmetatable(L, obj) {
-		return lua.TNIL // no metatable at all
+aux_getmetafield :: proc(L: ^kernel.State, obj: int, event: string) -> int {
+	if !kernel.api_getmetatable(L, obj) {
+		return kernel.TNIL // no metatable at all
 	}
-	lua.api_pushstring(L, event)
-	tt := lua.api_rawget(L, -2)
-	if tt == lua.TNIL {
-		lua.api_pop(L, 2) // drop metatable and the nil field
+	kernel.api_pushstring(L, event)
+	tt := kernel.api_rawget(L, -2)
+	if tt == kernel.TNIL {
+		kernel.api_pop(L, 2) // drop metatable and the nil field
 	} else {
-		lua.api_remove(L, -2) // drop just the metatable, keep the field
+		kernel.api_remove(L, -2) // drop just the metatable, keep the field
 	}
 	return tt
 }
@@ -301,54 +301,54 @@ aux_getmetafield :: proc(L: ^lua.State, obj: int, event: string) -> int {
 // Call `obj`'s metamethod `event` with `obj` as its single argument, leaving the
 // result on the stack -- reference `luaL_callmeta`. Returns false (nothing pushed)
 // when the metamethod is absent.
-aux_callmeta :: proc(L: ^lua.State, obj: int, event: string) -> bool {
-	o := lua.api_absindex(L, obj)
-	if aux_getmetafield(L, o, event) == lua.TNIL {
+aux_callmeta :: proc(L: ^kernel.State, obj: int, event: string) -> bool {
+	o := kernel.api_absindex(L, obj)
+	if aux_getmetafield(L, o, event) == kernel.TNIL {
 		return false
 	}
-	lua.api_pushvalue(L, o)
-	lua.api_call(L, 1, 1)
+	kernel.api_pushvalue(L, o)
+	kernel.api_call(L, 1, 1)
 	return true
 }
 
 // Fetch the registry-stored metatable named `tname` -- reference `luaL_getmetatable`
 // macro. Returns the pushed value's type.
-aux_getmetatable :: proc(L: ^lua.State, tname: string) -> int {
-	return lua.api_getfield(L, lua.REGISTRYINDEX, tname)
+aux_getmetatable :: proc(L: ^kernel.State, tname: string) -> int {
+	return kernel.api_getfield(L, kernel.REGISTRYINDEX, tname)
 }
 
 // Create (or find) the named metatable in the registry -- reference
 // `luaL_newmetatable`. Returns true if it was freshly created (leaving it on the
 // stack either way).
-aux_newmetatable :: proc(L: ^lua.State, tname: string) -> bool {
-	if aux_getmetatable(L, tname) != lua.TNIL {
+aux_newmetatable :: proc(L: ^kernel.State, tname: string) -> bool {
+	if aux_getmetatable(L, tname) != kernel.TNIL {
 		return false // name already registered; leave the existing table on top
 	}
-	lua.api_pop(L, 1)
-	lua.api_createtable(L, 0, 2)
-	lua.api_pushstring(L, tname)
-	lua.api_setfield(L, -2, "__name")
-	lua.api_pushvalue(L, -1)
-	lua.api_setfield(L, lua.REGISTRYINDEX, tname)
+	kernel.api_pop(L, 1)
+	kernel.api_createtable(L, 0, 2)
+	kernel.api_pushstring(L, tname)
+	kernel.api_setfield(L, -2, "__name")
+	kernel.api_pushvalue(L, -1)
+	kernel.api_setfield(L, kernel.REGISTRYINDEX, tname)
 	return true
 }
 
 // Set the named registry metatable onto the value at the top of the stack --
 // reference `luaL_setmetatable`.
-aux_setmetatable :: proc(L: ^lua.State, tname: string) {
+aux_setmetatable :: proc(L: ^kernel.State, tname: string) {
 	aux_getmetatable(L, tname)
-	lua.api_setmetatable(L, -2)
+	kernel.api_setmetatable(L, -2)
 }
 
 // Return the userdata payload pointer at `ud` if it carries metatable `tname`, else
 // nil -- reference `luaL_testudata`.
-aux_testudata :: proc(L: ^lua.State, ud: int, tname: string) -> rawptr {
-	p := lua.api_touserdata(L, ud)
+aux_testudata :: proc(L: ^kernel.State, ud: int, tname: string) -> rawptr {
+	p := kernel.api_touserdata(L, ud)
 	if p != nil {
-		if lua.api_getmetatable(L, ud) {
+		if kernel.api_getmetatable(L, ud) {
 			aux_getmetatable(L, tname)
-			same := lua.api_rawequal(L, -1, -2)
-			lua.api_pop(L, 2)
+			same := kernel.api_rawequal(L, -1, -2)
+			kernel.api_pop(L, 2)
 			if !same {
 				return nil
 			}
@@ -360,7 +360,7 @@ aux_testudata :: proc(L: ^lua.State, ud: int, tname: string) -> rawptr {
 
 // Like `luaL_testudata` but raises a type error on mismatch -- reference
 // `luaL_checkudata`.
-aux_checkudata :: proc(L: ^lua.State, ud: int, tname: string) -> rawptr {
+aux_checkudata :: proc(L: ^kernel.State, ud: int, tname: string) -> rawptr {
 	p := aux_testudata(L, ud, tname)
 	aux_argexpected(L, p != nil, ud, tname)
 	return p
@@ -372,47 +372,47 @@ aux_checkudata :: proc(L: ^lua.State, ud: int, tname: string) -> rawptr {
 
 // The integer length of the value at `idx` (honoring `__len`) -- reference
 // `luaL_len`. Raises if the length is not an integer.
-aux_len :: proc(L: ^lua.State, idx: int) -> lua.Integer {
-	lua.api_len(L, idx)
-	i, ok := lua.api_tointegerx(L, -1)
+aux_len :: proc(L: ^kernel.State, idx: int) -> kernel.Integer {
+	kernel.api_len(L, idx)
+	i, ok := kernel.api_tointegerx(L, -1)
 	if !ok {
 		aux_error(L, "object length is not an integer")
 	}
-	lua.api_pop(L, 1)
+	kernel.api_pop(L, 1)
 	return i
 }
 
 // Convert any value to a display string (honoring `__tostring` and `__name`),
 // pushing the result and also returning it -- reference `luaL_tolstring`.
-aux_tolstring :: proc(L: ^lua.State, idx: int) -> string {
+aux_tolstring :: proc(L: ^kernel.State, idx: int) -> string {
 	if aux_callmeta(L, idx, "__tostring") {
-		if !lua.api_isstring(L, -1) {
+		if !kernel.api_isstring(L, -1) {
 			aux_error(L, "'__tostring' must return a string")
 		}
 	} else {
-		switch lua.api_type(L, idx) {
-		case lua.TNUMBER:
-			if lua.api_isinteger(L, idx) {
-				lua.api_pushfstring(L, "%d", lua.api_tointeger(L, idx))
+		switch kernel.api_type(L, idx) {
+		case kernel.TNUMBER:
+			if kernel.api_isinteger(L, idx) {
+				kernel.api_pushfstring(L, "%d", kernel.api_tointeger(L, idx))
 			} else {
-				lua.api_pushfstring(L, "%f", lua.api_tonumber(L, idx))
+				kernel.api_pushfstring(L, "%f", kernel.api_tonumber(L, idx))
 			}
-		case lua.TSTRING:
-			lua.api_pushvalue(L, idx)
-		case lua.TBOOLEAN:
-			lua.api_pushstring(L, lua.api_toboolean(L, idx) ? "true" : "false")
-		case lua.TNIL:
-			lua.api_pushstring(L, "nil")
+		case kernel.TSTRING:
+			kernel.api_pushvalue(L, idx)
+		case kernel.TBOOLEAN:
+			kernel.api_pushstring(L, kernel.api_toboolean(L, idx) ? "true" : "false")
+		case kernel.TNIL:
+			kernel.api_pushstring(L, "nil")
 		case:
 			tt := aux_getmetafield(L, idx, "__name")
-			kind := (tt == lua.TSTRING) ? aux_checkstring(L, -1) : aux_typename(L, idx)
-			lua.api_pushfstring(L, "%s: %p", kind, lua.api_topointer(L, idx))
-			if tt != lua.TNIL {
-				lua.api_remove(L, -2) // drop the __name string, keep the result
+			kind := (tt == kernel.TSTRING) ? aux_checkstring(L, -1) : aux_typename(L, idx)
+			kernel.api_pushfstring(L, "%s: %p", kind, kernel.api_topointer(L, idx))
+			if tt != kernel.TNIL {
+				kernel.api_remove(L, -2) // drop the __name string, keep the result
 			}
 		}
 	}
-	s, _ := lua.api_tolstring(L, -1)
+	s, _ := kernel.api_tolstring(L, -1)
 	return s
 }
 
@@ -423,42 +423,42 @@ aux_tolstring :: proc(L: ^lua.State, idx: int) -> string {
 // Store the value on top of the stack in table `t` and return an integer key that
 // retrieves it -- reference `luaL_ref`. Freed references form a freelist whose head
 // lives at `t[1]` (this is the 5.5 layout: reference 5.4 used a different slot).
-aux_ref :: proc(L: ^lua.State, t: int) -> int {
-	if lua.api_isnil(L, -1) {
-		lua.api_pop(L, 1)
+aux_ref :: proc(L: ^kernel.State, t: int) -> int {
+	if kernel.api_isnil(L, -1) {
+		kernel.api_pop(L, 1)
 		return REFNIL // nil has a fixed, shared reference
 	}
-	ta := lua.api_absindex(L, t)
+	ta := kernel.api_absindex(L, t)
 	ref: int
-	if lua.api_rawgeti(L, ta, 1) == lua.TNUMBER {
-		ref = int(lua.api_tointeger(L, -1)) // freelist head
+	if kernel.api_rawgeti(L, ta, 1) == kernel.TNUMBER {
+		ref = int(kernel.api_tointeger(L, -1)) // freelist head
 	} else {
 		// First use of this table: initialize the freelist head to 0 (empty).
 		ref = 0
-		lua.api_pushinteger(L, 0)
-		lua.api_rawseti(L, ta, 1)
+		kernel.api_pushinteger(L, 0)
+		kernel.api_rawseti(L, ta, 1)
 	}
-	lua.api_pop(L, 1) // pop the freelist head we just read
+	kernel.api_pop(L, 1) // pop the freelist head we just read
 	if ref != 0 {
 		// Reuse a freed slot: unlink it from the freelist.
-		lua.api_rawgeti(L, ta, lua.Integer(ref)) // t[ref] is the next free index
-		lua.api_rawseti(L, ta, 1) // t[1] = t[ref]
+		kernel.api_rawgeti(L, ta, kernel.Integer(ref)) // t[ref] is the next free index
+		kernel.api_rawseti(L, ta, 1) // t[1] = t[ref]
 	} else {
-		ref = int(lua.api_rawlen(L, ta)) + 1 // fresh slot at the end
+		ref = int(kernel.api_rawlen(L, ta)) + 1 // fresh slot at the end
 	}
-	lua.api_rawseti(L, ta, lua.Integer(ref)) // t[ref] = value (popped)
+	kernel.api_rawseti(L, ta, kernel.Integer(ref)) // t[ref] = value (popped)
 	return ref
 }
 
 // Release a reference obtained from `luaL_ref`, returning its slot to the freelist
 // -- reference `luaL_unref`. `LUA_NOREF`/`LUA_REFNIL` are silently ignored.
-aux_unref :: proc(L: ^lua.State, t: int, ref: int) {
+aux_unref :: proc(L: ^kernel.State, t: int, ref: int) {
 	if ref >= 0 {
-		ta := lua.api_absindex(L, t)
-		lua.api_rawgeti(L, ta, 1) // current freelist head
-		lua.api_rawseti(L, ta, lua.Integer(ref)) // t[ref] = t[1]
-		lua.api_pushinteger(L, lua.Integer(ref))
-		lua.api_rawseti(L, ta, 1) // t[1] = ref
+		ta := kernel.api_absindex(L, t)
+		kernel.api_rawgeti(L, ta, 1) // current freelist head
+		kernel.api_rawseti(L, ta, kernel.Integer(ref)) // t[ref] = t[1]
+		kernel.api_pushinteger(L, kernel.Integer(ref))
+		kernel.api_rawseti(L, ta, 1) // t[1] = ref
 	}
 }
 
@@ -469,62 +469,62 @@ aux_unref :: proc(L: ^lua.State, t: int, ref: int) {
 // Register the functions in `l` into the table on top of the stack, sharing `nup`
 // upvalues among them -- reference `luaL_setfuncs`. A `nil` `func` installs `false`
 // as a placeholder. On return the upvalues are popped, leaving the table.
-aux_setfuncs :: proc(L: ^lua.State, l: []Reg, nup: int) {
+aux_setfuncs :: proc(L: ^kernel.State, l: []Reg, nup: int) {
 	aux_checkstack(L, nup, "too many upvalues")
 	for reg in l {
 		if reg.func == nil {
-			lua.api_pushboolean(L, false)
+			kernel.api_pushboolean(L, false)
 		} else {
 			// Copy the shared upvalues above the function for each registration.
 			for _ in 0 ..< nup {
-				lua.api_pushvalue(L, -nup)
+				kernel.api_pushvalue(L, -nup)
 			}
-			lua.api_pushcclosure(L, reg.func, nup)
+			kernel.api_pushcclosure(L, reg.func, nup)
 		}
-		lua.api_setfield(L, -(nup + 2), reg.name)
+		kernel.api_setfield(L, -(nup + 2), reg.name)
 	}
-	lua.api_pop(L, nup)
+	kernel.api_pop(L, nup)
 }
 
 // Create a fresh table sized for `l` and register `l` into it (no upvalues) --
 // reference `luaL_newlib` (combining `newlibtable` + `setfuncs`).
-aux_newlib :: proc(L: ^lua.State, l: []Reg) {
-	lua.api_createtable(L, 0, len(l))
+aux_newlib :: proc(L: ^kernel.State, l: []Reg) {
+	kernel.api_createtable(L, 0, len(l))
 	aux_setfuncs(L, l, 0)
 }
 
 // Ensure `t[fname]` is a table, creating it if needed; leaves it on the stack and
 // returns whether it already existed -- reference `luaL_getsubtable`.
-aux_getsubtable :: proc(L: ^lua.State, idx: int, fname: string) -> bool {
-	if lua.api_getfield(L, idx, fname) == lua.TTABLE {
+aux_getsubtable :: proc(L: ^kernel.State, idx: int, fname: string) -> bool {
+	if kernel.api_getfield(L, idx, fname) == kernel.TTABLE {
 		return true // already there
 	}
-	lua.api_pop(L, 1) // drop the non-table value
-	ia := lua.api_absindex(L, idx)
-	lua.api_newtable(L)
-	lua.api_pushvalue(L, -1) // keep a copy to leave on the stack
-	lua.api_setfield(L, ia, fname)
+	kernel.api_pop(L, 1) // drop the non-table value
+	ia := kernel.api_absindex(L, idx)
+	kernel.api_newtable(L)
+	kernel.api_pushvalue(L, -1) // keep a copy to leave on the stack
+	kernel.api_setfield(L, ia, fname)
 	return false
 }
 
 // Ensure module `modname` is loaded via `openf`, registering it in `_LOADED` (and
 // optionally as a global) -- reference `luaL_requiref`. Leaves the module on top.
-aux_requiref :: proc(L: ^lua.State, modname: string, openf: lua.C_Function, glb: bool) {
-	aux_getsubtable(L, lua.REGISTRYINDEX, LOADED_TABLE)
-	lua.api_getfield(L, -1, modname) // _LOADED[modname]
-	if !lua.api_toboolean(L, -1) {
-		lua.api_pop(L, 1) // drop the false/nil
-		lua.api_pushcfunction(L, openf)
-		lua.api_pushstring(L, modname) // argument to the opener
-		lua.api_call(L, 1, 1) // call openf(modname)
-		lua.api_pushvalue(L, -1) // keep a copy
-		lua.api_setfield(L, -3, modname) // _LOADED[modname] = module
+aux_requiref :: proc(L: ^kernel.State, modname: string, openf: kernel.C_Function, glb: bool) {
+	aux_getsubtable(L, kernel.REGISTRYINDEX, LOADED_TABLE)
+	kernel.api_getfield(L, -1, modname) // _LOADED[modname]
+	if !kernel.api_toboolean(L, -1) {
+		kernel.api_pop(L, 1) // drop the false/nil
+		kernel.api_pushcfunction(L, openf)
+		kernel.api_pushstring(L, modname) // argument to the opener
+		kernel.api_call(L, 1, 1) // call openf(modname)
+		kernel.api_pushvalue(L, -1) // keep a copy
+		kernel.api_setfield(L, -3, modname) // _LOADED[modname] = module
 	}
 	if glb {
-		lua.api_pushvalue(L, -1)
-		lua.api_setglobal(L, modname) // _G[modname] = module
+		kernel.api_pushvalue(L, -1)
+		kernel.api_setglobal(L, modname) // _G[modname] = module
 	}
-	lua.api_replace(L, -2) // remove _LOADED, leaving the module
+	kernel.api_replace(L, -2) // remove _LOADED, leaving the module
 }
 
 // --------------------------------------------------------------------------------
@@ -539,7 +539,7 @@ Buffer :: struct {
 	b:      [^]u8, // where bytes are being written (into init_b or the box)
 	size:   uint, // capacity of `b`
 	n:      uint, // number of bytes used so far
-	L:      ^lua.State,
+	L:      ^kernel.State,
 	init_b: [AUX_BUFFERSIZE]u8,
 }
 
@@ -558,17 +558,17 @@ buffonstack :: proc(B: ^Buffer) -> bool {
 
 // Grow or shrink a box's heap buffer through the state allocator -- reference
 // `resizebox`. Raises a memory error if a nonzero request fails.
-resizebox :: proc(L: ^lua.State, idx: int, newsize: uint) -> rawptr {
-	box := (^UBox)(lua.api_touserdata(L, idx))
+resizebox :: proc(L: ^kernel.State, idx: int, newsize: uint) -> rawptr {
+	box := (^UBox)(kernel.api_touserdata(L, idx))
 	if box.bsize == newsize {
 		return box.box
 	}
 	ud: rawptr
-	allocf := lua.api_getallocf(L, &ud)
+	allocf := kernel.api_getallocf(L, &ud)
 	temp := allocf(ud, box.box, box.bsize, newsize)
 	if temp == nil && newsize > 0 {
-		lua.api_pushstring(L, "not enough memory")
-		lua.api_error(L)
+		kernel.api_pushstring(L, "not enough memory")
+		kernel.api_error(L)
 	}
 	box.box = temp
 	box.bsize = newsize
@@ -579,22 +579,22 @@ resizebox :: proc(L: ^lua.State, idx: int, newsize: uint) -> rawptr {
 // reference `boxgc`.
 boxgc :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
-	L := (^lua.State)(Lp)
+	L := (^kernel.State)(Lp)
 	resizebox(L, 1, 0)
 	return 0
 }
 
 // Create a fresh, empty box on top of the stack with its freeing metatable --
 // reference `newbox`.
-newbox :: proc(L: ^lua.State) {
-	box := (^UBox)(lua.api_newuserdatauv(L, size_of(UBox), 0))
+newbox :: proc(L: ^kernel.State) {
+	box := (^UBox)(kernel.api_newuserdatauv(L, size_of(UBox), 0))
 	box.box = nil
 	box.bsize = 0
 	if aux_newmetatable(L, "_UBOX*") {
 		mt := []Reg{{"__gc", boxgc}, {"__close", boxgc}}
 		aux_setfuncs(L, mt, 0)
 	}
-	lua.api_setmetatable(L, -2)
+	kernel.api_setmetatable(L, -2)
 }
 
 // Compute a new capacity that fits `sz` more bytes plus a terminating NUL --
@@ -628,16 +628,16 @@ prepbuffsize :: proc(B: ^Buffer, sz: uint, boxidx: int) -> [^]u8 {
 	} else {
 		// First spill: swap the light-userdata placeholder for a real box, mark it
 		// to-be-closed (so an error still frees it), then copy the inline content in.
-		lua.api_remove(L, boxidx)
+		kernel.api_remove(L, boxidx)
 		newbox(L)
 		// When `boxidx == -1` the box newbox just pushed is already at the target
 		// (the top), so repositioning is a no-op. We skip `lua_insert` in that case
 		// because it would be a degenerate 1-element rotation -- reference Lua only
 		// gets away with the unconditional call because its api_check compiles out.
 		if boxidx != -1 {
-			lua.api_insert(L, boxidx)
+			kernel.api_insert(L, boxidx)
 		}
-		lua.api_toclose(L, boxidx)
+		kernel.api_toclose(L, boxidx)
 		newbuff = ([^]u8)(resizebox(L, boxidx, newsize))
 		runtime.mem_copy(newbuff, B.b, int(B.n))
 	}
@@ -683,26 +683,26 @@ aux_addchar :: proc(B: ^Buffer, c: u8) {
 // sits *below* the string being consumed.
 aux_addvalue :: proc(B: ^Buffer) {
 	L := B.L
-	s, _ := lua.api_tolstring(L, -1)
+	s, _ := kernel.api_tolstring(L, -1)
 	b := prepbuffsize(B, uint(len(s)), -2)
 	runtime.mem_copy(b, raw_data(s), len(s))
 	aux_addsize(B, uint(len(s)))
-	lua.api_pop(L, 1)
+	kernel.api_pop(L, 1)
 }
 
 // Initialize an empty buffer, pushing its stack placeholder -- reference
 // `luaL_buffinit`.
-aux_buffinit :: proc(L: ^lua.State, B: ^Buffer) {
+aux_buffinit :: proc(L: ^kernel.State, B: ^Buffer) {
 	B.L = L
 	B.b = &B.init_b[0]
 	B.n = 0
 	B.size = AUX_BUFFERSIZE
-	lua.api_pushlightuserdata(L, B) // placeholder marking the buffer's stack slot
+	kernel.api_pushlightuserdata(L, B) // placeholder marking the buffer's stack slot
 }
 
 // Initialize a buffer and immediately return a writable area of at least `sz`
 // bytes -- reference `luaL_buffinitsize`.
-aux_buffinitsize :: proc(L: ^lua.State, B: ^Buffer, sz: uint) -> [^]u8 {
+aux_buffinitsize :: proc(L: ^kernel.State, B: ^Buffer, sz: uint) -> [^]u8 {
 	aux_buffinit(L, B)
 	return prepbuffsize(B, sz, -1)
 }
@@ -714,12 +714,12 @@ aux_buffinitsize :: proc(L: ^lua.State, B: ^Buffer, sz: uint) -> [^]u8 {
 aux_pushresult :: proc(B: ^Buffer) {
 	L := B.L
 	if !buffonstack(B) {
-		lua.api_pushlstring(L, B.b[:B.n]) // inline case: just copy out
-		lua.api_remove(L, -2) // drop the placeholder, leaving the string
+		kernel.api_pushlstring(L, B.b[:B.n]) // inline case: just copy out
+		kernel.api_remove(L, -2) // drop the placeholder, leaving the string
 	} else {
-		lua.api_pushlstring(L, B.b[:B.n]) // copy content while the box buffer is alive
-		lua.api_closeslot(L, -2) // run the box __close: frees the heap buffer now
-		lua.api_remove(L, -2) // drop the (closed) box, leaving the string
+		kernel.api_pushlstring(L, B.b[:B.n]) // copy content while the box buffer is alive
+		kernel.api_closeslot(L, -2) // run the box __close: frees the heap buffer now
+		kernel.api_remove(L, -2) // drop the (closed) box, leaving the string
 	}
 }
 
@@ -772,12 +772,12 @@ aux_addgsub :: proc(B: ^Buffer, s: string, p: string, r: string) {
 
 // Return a copy of `s` with every literal `p` replaced by `r`, pushing it on the
 // stack and returning it -- reference `luaL_gsub`.
-aux_gsub :: proc(L: ^lua.State, s: string, p: string, r: string) -> string {
+aux_gsub :: proc(L: ^kernel.State, s: string, p: string, r: string) -> string {
 	b: Buffer
 	aux_buffinit(L, &b)
 	aux_addgsub(&b, s, p, r)
 	aux_pushresult(&b)
-	res, _ := lua.api_tolstring(L, -1)
+	res, _ := kernel.api_tolstring(L, -1)
 	return res
 }
 
@@ -792,7 +792,7 @@ Load_S :: struct {
 }
 
 // The one-shot in-memory reader handed to `lua_load` -- reference `getS`.
-getS :: proc "c" (L: ^lua.State, ud: rawptr, size: ^uint) -> [^]u8 {
+getS :: proc "c" (L: ^kernel.State, ud: rawptr, size: ^uint) -> [^]u8 {
 	ls := (^Load_S)(ud)
 	if ls.size == 0 {
 		return nil // already delivered the whole buffer
@@ -804,31 +804,31 @@ getS :: proc "c" (L: ^lua.State, ud: rawptr, size: ^uint) -> [^]u8 {
 
 // Load a chunk from a byte buffer -- reference `luaL_loadbufferx`.
 aux_loadbufferx :: proc(
-	L: ^lua.State,
+	L: ^kernel.State,
 	buff: []u8,
 	name: string,
 	mode: string = "",
-) -> lua.Thread_Status {
+) -> kernel.Thread_Status {
 	ls := Load_S{raw_data(buff), uint(len(buff))}
-	return lua.api_load(L, getS, &ls, name, mode)
+	return kernel.api_load(L, getS, &ls, name, mode)
 }
 
 // Load a chunk from a string, using the string itself as the chunk name --
 // reference `luaL_loadstring`.
-aux_loadstring :: proc(L: ^lua.State, s: string) -> lua.Thread_Status {
+aux_loadstring :: proc(L: ^kernel.State, s: string) -> kernel.Thread_Status {
 	return aux_loadbufferx(L, transmute([]u8)s, s, "")
 }
 
 // Freestanding keeps the auxiliary API that is meaningful without an OS. File
 // loading, process-result helpers, console warnings, and luaL_newstate live only
 // in auxlib.odin; an embedder creates a state with lua.new_state and its allocator.
-aux_pushfail :: proc(L: ^lua.State) {
-	lua.api_pushnil(L)
+aux_pushfail :: proc(L: ^kernel.State) {
+	kernel.api_pushnil(L)
 }
 
 // There is no required clock source on bare metal. Address mixing preserves the
 // reference routine's unsigned seed contract without inventing a platform hook.
-aux_makeseed :: proc(L: ^lua.State) -> u32 {
+aux_makeseed :: proc(L: ^kernel.State) -> u32 {
 	local: int
 	mixed := u64(uintptr(L)) ~ u64(uintptr(&local))
 	mixed *= 0x9E3779B97F4A7C15
@@ -840,8 +840,8 @@ aux_makeseed :: proc(L: ^lua.State) -> u32 {
 // version, integer/float widths, and value representation are consistent by
 // construction. We still assert the version number matches so the check is a real
 // (if always-satisfied) guard rather than a silent no-op.
-aux_checkversion :: proc(L: ^lua.State) {
-	assert(lua.VERSION_NUM == 505, "unexpected Lua version number")
+aux_checkversion :: proc(L: ^kernel.State) {
+	assert(kernel.VERSION_NUM == 505, "unexpected " + kernel.BRAND + " version number")
 }
 
 
@@ -859,7 +859,7 @@ LEVELS2 :: 11
 
 // Render a Lua_Debug's short_src (a fixed NUL-terminated byte array) as a string.
 @(private = "file")
-short_src_str :: proc(ar: ^lua.Debug_Info) -> string {
+short_src_str :: proc(ar: ^kernel.Debug_Info) -> string {
 	return string(cstring(&ar.short_src[0]))
 }
 
@@ -867,25 +867,25 @@ short_src_str :: proc(ar: ^lua.Debug_Info) -> string {
 // `objidx`, up to `level` levels of nesting. On success leaves the dotted name on
 // the stack and returns true -- reference `findfield`.
 @(private = "file")
-findfield :: proc(L: ^lua.State, objidx: int, level: int) -> bool {
-	if level == 0 || !lua.api_istable(L, -1) {
+findfield :: proc(L: ^kernel.State, objidx: int, level: int) -> bool {
+	if level == 0 || !kernel.api_istable(L, -1) {
 		return false
 	}
-	lua.api_pushnil(L) // first key for lua_next
-	for lua.api_next(L, -2) {
-		if lua.api_type(L, -2) == lua.TSTRING { // ignore non-string keys
-			if lua.api_rawequal(L, objidx, -1) {
-				lua.api_pop(L, 1) // drop value, keep the name
+	kernel.api_pushnil(L) // first key for lua_next
+	for kernel.api_next(L, -2) {
+		if kernel.api_type(L, -2) == kernel.TSTRING { // ignore non-string keys
+			if kernel.api_rawequal(L, objidx, -1) {
+				kernel.api_pop(L, 1) // drop value, keep the name
 				return true
 			} else if findfield(L, objidx, level - 1) {
 				// stack: lib_name, lib_table, field_name -- join with a '.'
-				lua.api_pushstring(L, ".")
-				lua.api_replace(L, -3)
-				lua.api_concat(L, 3)
+				kernel.api_pushstring(L, ".")
+				kernel.api_replace(L, -3)
+				kernel.api_concat(L, 3)
 				return true
 			}
 		}
-		lua.api_pop(L, 1) // drop value, keep key for the next iteration
+		kernel.api_pop(L, 1) // drop value, keep key for the next iteration
 	}
 	return false
 }
@@ -894,57 +894,57 @@ findfield :: proc(L: ^lua.State, objidx: int, level: int) -> bool {
 // `pushglobalfuncname`. On success it leaves the name on the stack and returns
 // true.
 @(private = "file")
-pushglobalfuncname :: proc(L: ^lua.State, ar: ^lua.Debug_Info) -> bool {
-	top := lua.api_gettop(L)
-	lua.api_getinfo(L, "f", ar) // push the function being described
-	lua.api_getfield(L, lua.REGISTRYINDEX, LOADED_TABLE)
+pushglobalfuncname :: proc(L: ^kernel.State, ar: ^kernel.Debug_Info) -> bool {
+	top := kernel.api_gettop(L)
+	kernel.api_getinfo(L, "f", ar) // push the function being described
+	kernel.api_getfield(L, kernel.REGISTRYINDEX, LOADED_TABLE)
 	aux_checkstack(L, 6, "not enough stack") // slots for findfield's recursion
 	if findfield(L, top + 1, 2) {
-		name, _ := lua.api_tostring(L, -1)
+		name, _ := kernel.api_tostring(L, -1)
 		if len(name) >= 3 && name[0:3] == "_G." { // strip a leading "_G."
-			lua.api_pushstring(L, name[3:])
-			lua.api_remove(L, -2)
+			kernel.api_pushstring(L, name[3:])
+			kernel.api_remove(L, -2)
 		}
-		lua.api_copy(L, -1, top + 1) // move the name to its proper slot
-		lua.api_settop(L, top + 1) // drop the loaded table and name copy
+		kernel.api_copy(L, -1, top + 1) // move the name to its proper slot
+		kernel.api_settop(L, top + 1) // drop the loaded table and name copy
 		return true
 	}
-	lua.api_settop(L, top) // drop the function and the loaded table
+	kernel.api_settop(L, top) // drop the function and the loaded table
 	return false
 }
 
 // Push a human-readable description of a function frame -- reference `pushfuncname`.
 @(private = "file")
-pushfuncname :: proc(L: ^lua.State, ar: ^lua.Debug_Info) {
+pushfuncname :: proc(L: ^kernel.State, ar: ^kernel.Debug_Info) {
 	if len(ar.namewhat) > 0 { // a name the code knows about
-		lua.api_pushfstring(L, "%s '%s'", ar.namewhat, ar.name)
+		kernel.api_pushfstring(L, "%s '%s'", ar.namewhat, ar.name)
 	} else if len(ar.what) > 0 && ar.what[0] == 'm' { // the main chunk
-		lua.api_pushstring(L, "main chunk")
+		kernel.api_pushstring(L, "main chunk")
 	} else if pushglobalfuncname(L, ar) { // a global/module name
-		name, _ := lua.api_tostring(L, -1)
-		lua.api_pushfstring(L, "function '%s'", name)
-		lua.api_remove(L, -2)
+		name, _ := kernel.api_tostring(L, -1)
+		kernel.api_pushfstring(L, "function '%s'", name)
+		kernel.api_remove(L, -2)
 	} else if len(ar.what) > 0 && ar.what[0] != 'C' { // a Lua function: file:line
-		lua.api_pushfstring(L, "function <%s:%d>", short_src_str(ar), int(ar.linedefined))
+		kernel.api_pushfstring(L, "function <%s:%d>", short_src_str(ar), int(ar.linedefined))
 	} else {
-		lua.api_pushstring(L, "?")
+		kernel.api_pushstring(L, "?")
 	}
 }
 
 // Find the index of the last (deepest) stack level -- reference `lastlevel`. Uses
 // an exponential probe followed by a binary search.
 @(private = "file")
-lastlevel :: proc(L: ^lua.State) -> int {
-	ar: lua.Debug_Info
+lastlevel :: proc(L: ^kernel.State) -> int {
+	ar: kernel.Debug_Info
 	li := 1
 	le := 1
-	for lua.api_getstack(L, le, &ar) { // find an upper bound
+	for kernel.api_getstack(L, le, &ar) { // find an upper bound
 		li = le
 		le *= 2
 	}
 	for li < le { // binary search
 		m := (li + le) / 2
-		if lua.api_getstack(L, m, &ar) {
+		if kernel.api_getstack(L, m, &ar) {
 			li = m + 1
 		} else {
 			le = m
@@ -957,15 +957,15 @@ lastlevel :: proc(L: ^lua.State) -> int {
 // `luaL_traceback`. `has_msg` gates the optional leading message (reference passes
 // a NULL `msg` to omit it).
 aux_traceback :: proc(
-	L: ^lua.State,
-	L1: ^lua.State,
+	L: ^kernel.State,
+	L1: ^kernel.State,
 	msg: string,
 	has_msg: bool,
 	level: int,
 ) {
 	level := level
 	b: Buffer
-	ar: lua.Debug_Info
+	ar: kernel.Debug_Info
 	last := lastlevel(L1)
 	// Only elide when there are more frames than the two shown windows combined.
 	limit2show := (last - level > LEVELS1 + LEVELS2) ? LEVELS1 : -1
@@ -975,7 +975,7 @@ aux_traceback :: proc(
 		aux_addchar(&b, '\n')
 	}
 	aux_addstring(&b, "stack traceback:")
-	for lua.api_getstack(L1, level, &ar) {
+	for kernel.api_getstack(L1, level, &ar) {
 		level += 1
 		// Reference tests `limit2show-- == 0`: fire the elision exactly once, when
 		// the counter reaches zero, and decrement every iteration regardless.
@@ -983,15 +983,15 @@ aux_traceback :: proc(
 		limit2show -= 1
 		if do_skip {
 			n := last - level - LEVELS2 + 1 // frames to skip
-			lua.api_pushfstring(L, "\n\t...\t(skipping %d levels)", n)
+			kernel.api_pushfstring(L, "\n\t...\t(skipping %d levels)", n)
 			aux_addvalue(&b)
 			level += n // jump to the bottom window
 		} else {
-			lua.api_getinfo(L1, "Slnt", &ar)
+			kernel.api_getinfo(L1, "Slnt", &ar)
 			if ar.currentline <= 0 {
-				lua.api_pushfstring(L, "\n\t%s: in ", short_src_str(&ar))
+				kernel.api_pushfstring(L, "\n\t%s: in ", short_src_str(&ar))
 			} else {
-				lua.api_pushfstring(L, "\n\t%s:%d: in ", short_src_str(&ar), int(ar.currentline))
+				kernel.api_pushfstring(L, "\n\t%s:%d: in ", short_src_str(&ar), int(ar.currentline))
 			}
 			aux_addvalue(&b)
 			pushfuncname(L, &ar)

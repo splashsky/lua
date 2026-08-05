@@ -28,7 +28,7 @@ mkdir -p "$OUT_DIR"
 TARGET="${1:-lua}"
 
 # The collection makes cross-package imports stable and path-independent.
-COLLECTION="-collection:luao=$SRC_DIR"
+COLLECTION="-collection:lang=$SRC_DIR"
 
 # On Linux/macOS the default main-thread stack (~8 MiB) comfortably holds the
 # LUAI_MAXCCALLS (200) nested native `luaV_execute` frames Lua permits, so Lua's

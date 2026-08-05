@@ -11,20 +11,20 @@ package tests
 //   * a userdata `__gc` finalizer actually runs during collection.
 
 import "core:testing"
-import lua "luao:lua"
+import kernel "lang:kernel"
 
 // Build a fresh full userdata (no user values, minimal payload) and return it.
 @(private = "file")
-new_udata :: proc(L: ^lua.State) -> ^lua.Udata {
-	return lua.string_newudata(L, 1, 0)
+new_udata :: proc(L: ^kernel.State) -> ^kernel.Udata {
+	return kernel.string_newudata(L, 1, 0)
 }
 
 // Install `key = value` (both by string key) into table `mt`.
 @(private = "file")
-set_str_field :: proc(L: ^lua.State, mt: ^lua.Table, key: string, value: ^lua.TValue) {
-	k: lua.TValue
-	lua.set_string(&k, lua.string_new(L, key))
-	_ = lua.table_set(L, mt, &k, value)
+set_str_field :: proc(L: ^kernel.State, mt: ^kernel.Table, key: string, value: ^kernel.TValue) {
+	k: kernel.TValue
+	kernel.set_string(&k, kernel.string_new(L, key))
+	_ = kernel.table_set(L, mt, &k, value)
 }
 
 // `luaT_gettmbyobj` must resolve an event through the userdata's *own* metatable,
@@ -32,55 +32,55 @@ set_str_field :: proc(L: ^lua.State, mt: ^lua.Table, key: string, value: ^lua.TV
 // userdata's metatable and confirm the raw event lookup hands it back.
 @(test)
 udata_gettmbyobj_uses_own_metatable :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	u := new_udata(L)
-	uo: lua.TValue
-	lua.set_userdata(&uo, u)
-	push_root(L, lua.obj2gco(u))
+	uo: kernel.TValue
+	kernel.set_userdata(&uo, u)
+	push_root(L, kernel.obj2gco(u))
 
-	mt := lua.table_new(L)
-	push_root(L, lua.obj2gco(mt))
-	sentinel: lua.TValue
-	lua.set_string(&sentinel, lua.string_new(L, "userdata-index-hook"))
+	mt := kernel.table_new(L)
+	push_root(L, kernel.obj2gco(mt))
+	sentinel: kernel.TValue
+	kernel.set_string(&sentinel, kernel.string_new(L, "userdata-index-hook"))
 	set_str_field(L, mt, "__index", &sentinel)
 	u.metatable = mt
 
-	tm := lua.tm_gettmbyobj(L, &uo, lua.TM_INDEX)
-	testing.expect(t, !lua.is_nil(tm), "userdata's own __index is found")
-	testing.expect(t, lua.is_string(tm), "the resolved metamethod is our sentinel")
-	testing.expect_value(t, str_contents(lua.str_value(tm)), "userdata-index-hook")
+	tm := kernel.tm_gettmbyobj(L, &uo, kernel.TM_INDEX)
+	testing.expect(t, !kernel.is_nil(tm), "userdata's own __index is found")
+	testing.expect(t, kernel.is_string(tm), "the resolved metamethod is our sentinel")
+	testing.expect_value(t, str_contents(kernel.str_value(tm)), "userdata-index-hook")
 
 	// A different event with no entry must still report absent.
-	none := lua.tm_gettmbyobj(L, &uo, lua.TM_ADD)
-	testing.expect(t, lua.is_nil(none), "an unset event is absent, not spuriously found")
+	none := kernel.tm_gettmbyobj(L, &uo, kernel.TM_ADD)
+	testing.expect(t, kernel.is_nil(none), "an unset event is absent, not spuriously found")
 }
 
 // `luaT_objtypename` must report a userdata's `__name` for error messages.
 @(test)
 udata_objtypename_reports_name :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	u := new_udata(L)
-	uo: lua.TValue
-	lua.set_userdata(&uo, u)
-	push_root(L, lua.obj2gco(u))
+	uo: kernel.TValue
+	kernel.set_userdata(&uo, u)
+	push_root(L, kernel.obj2gco(u))
 
 	// Without a metatable, the generic type name is used.
-	testing.expect_value(t, lua.tm_objtypename(L, &uo), "userdata")
+	testing.expect_value(t, kernel.tm_objtypename(L, &uo), "userdata")
 
-	mt := lua.table_new(L)
-	push_root(L, lua.obj2gco(mt))
-	nameval: lua.TValue
-	lua.set_string(&nameval, lua.string_new(L, "Point"))
+	mt := kernel.table_new(L)
+	push_root(L, kernel.obj2gco(mt))
+	nameval: kernel.TValue
+	kernel.set_string(&nameval, kernel.string_new(L, "Point"))
 	set_str_field(L, mt, "__name", &nameval)
 	u.metatable = mt
 
-	testing.expect_value(t, lua.tm_objtypename(L, &uo), "Point")
+	testing.expect_value(t, kernel.tm_objtypename(L, &uo), "Point")
 }
 
 // `luaV_equalobj` must consult `__eq` when two *distinct* userdata share (or each
@@ -89,30 +89,30 @@ udata_objtypename_reports_name :: proc(t: ^testing.T) {
 // are not the same object.
 @(test)
 udata_eq_metamethod_honored :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	a := new_udata(L)
 	b := new_udata(L)
-	ao: lua.TValue
-	bo: lua.TValue
-	lua.set_userdata(&ao, a)
-	lua.set_userdata(&bo, b)
-	push_root(L, lua.obj2gco(a))
-	push_root(L, lua.obj2gco(b))
+	ao: kernel.TValue
+	bo: kernel.TValue
+	kernel.set_userdata(&ao, a)
+	kernel.set_userdata(&bo, b)
+	push_root(L, kernel.obj2gco(a))
+	push_root(L, kernel.obj2gco(b))
 
-	mt := lua.table_new(L)
-	push_root(L, lua.obj2gco(mt))
-	eqval: lua.TValue
-	lua.set_c_function(&eqval, udata_eq_true)
+	mt := kernel.table_new(L)
+	push_root(L, kernel.obj2gco(mt))
+	eqval: kernel.TValue
+	kernel.set_c_function(&eqval, udata_eq_true)
 	set_str_field(L, mt, "__eq", &eqval)
 	a.metatable = mt
 	b.metatable = mt
 
 	// Distinct objects: raw equality is false, but __eq makes them equal.
-	testing.expect(t, !lua.raw_equal(&ao, &bo), "distinct userdata are not raw-equal")
-	testing.expect(t, lua.vm_equalobj(L, &ao, &bo), "__eq reports them equal")
+	testing.expect(t, !kernel.raw_equal(&ao, &bo), "distinct userdata are not raw-equal")
+	testing.expect(t, kernel.vm_equalobj(L, &ao, &bo), "__eq reports them equal")
 
 	pop_root(L) // mt
 	pop_root(L) // b
@@ -123,9 +123,9 @@ udata_eq_metamethod_honored :: proc(t: ^testing.T) {
 // truthy result on the stack, matching the C-function calling convention.
 @(private = "file")
 udata_eq_true :: proc "c" (Lp: rawptr) -> i32 {
-	L := (^lua.State)(Lp)
+	L := (^kernel.State)(Lp)
 	// Push `true` as the single return value.
-	lua.set_bool(&L.stack[L.top].val, true)
+	kernel.set_bool(&L.stack[L.top].val, true)
 	L.top += 1
 	return 1
 }
@@ -147,23 +147,23 @@ udata_finalizer :: proc "c" (Lp: rawptr) -> i32 {
 // through it). We enroll an unrooted userdata and confirm its `__gc` fired once.
 @(test)
 udata_gc_finalizer_runs :: proc(t: ^testing.T) {
-	L := lua.new_state(lua.default_allocator())
+	L := kernel.new_state(kernel.default_allocator())
 	testing.expect(t, L != nil)
-	defer lua.close_state(L)
+	defer kernel.close_state(L)
 
 	udata_final_count = 0
 
-	mt := lua.table_new(L)
-	push_root(L, lua.obj2gco(mt))
-	gcval: lua.TValue
-	lua.set_c_function(&gcval, udata_finalizer)
+	mt := kernel.table_new(L)
+	push_root(L, kernel.obj2gco(mt))
+	gcval: kernel.TValue
+	kernel.set_c_function(&gcval, udata_finalizer)
 	set_str_field(L, mt, "__gc", &gcval)
 
 	victim := new_udata(L) // deliberately not rooted
 	victim.metatable = mt
-	lua.gc_checkfinalizer(L, lua.obj2gco(victim), mt)
+	kernel.gc_checkfinalizer(L, kernel.obj2gco(victim), mt)
 
-	lua.api_gc(L, lua.GCCOLLECT)
+	kernel.api_gc(L, kernel.GCCOLLECT)
 	testing.expect_value(t, udata_final_count, 1)
 
 	pop_root(L) // mt

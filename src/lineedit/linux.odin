@@ -5,7 +5,7 @@ package lineedit
 
 import "core:os"
 import linux "core:sys/linux"
-import stream "luao:stream"
+import stream "lang:stream"
 
 linux_winsize :: struct {
 	rows, cols, xpixel, ypixel: u16,
