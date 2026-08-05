@@ -194,9 +194,11 @@ Kept deliberately small and always documented:
 
 Two more, inherited from the platform rather than from our own choices:
 `files.lua` in the PUC-Rio suite stops on Windows at its `/dev/null` test, since
-that Unix device does not exist there and reference Lua fails identically; and
-the `T` internal C test library the suite optionally uses is absent, which the
-suite itself handles. Both are covered in `tests/puc/README.md`.
+that Unix device does not exist there and reference Lua fails identically — and
+on macOS it stops slightly later at `/dev/full`, which is a Linux-only device;
+only Linux runs that file to completion. The other is the `T` internal C test
+library the suite optionally uses, which is absent and which the suite itself
+handles. Both are covered in `tests/puc/README.md`.
 
 ## License
 

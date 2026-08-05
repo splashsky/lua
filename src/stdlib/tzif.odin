@@ -461,80 +461,45 @@ POSIX_TZ_Parse :: proc(s: string) -> (POSIX_TZ_Rule, bool) {
 	return r, at == len(s)
 }
 
-@(private = "file")
-tz_rule_leap :: proc(year: i64) -> bool {
-	return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-}
+// The Gregorian calendar transforms these rules need are the same ones `oslib.odin`
+// already implements for `os.date`/`os.time` -- `is_leap`, `floor_div`,
+// `days_from_civil`, and `civil_from_days`. They live in the same `stdlib` package,
+// so this file calls them directly rather than keeping a second copy: two
+// independent implementations of the same calendar are exactly the kind of pair
+// that drifts apart silently.
 
-@(private = "file")
-tz_rule_floor_div :: proc(a, b: i64) -> i64 {
-	q := a / b
-	if a % b < 0 {
-		q -= 1
-	}
-	return q
-}
-
-@(private = "file")
-tz_rule_days :: proc(year: i64, month, day: int) -> i64 {
-	y := year
-	if month <= 2 {
-		y -= 1
-	}
-	era := tz_rule_floor_div(y, 400)
-	yoe := y - era * 400
-	mp := i64(month + (month > 2 ? -3 : 9))
-	return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 +
-		(153 * mp + 2) / 5 + i64(day) - 1 - 719468
-}
-
-@(private = "file")
-tz_rule_year_from_days :: proc(days: i64) -> i64 {
-	z := days + 719468
-	era := tz_rule_floor_div(z, 146097)
-	doe := z - era * 146097
-	yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
-	y := yoe + era * 400
-	doy := doe - (365 * yoe + yoe / 4 - yoe / 100)
-	mp := (5 * doy + 2) / 153
-	month := int(mp + (mp < 10 ? 3 : -9))
-	if month <= 2 {
-		y += 1
-	}
-	return y
-}
 
 @(private = "file")
 posix_rule_day :: proc(year: i64, r: POSIX_Transition_Rule) -> i64 {
 	switch r.kind {
 	case .Julian_No_Leap:
 		day := i64(r.day - 1)
-		if tz_rule_leap(year) && r.day >= 60 {
+		if is_leap(year) && r.day >= 60 {
 			day += 1
 		}
 		return day
 	case .Julian:
 		return i64(r.day)
 	case .Month_Week_Day:
-		first := tz_rule_days(year, r.month, 1)
+		first := days_from_civil(year, r.month, 1)
 		first_weekday := int((first + 4) % 7)
 		if first_weekday < 0 {
 			first_weekday += 7
 		}
 		day := 1 + (r.weekday - first_weekday + 7) % 7 + (r.week - 1) * 7
-		next_month := r.month == 12 ? tz_rule_days(year + 1, 1, 1) :
-			tz_rule_days(year, r.month + 1, 1)
-		if tz_rule_days(year, r.month, day) >= next_month {
+		next_month := r.month == 12 ? days_from_civil(year + 1, 1, 1) :
+			days_from_civil(year, r.month + 1, 1)
+		if days_from_civil(year, r.month, day) >= next_month {
 			day -= 7
 		}
-		return tz_rule_days(year, r.month, day) - tz_rule_days(year, 1, 1)
+		return days_from_civil(year, r.month, day) - days_from_civil(year, 1, 1)
 	}
 	return 0
 }
 
 @(private = "file")
 posix_transition_utc :: proc(year: i64, r: POSIX_Transition_Rule, before_offset: i64) -> i64 {
-	return tz_rule_days(year, 1, 1) * 86400 +
+	return days_from_civil(year, 1, 1) * 86400 +
 		posix_rule_day(year, r) * 86400 + r.seconds - before_offset
 }
 
@@ -544,8 +509,8 @@ POSIX_TZ_At :: proc(r: POSIX_TZ_Rule, timestamp: i64) -> TZif_Local_Type {
 	}
 	// The rule's year is a local-calendar concept. Standard local time gives a
 	// stable year even while the daylight offset is active.
-	local_days := tz_rule_floor_div(timestamp + r.standard_offset, 86400)
-	year := tz_rule_year_from_days(local_days)
+	local_days := floor_div(timestamp + r.standard_offset, 86400)
+	year, _, _ := civil_from_days(local_days)
 	start := posix_transition_utc(year, r.start, r.standard_offset)
 	end := posix_transition_utc(year, r.end, r.daylight_offset)
 	dst := start < end ? timestamp >= start && timestamp < end :

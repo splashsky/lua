@@ -276,3 +276,34 @@ str_metatable_methods :: proc(t: ^testing.T) {
 		"return 'ok'"
 	testing.expect(t, str_eval(t, L, src) == "ok", "string metatable methods")
 }
+
+@(test)
+str_format_pointer_padding :: proc(t: ^testing.T) {
+	L := str_state()
+	defer kernel.close_state(L)
+	// %p goes through the same width/flag machinery as every other conversion.
+	// The pointer value itself is not reproducible, so assert on the field shape:
+	// width, which side the padding lands on, and the null spelling.
+	//
+	// The `%--30p` case is the one that regressed historically: printf allows a
+	// flag to repeat, and a parser that reads a single '-' and then demands a
+	// digit silently drops the width.
+	src :=
+		"local t = {}\n" +
+		"local bare = string.format('%p', t)\n" +
+		"assert(#bare > 0)\n" +
+		"local right = string.format('%30p', t)\n" +
+		"assert(#right == 30, 'width applies')\n" +
+		"assert(right:sub(-#bare) == bare, 'right justified by default')\n" +
+		"assert(right:sub(1, 1) == ' ', 'pads with spaces, not zeros')\n" +
+		"local left = string.format('%-30p', t)\n" +
+		"assert(#left == 30, 'width applies with -')\n" +
+		"assert(left:sub(1, #bare) == bare, 'left justified with -')\n" +
+		"local twice = string.format('%--30p', t)\n" +
+		"assert(#twice == 30, 'repeated - keeps the width')\n" +
+		"assert(twice == left, 'repeated - matches a single -')\n" +
+		"assert(string.format('%p', nil) == '(null)')\n" +
+		"assert(string.format('%10p', nil) == '    (null)')\n" +
+		"return 'ok'"
+	testing.expect(t, str_eval(t, L, src) == "ok", "%p width and flag handling")
+}

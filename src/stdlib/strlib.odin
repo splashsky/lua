@@ -1791,39 +1791,24 @@ format_float :: proc "contextless" (
 	)
 }
 
+// `%p` accepts only `-` and a width (see FMTFLAGS_C at the call site), but it is
+// still a printf conversion, and printf allows a flag to repeat. Routing it through
+// the shared option parser rather than a bespoke one keeps that true: the previous
+// hand-rolled parser recognised a single leading `-` and then expected a digit, so
+// a repeated flag like `%--30p` silently lost its width. `allow_zero` is false
+// because a pointer is never zero-padded.
 @(private = "file")
 format_pointer :: proc "contextless" (buf, form: []u8, p: rawptr) -> int {
-	i := 1
-	left := form[i] == '-'
-	if left {i += 1}
-	width := 0
-	for kernel.is_digit(int(form[i])) {
-		width = width * 10 + int(form[i] - '0')
-		i += 1
-	}
+	o := parse_format_options(form)
 	value: [32]u8
 	n := 0
 	if p == nil {
+		// Reference substitutes the literal "(null)" and formats it as a string.
 		n = copy(value[:], "(null)")
 	} else {
 		n = kernel.pointer_to_str(value[:], p)
 	}
-	padding := max(width - n, 0)
-	out := 0
-	if !left {
-		for _ in 0..<padding {
-			buf[out] = ' '
-			out += 1
-		}
-	}
-	out += copy(buf[out:], value[:n])
-	if left {
-		for _ in 0..<padding {
-			buf[out] = ' '
-			out += 1
-		}
-	}
-	return out
+	return assemble_field(buf, o, nil, value[:n], false)
 }
 
 @(private = "file")

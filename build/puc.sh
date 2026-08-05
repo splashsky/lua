@@ -18,8 +18,11 @@
 #     library `T` is intentionally absent (we ship no ltests build); every suite
 #     file guards its `T` usage with `not T or ...`, so those checks are skipped
 #     cleanly rather than failing.
-#   * Unlike Windows, /dev/null and /dev/full exist here, so files.lua runs to
-#     completion. See tests/puc/README.md for the full list of deviations.
+#   * Unlike Windows, /dev/null exists here, so files.lua gets past the test that
+#     aborts the suite on Windows. /dev/full is a Linux-only device, though: on
+#     macOS and the BSDs it does not exist, so files.lua still fails at that block
+#     there -- reference Lua fails identically on the same machine. Only Linux
+#     runs files.lua to completion. See tests/puc/README.md for every deviation.
 
 set -euo pipefail
 

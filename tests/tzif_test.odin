@@ -146,3 +146,33 @@ tzif_rejects_malformed_images :: proc(t: ^testing.T) {
 	_, bad_index_ok := stdlib.TZif_Parse(image[:])
 	testing.expect(t, !bad_index_ok, "an out-of-range transition type is rejected")
 }
+
+@(test)
+tzif_posix_rule_before_the_epoch :: proc(t: ^testing.T) {
+	// The rule arithmetic shares oslib's Gregorian transforms, which use floor
+	// division precisely so negative (pre-1970) day counts stay correct. Modern
+	// timestamps never exercise that branch, so pin it down here.
+	//
+	// 1960-01-01 was a Friday, so 1960-03-01 was a Tuesday and the second Sunday
+	// of March 1960 is the 13th; 1960-11-01 was also a Tuesday, so the first
+	// Sunday of November 1960 is the 6th. January is therefore standard time and
+	// July is daylight time, exactly as in a modern year.
+	rule, ok := stdlib.POSIX_TZ_Parse("EST5EDT,M3.2.0,M11.1.0")
+	testing.expect(t, ok, "the POSIX rule parses")
+
+	winter := stdlib.POSIX_TZ_At(rule, -314366400) // 1960-01-15 12:00 UTC
+	testing.expect(t, winter.offset == -18000 && !winter.is_dst &&
+		winter.abbreviation == "EST", "standard time in a pre-epoch winter")
+
+	summer := stdlib.POSIX_TZ_At(rule, -299851200) // 1960-07-01 12:00 UTC
+	testing.expect(t, summer.offset == -14400 && summer.is_dst &&
+		summer.abbreviation == "EDT", "daylight time in a pre-epoch summer")
+
+	// Straddle the 1960 spring transition itself. DST starts 1960-03-13 02:00 local
+	// standard time, which is 07:00 UTC: 72 days into a leap year (31 + 29 + 12)
+	// from 1960-01-01, itself -315619200.
+	just_before := stdlib.POSIX_TZ_At(rule, -309373201) // 1960-03-13 06:59:59 UTC
+	just_after := stdlib.POSIX_TZ_At(rule, -309373200) // 1960-03-13 07:00:00 UTC
+	testing.expect(t, !just_before.is_dst, "still standard one second before the spring jump")
+	testing.expect(t, just_after.is_dst, "daylight exactly at the spring jump")
+}

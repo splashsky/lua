@@ -62,7 +62,7 @@ Civil_Time :: struct {
 	zone:   string,
 }
 
-@(private = "file")
+@(private)
 floor_div :: proc(a, b: i64) -> i64 {
 	q := a / b
 	if a % b < 0 {
@@ -76,7 +76,7 @@ floor_mod :: proc(a, b: i64) -> i64 {
 	return a - floor_div(a, b) * b
 }
 
-@(private = "file")
+@(private)
 is_leap :: proc(y: i64) -> bool {
 	return y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
 }
@@ -84,7 +84,7 @@ is_leap :: proc(y: i64) -> bool {
 // Howard Hinnant's days-from-civil transform, shifted to Unix day zero. The
 // March-based year makes February the last month, so leap-day handling becomes a
 // single era correction instead of a nest of month special cases.
-@(private = "file")
+@(private)
 days_from_civil :: proc(y: i64, m, d: int) -> i64 {
 	y := y
 	if m <= 2 {
@@ -101,7 +101,7 @@ days_from_civil :: proc(y: i64, m, d: int) -> i64 {
 // The inverse transform peels a Unix day back into a 400-year era, a year
 // within that era, and finally a March-based month. Both procedures use floor
 // division, which is the important detail that keeps dates before 1970 correct.
-@(private = "file")
+@(private)
 civil_from_days :: proc(z: i64) -> (y: i64, m, d: int) {
 	z0 := z + 719468
 	era := floor_div(z0, 146097)

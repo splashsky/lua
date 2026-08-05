@@ -767,16 +767,13 @@ do_protectedparser :: proc(L: ^State, z: ^Zio, name: string, mode: string) -> Th
 	mbuffer_init(&p.buff)
 	status := do_pcall(L, f_parser, &p, L.top, L.errfunc)
 	mbuffer_free(L, &p.buff)
-	// Free the three dynamic parser arrays (each may be nil if never grown).
-	if p.dyd.actvar.arr != nil {
-		state_free(L, p.dyd.actvar.arr, uint(p.dyd.actvar.size) * size_of(Vardesc))
-	}
-	if p.dyd.gt.arr != nil {
-		state_free(L, p.dyd.gt.arr, uint(p.dyd.gt.size) * size_of(Labeldesc))
-	}
-	if p.dyd.label.arr != nil {
-		state_free(L, p.dyd.label.arr, uint(p.dyd.label.size) * size_of(Labeldesc))
-	}
+	// Free the three dynamic parser arrays. `state_free` already ignores a nil
+	// block, and an array that never grew has both a nil pointer and a zero size,
+	// so no guard is needed here -- reference calls `luaM_freearray` unconditionally
+	// for the same reason.
+	state_free(L, p.dyd.actvar.arr, uint(p.dyd.actvar.size) * size_of(Vardesc))
+	state_free(L, p.dyd.gt.arr, uint(p.dyd.gt.size) * size_of(Labeldesc))
+	state_free(L, p.dyd.label.arr, uint(p.dyd.label.size) * size_of(Labeldesc))
 	decnny(L)
 	return status
 }

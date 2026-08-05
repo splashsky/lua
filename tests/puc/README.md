@@ -53,11 +53,17 @@ correctness work.
 These are intentional, documented differences — not defects — consistent with the
 project's scope decisions (see `docs/ARCHITECTURE.md`).
 
-- **`files.lua` — Unix device files (Windows only).** Near its end, `files.lua`
+- **`files.lua` — Unix device files.** Near its end, `files.lua`
   opens the Unix special files `/dev/null` and `/dev/full` to test flushing and
-  write-error handling. Those paths don't exist on Windows, so the file aborts
-  there — reference Lua on Windows fails at the exact same point. On macOS/Linux,
-  where the devices exist, `files.lua` runs to completion.
+  write-error handling. Neither path exists on Windows, so the file aborts
+  there — reference Lua on Windows fails at the exact same point. On Linux,
+  where both devices exist, `files.lua` runs to completion.
+
+  **macOS is a third case:** it provides `/dev/null` but *not* `/dev/full`,
+  which is a Linux-specific device. `files.lua` therefore reaches the
+  `/dev/full` block and fails there on macOS, again exactly as reference Lua
+  does on the same machine. This is a property of the platform, not of this
+  implementation.
 
   `files.lua` is the **last** file `all.lua` runs, so every other suite file has
   already completed by then. To measure exactly how much this hides, run
