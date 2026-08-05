@@ -22,26 +22,26 @@
 with no native linker/SDK. This is the quickest way to confirm the code is sound:
 
 ```sh
-odin check src            -collection:luao=src   # the `lua` CLI (package main)
-odin check src/luac       -collection:luao=src   # the `luac` CLI (package main)
-odin check src/lua        -collection:luao=src -no-entry-point   # kernel library
-odin check src/stdlib     -collection:luao=src -no-entry-point   # stdlib library
-odin check tests          -collection:luao=src                   # the test package
+odin check src            -collection:lang=src   # the interpreter CLI (package main)
+odin check src/compiler   -collection:lang=src   # the compiler CLI (package main)
+odin check src/kernel     -collection:lang=src -no-entry-point   # kernel library
+odin check src/stdlib     -collection:lang=src -no-entry-point   # stdlib library
+odin check tests          -collection:lang=src                   # the test package
 ```
 
 The convenience wrappers `build/check.ps1` (Windows) and `build/check.sh` (Unix) run
 all of these for you.
 
-## The `luao` collection
+## The `lang` collection
 
 Odin compiles a whole directory as a single package, and packages find each other
 through *collections*. Every build/test command in this repo passes:
 
 ```
--collection:luao=<repo>/src
+-collection:lang=<repo>/src
 ```
 
-which lets any package import its siblings as `luao:lua`, `luao:stdlib`, and so on,
+which lets any package import its siblings as `lang:kernel`, `lang:stdlib`, and so on,
 independent of where the repo is checked out. The provided scripts set this for you.
 
 ## Build
@@ -49,8 +49,8 @@ independent of where the repo is checked out. The provided scripts set this for 
 macOS / Linux:
 
 ```sh
-./build/build.sh          # build the standalone `lua` CLI (default)
-./build/build.sh luac     # build the `luac` compiler
+./build/build.sh          # build the standalone interpreter CLI (default)
+./build/build.sh compiler # build the bytecode compiler
 ./build/build.sh all      # build both
 DEBUG=1 ./build/build.sh  # debug build
 ```
@@ -58,13 +58,69 @@ DEBUG=1 ./build/build.sh  # debug build
 Windows (PowerShell):
 
 ```powershell
-.\build\build.ps1          # build the standalone `lua` CLI (default)
-.\build\build.ps1 luac     # build the `luac` compiler
+.\build\build.ps1          # build the standalone interpreter CLI (default)
+.\build\build.ps1 compiler # build the bytecode compiler
 .\build\build.ps1 all      # build both
 .\build\build.ps1 lua -DebugBuild
 ```
 
-Binaries land in `build/out/`.
+Binaries land in `build/out/`, named after the brand (`lua` / `luac` by default).
+
+## Branding
+
+This runtime hardcodes no language name. The source uses neutral identifiers
+(`api_*`, `code_*`, `State`; see docs/ARCHITECTURE.md), and every user-visible
+*value* is an Odin `#config` constant declared in `src/kernel/brand.odin`:
+
+| `-define:` knob   | Default                                      | Drives |
+|-------------------|----------------------------------------------|--------|
+| `BRAND`           | `Lua`                                        | `_VERSION`, the `-v` banner, `debug.getinfo().what`, the bytecode signature, type names in error messages |
+| `BRAND_LOWER`     | `lua`                                        | the program names (`lua`, `luac`, `luac.out`), the `package.path` directory component, the `debug.debug()` prompt, `os.tmpname`'s prefix |
+| `SOURCE_EXT`      | `.lua`                                       | the `package.path` templates |
+| `ENV_PREFIX`      | `LUA`                                        | `LUA_INIT`, `LUA_INIT_5_5`, `LUA_PATH`, `LUA_PATH_5_5`, `LUA_CPATH`, `LUA_NOENV` |
+| `NATIVE_OPEN_FMT` | `luaopen_%s`                                 | the entry-point symbol a native extension module must export |
+| `COPYRIGHT_TEXT`  | `Copyright (C) 1994-2025 Lua.org, PUC-Rio`   | the `-v` banner |
+| `AUTHORS_TEXT`    | `R. Ierusalimschy, L. H. de Figueiredo, W. Celes` | credits |
+
+Odin cannot parameterize *identifiers* with `-define:` — defines produce values,
+not names — which is exactly why the source names are already neutral. Only data
+is configurable.
+
+The build scripts wrap all of this behind one argument, which also names the
+output binaries:
+
+```sh
+BRAND=moon ./build/build.sh all       # moon, moonc
+```
+
+```powershell
+.\build\build.ps1 all -Brand moon     # moon.exe, moonc.exe
+```
+
+`-Brand lua` (the default) passes **no** defines at all, so the default build is
+bit-for-bit the configuration the PUC-Rio suite validates. `-Display`,
+`-SourceExt` and `-EnvPrefix` (`BRAND_DISPLAY`, `SOURCE_EXT`, `ENV_PREFIX` on
+Unix) override individual knobs.
+
+To verify a rebranded build end to end:
+
+```sh
+./build/rebrand-smoke.sh              # or: .\build\rebrand-smoke.ps1
+```
+
+It checks the banner, `_VERSION`, `debug.getinfo().what`, the `package.path`
+templates, `require` of a module with the new extension, the brand-prefixed
+`*_INIT` variable, and the precompiled-chunk signature.
+
+> **Bytecode is deliberately not portable across brands.** The precompiled-chunk
+> signature is `ESC` followed by `BRAND` (`\x1bLua` by default), so a rebranded
+> compiler's dumps are rejected by a differently-branded interpreter rather than
+> silently misread. The default profile stays byte-compatible with reference
+> `luac` — `build/clitest.*` asserts exactly that when you point it at one.
+
+> The PUC-Rio suite is the oracle for the **default** profile only: it hardcodes
+> `_VERSION == "Lua 5.5"`, `.lua` paths, and `what == 'Lua'`. Rebranded builds are
+> validated by `rebrand-smoke` instead.
 
 ## Freestanding object
 
@@ -81,8 +137,9 @@ FREESTANDING_TARGET=freestanding_amd64_sysv ./build/build.sh freestanding
 .\build\build.ps1 freestanding -FreestandingTarget freestanding_amd64_sysv
 ```
 
-It emits one `build/out/lua-freestanding.o` on Unix or
-`build/out/lua-freestanding.obj` on Windows using:
+It emits one `build/out/<brand>-freestanding.o` on Unix or
+`build/out/<brand>-freestanding.obj` on Windows (`lua-freestanding.*` by
+default) using:
 
 ```
 -target:freestanding_amd64_sysv -no-crt -default-to-nil-allocator
@@ -90,12 +147,12 @@ It emits one `build/out/lua-freestanding.o` on Unix or
 ```
 
 This is a relocatable object for an embedder or firmware link, not a runnable
-program. The embedder must call `lua.new_state` with its own `lua.Allocator`;
-the hosted `lua.default_allocator` is intentionally not declared.
+program. The embedder must call `kernel.new_state` with its own `kernel.Allocator`;
+the hosted `kernel.default_allocator` is intentionally not declared.
 The emitted object also provides the C-ABI convenience exports
-`luao_freestanding_newstate` and `luao_freestanding_close`.
+`lang_freestanding_newstate` and `lang_freestanding_close`.
 
-The wrappers add `-define:LUA_FREESTANDING_WIN64_ABI=true` only for the
+The wrappers add `-define:FREESTANDING_WIN64_ABI=true` only for the
 `freestanding_amd64_win64` and `freestanding_amd64_mingw` triples. Odin selects
 the freestanding source set without help, but does not currently expose that
 amd64 sub-ABI to source code; the jump shim must know which nonvolatile
@@ -133,7 +190,7 @@ under the hood.
 > and then runs it; if the output path contains a space (e.g. an `OneDrive - Microsoft`
 > path), Odin mis-tokenizes it and fails with `Unknown argument encountered '-'`.
 > `build/test.ps1` avoids this by writing the test binary to a space-free temp
-> directory (`%TEMP%\luao-tests`). If you invoke `odin test` by hand from such a path,
+> directory (`%TEMP%\lang-tests-<brand>`). If you invoke `odin test` by hand from such a path,
 > pass `-out:` to a space-free location yourself.
 
 ## Comparing against reference Lua (differential tests & benchmarks)

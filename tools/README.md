@@ -22,7 +22,7 @@ The corpus is deliberately weighted toward the cases that break naive implementa
 Run it from the repository root:
 
 ```powershell
-odin run tools/strtod_verify -collection:luao=src -o:speed
+odin run tools/strtod_verify -collection:lang=src -o:speed
 ```
 
 It reports how many cases it checked in each category and fails loudly on any mismatch.

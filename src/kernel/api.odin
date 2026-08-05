@@ -1220,7 +1220,7 @@ api_dump :: proc(L: ^State, writer: Writer, data: rawptr, strip: bool) -> i32 {
 	if is_lua_closure(o) {
 		status = dump_chunk(L, api_closure_value(o).p, writer, data, strip)
 	}
-	L.top = otop // drop the aux table luaU_dump anchored
+	L.top = otop // drop the aux table dump_chunk anchored
 	return status
 }
 
@@ -1288,7 +1288,7 @@ api_toclose :: proc(L: ^State, idx: int) {
 api_error :: proc(L: ^State) -> ! {
 	api_checknelems(L, 1)
 	debug_errormsg(L)
-	unreachable() // luaG_errormsg always throws; this satisfies the `-> !` contract
+	unreachable() // debug_errormsg always throws; this satisfies the `-> !` contract
 }
 
 // Parse a string into a pushed number -- reference `lua_stringtonumber`. Returns

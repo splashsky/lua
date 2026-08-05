@@ -1586,10 +1586,10 @@ code_posfix :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc, line: int) {
 	}
 	#partial switch opr {
 	case .OPR_AND:
-		code_concat(fs, &e2.f, e1.f) // list closed by luaK_infix
+		code_concat(fs, &e2.f, e1.f) // list closed by code_infix
 		e1^ = e2^
 	case .OPR_OR:
-		code_concat(fs, &e2.t, e1.t) // list closed by luaK_infix
+		code_concat(fs, &e2.t, e1.t) // list closed by code_infix
 		e1^ = e2^
 	case .OPR_CONCAT:
 		code_exp2nextreg(fs, e2)

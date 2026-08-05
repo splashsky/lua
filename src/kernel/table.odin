@@ -1152,7 +1152,7 @@ setnodevector :: proc(L: ^State, t: ^Table, size: u32) -> Thread_Status {
 	lsize := ceil_log2(size)
 	if int(lsize) > MAXHBITS || uint(twoto(lsize)) > MAXHSIZE {
 		debug_runerror(L, "table overflow")
-		return .Err_Run // unreachable: luaG_runerror throws
+		return .Err_Run // unreachable: debug_runerror throws
 	}
 	realsize := twoto(lsize)
 	// Hash parts at or above the cursor threshold get a `lastfree` box allocated
@@ -1252,7 +1252,7 @@ table_resize :: proc(L: ^State, t: ^Table, newasize: u32, nhsize: u32) -> Thread
 	oldasize := t.asize
 	if newasize > MAXASIZE {
 		debug_runerror(L, "table overflow")
-		return .Err_Run // unreachable: luaG_runerror throws
+		return .Err_Run // unreachable: debug_runerror throws
 	}
 	newt.flags = 0
 	st := setnodevector(L, &newt, nhsize)

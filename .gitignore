@@ -28,10 +28,12 @@
 *.dylib
 
 # --- Standalone binaries built at the repo root -----------------------------
-# Our own `lua` and `luac` (and the classic luac.out dump) if built in place.
+# The interpreter and compiler (and the classic `*c.out` dump) if built in
+# place. Both are named after the brand, so the default build produces
+# `lua`/`luac`/`luac.out` and e.g. `BRAND=moon` produces `moon`/`moonc`.
 /lua
 /luac
-luac.out
+*c.out
 
 # --- Odin-native dynamic modules built for `require` testing ----------------
 # Our package library loads Odin-built shared modules (a documented deviation

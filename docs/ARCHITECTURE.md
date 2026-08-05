@@ -9,21 +9,21 @@ until you know why they are the way they are.
 
 ```
                 +------------------------------------+
-                |        src/main.odin  (lua)        |   standalone interpreter / REPL
+                |        src/main.odin               |   standalone interpreter / REPL
                 +------------------------------------+
                 +------------------------------------+
-                |        src/luac/main.odin          |   bytecode compiler / dumper
+                |        src/compiler/main.odin      |   bytecode compiler / dumper
                 +------------------------------------+
                                  |
-                                 v   (imports luao:stdlib, luao:lua)
+                                 v   (imports lang:stdlib, lang:kernel)
                 +------------------------------------+
                 |        src/stdlib  (package)       |   base/string/table/math/io/os/
                 |  auxlib + all standard libraries   |   coroutine/utf8/debug/package
                 +------------------------------------+
                                  |
-                                 v   (imports luao:lua — public API only)
+                                 v   (imports lang:kernel — public API only)
                 +------------------------------------+
-                |        src/lua  (ONE package)      |   the kernel
+                |        src/kernel  (ONE package)   |   the kernel
                 |  object state gc string table func |
                 |  tm vm do code parse lex api dump  |
                 +------------------------------------+
@@ -38,7 +38,7 @@ declarations.
 
 Odin has a hard rule: **one directory is one package, and packages may not form import
 cycles.** There is no way to split mutually-recursive code across Odin packages. So the
-entire kernel lives in **one package**, `src/lua/`, as many files that share a single
+entire kernel lives in **one package**, `src/kernel/`, as many files that share a single
 namespace (files in the same Odin package see each other's declarations with no
 `import` needed). This mirrors Lua's kernel exactly and sidesteps the cycle rule.
 
@@ -64,7 +64,7 @@ heap policy, and any panic/reset behavior. The build also passes
 reach for a platform heap that does not exist.
 
 One small build define remains for amd64 ABI selection, not platform selection:
-the wrappers set `LUA_FREESTANDING_WIN64_ABI=true` for Odin's Win64 and MinGW
+the wrappers set `FREESTANDING_WIN64_ABI=true` for Odin's Win64 and MinGW
 freestanding triples. `ODIN_OS` is correctly `Freestanding` for all of them,
 but Odin does not expose the sub-ABI needed by the assembly setjmp/longjmp shim.
 
@@ -94,6 +94,38 @@ File-to-origin map (each Odin file corresponds to reference `l*.c`/`l*.h`):
 | `api.odin`           | `lapi.h` / `lapi.c`                       |
 | `dump.odin`          | `ldump.c`                                  |
 | `undump.odin`        | `lundump.h` / `lundump.c`                 |
+| `brand.odin`         | (no origin — the build-time branding knobs) |
+
+### Naming: neutral in the source, branded at build time
+
+Nothing in the source spells the name of the language it implements. The kernel
+subsystems use neutral, semantic prefixes rather than reference Lua's `lua*_`
+initials, so a rebranded distribution needs no renaming pass:
+
+| Reference C | Here      | Reference C | Here       | Reference C | Here      |
+|-------------|-----------|-------------|------------|-------------|-----------|
+| `lua_*`     | `api_*`   | `luaK_*`    | `code_*`   | `luaS_*`    | `string_*`|
+| `luaL_*`    | `aux_*`   | `luaO_*`    | `object_*` | `luaT_*`    | `tm_*`    |
+| `luaB_*`    | `base_*`  | `luaD_*`    | `do_*`     | `luaV_*`    | `vm_*`    |
+| `luaopen_*` | `open_*`  | `luaE_*`    | `state_*`  | `luaC_*`    | `gc_*`    |
+| `luaX_*`    | `lex_*`   | `luaG_*`    | `debug_*`  | `luaF_*`    | `func_*`  |
+| `luaY_*`    | `parse_*` | `luaH_*`    | `table_*`  | `luaM_*`    | `mem_*`   |
+| `luaP_*`    | `opcode_*`| `luaZ_*`    | `zio_*`    | `LUA_*`     | (stripped)|
+
+`lua_State` is `State`, `lua_Debug` is `Debug_Info`, and `LUA_TNIL` and friends
+are simply the kernel's own `TNIL` tags.
+
+**Comment convention.** Backticked `lua*` names *in comments* are always the
+**reference C** identifier being mirrored, never a name that exists in this
+tree — that provenance is the point of those comments. When a comment means our
+code, it uses our spelling.
+
+Identifiers cannot be parameterized by `-define:` (Odin resolves names at
+compile time and defines only produce *values*), which is exactly why the names
+are neutral rather than brand-derived. Everything that *is* data —  the
+`_VERSION` string, the banner, the bytecode signature, the source extension, the
+environment-variable prefix, the search paths — lives behind the `#config`
+constants in `src/kernel/brand.odin`. See BUILDING.md for the knobs.
 
 ## Decision 2 — an explicit-frame-stack VM with a trampoline (plus real `longjmp` for errors)
 
@@ -114,8 +146,8 @@ These are **not** the same problem, and they do **not** need the same solution.
 Odin had no access to them; that was wrong. Odin's standard library binds them in
 `core:c/libc`, and on Windows the binding deliberately selects UCRT's *non-unwinding*
 `longjmp` (the plain register-restoring jump Lua wants, no SEH unwind). So `throw` /
-`run_protected` (see `src/lua/control.odin`) model `luaD_throw` / `luaD_rawrunprotected`
-faithfully: `throw` stashes the status on the innermost `Lua_Longjmp` and jumps straight
+`run_protected` (see `src/kernel/control.odin`) model `luaD_throw` / `luaD_rawrunprotected`
+faithfully: `throw` stashes the status on the innermost `Longjmp` and jumps straight
 back to the matching `run_protected`. `throw` never returns; it keeps a `Thread_Status`
 return type purely so existing `return throw(...)` propagation sites keep compiling, but
 both of its paths diverge (`longjmp` and `abort` are `-> !`). The one discipline this
@@ -134,7 +166,7 @@ uses that list *together with* `longjmp`, not instead of it. We do the same.
 So we do what reference Lua effectively models with its `CallInfo` list, but make it
 fully explicit:
 
-- Each `lua_State` owns its **value stack** and its **call-frame stack** as arrays it
+- Each `State` owns its **value stack** and its **call-frame stack** as arrays it
   manages itself — *not* the native Odin call stack.
 - Each frame records everything needed to resume it: program counter, stack base/top,
   expected result count, call kind, protected-call recovery info, any continuation
@@ -158,9 +190,9 @@ fully explicit:
 
 **Both errors and yields unwind with `longjmp`; coroutines resume over the heap frame
 stack.** `throw` long-jumps to the nearest protected boundary for a real error, and
-`lua_yieldk` long-jumps out with a `Yield` status for a suspension. What makes the yield
+`api_yieldk` long-jumps out with a `Yield` status for a suspension. What makes the yield
 *resumable* is that the coroutine's frames are heap arrays that are left intact: the
-resuming `lua_resume` walks back into them via `resume`/`unroll`/`precover` (in `do.odin`),
+resuming `api_resume` walks back into them via `resume`/`unroll`/`precover` (in `do.odin`),
 finishing the interrupted instruction (`luaV_finishOp`) or running the C continuation, and
 then trampolines onward. You cannot resume suspended Lua execution after the native frames
 that ran it have returned, so the frames must live in the heap where we can pause and

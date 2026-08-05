@@ -11,6 +11,10 @@ package tests
 //   2. the combined VERSION_NUM / VERSION_RELEASE_NUM are computed the same way,
 //   3. the human-facing RELEASE string is assembled correctly.
 // If any of these drift, something that must agree with reference Lua has broken.
+//
+// The human-facing strings carry the *brand*, which is a build-time choice, so
+// those two assertions are written against `kernel.BRAND` rather than a literal
+// "Lua" -- they still prove the string is assembled correctly, under any brand.
 
 import "core:testing"
 import kernel "lang:kernel"
@@ -31,6 +35,6 @@ combined_version_numbers_use_reference_formula :: proc(t: ^testing.T) {
 
 @(test)
 release_string_is_assembled_correctly :: proc(t: ^testing.T) {
-	testing.expect_value(t, kernel.VERSION, "Lua 5.5")
-	testing.expect_value(t, kernel.RELEASE, "Lua 5.5.0")
+	testing.expect_value(t, kernel.VERSION, kernel.BRAND + " 5.5")
+	testing.expect_value(t, kernel.RELEASE, kernel.BRAND + " 5.5.0")
 }

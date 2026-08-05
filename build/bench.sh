@@ -17,6 +17,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck source=build/brand.sh
+source "$SCRIPT_DIR/brand.sh"
 SRC_DIR="$REPO_ROOT/src"
 BENCH_DIR="$REPO_ROOT/bench"
 COLLECTION="-collection:lang=$SRC_DIR"
@@ -25,14 +28,14 @@ COLLECTION="-collection:lang=$SRC_DIR"
 # a private directory under HOME. Odin requires this output path to contain no
 # spaces, so fail clearly instead of silently producing a mis-tokenized command.
 TEMP_BASE="${TMPDIR:-${XDG_RUNTIME_DIR:-$HOME}}"
-OUT_DIR="$TEMP_BASE/luao-bench"
+OUT_DIR="$TEMP_BASE/lang-bench"
 if [[ "$OUT_DIR" =~ [[:space:]] ]]; then
     echo "Benchmark output path contains whitespace: $OUT_DIR" >&2
     echo "Set TMPDIR to a space-free directory and try again." >&2
     exit 1
 fi
 mkdir -p "$OUT_DIR"
-LUA_EXE="$OUT_DIR/lua"
+LUA_EXE="$OUT_DIR/$BRAND_EXE"
 
 NO_BUILD=0
 ISOLATED=0
@@ -54,7 +57,7 @@ fi
 
 if [[ "$NO_BUILD" -eq 0 ]]; then
     echo "==> Building lua -> $LUA_EXE"
-    odin build "$SRC_DIR" "$COLLECTION" -o:speed "-out:$LUA_EXE"
+    odin build "$SRC_DIR" "$COLLECTION" -o:speed "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" "-out:$LUA_EXE"
 fi
 
 if [[ ! -x "$LUA_EXE" ]]; then

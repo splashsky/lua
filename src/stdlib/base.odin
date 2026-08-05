@@ -148,7 +148,7 @@ base_tonumber :: proc "c" (Lp: rawptr) -> i32 {
 		}
 		s, ok := kernel.api_tolstring(L, 1)
 		if ok && kernel.api_stringtonumber(L, s) == uint(len(s)) + 1 {
-			return 1 // parsed a full numeral (pushed by lua_stringtonumber)
+			return 1 // parsed a full numeral (pushed by api_stringtonumber)
 		}
 		aux_checkany(L, 1) // there must be *some* argument
 	} else {

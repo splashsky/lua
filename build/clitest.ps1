@@ -15,33 +15,37 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$NoBuild
+    [switch]$NoBuild,
+    [string]$Brand = 'lua'
 )
 
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'brand.ps1')
+$BrandDefines = Get-BrandDefines -Brand $Brand
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
 $Collection = "-collection:lang=$SrcDir"
 
 # Build to a space-free temp dir (Odin mis-tokenizes the space in this repo's path).
-$OutDir = Join-Path $env:TEMP 'luao-clitest'
+$OutDir = Join-Path $env:TEMP "lang-clitest-$Brand"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$Lua  = Join-Path $OutDir 'lua.exe'
-$Luac = Join-Path $OutDir 'luac.exe'
+$Lua  = Join-Path $OutDir (Get-BrandExe $Brand)
+$Luac = Join-Path $OutDir (Get-BrandCompilerExe $Brand)
 
 $StackFlags = '-extra-linker-flags:/STACK:0x8000000'
 
 if (-not $NoBuild) {
     Write-Host "==> Building lua + luac"
-    & odin build $SrcDir $Collection '-o:speed' $StackFlags "-out:$Lua"
+    & odin build $SrcDir $Collection '-o:speed' $StackFlags @BrandDefines "-out:$Lua"
     if ($LASTEXITCODE -ne 0) { throw "lua build failed" }
-    & odin build (Join-Path $SrcDir 'luac') $Collection '-o:speed' "-out:$Luac"
+    & odin build (Join-Path $SrcDir 'compiler') $Collection '-o:speed' @BrandDefines "-out:$Luac"
     if ($LASTEXITCODE -ne 0) { throw "luac build failed" }
 }
 
 # A scratch directory for the fixtures we generate.
-$Work = Join-Path $env:TEMP 'luao-clitest-work'
+$Work = Join-Path $env:TEMP "lang-clitest-work-$Brand"
 if (Test-Path $Work) { Remove-Item $Work -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 

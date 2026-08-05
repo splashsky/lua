@@ -10,9 +10,12 @@
         .\build\check.ps1
 #>
 [CmdletBinding()]
-param()
+param([string]$Brand = 'lua')
 
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'brand.ps1')
+$BrandDefines = Get-BrandDefines -Brand $Brand
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
@@ -32,9 +35,9 @@ foreach ($t in $Targets) {
     $full = Join-Path $RepoRoot $t.Path
     Write-Host "==> check $($t.Path)"
     if ($t.Lib) {
-        & odin check $full $Collection -no-entry-point
+        & odin check $full $Collection @BrandDefines -no-entry-point
     } else {
-        & odin check $full $Collection
+        & odin check $full $Collection @BrandDefines
     }
     if ($LASTEXITCODE -ne 0) { $failed = $true }
 }

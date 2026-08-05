@@ -12,6 +12,8 @@
 * text=auto eol=lf
 
 # --- Force LF for all text source (repo-canonical line ending) --------------
+# `*.lua` covers the default branding profile's source extension; a rebranded
+# checkout's sources are still caught by the `* text=auto eol=lf` default above.
 *.odin   text eol=lf
 *.c      text eol=lf
 *.h      text eol=lf

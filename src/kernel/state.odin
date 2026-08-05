@@ -87,7 +87,7 @@ CIST_CCMT :: u32(8) // offset of the __call-metamethod counter (bits 8-11)
 MAX_CCMT :: u32(0xf) << CIST_CCMT // full __call counter
 CIST_RECST :: u32(12) // offset of the 3-bit recover-status field (bits 12-14)
 CIST_C :: u32(1) << (CIST_RECST + 3) // frame runs a C (Odin) function (bit 15)
-CIST_FRESH :: CIST_C << 1 // frame is a fresh `luaV_execute` invocation
+CIST_FRESH :: CIST_C << 1 // frame is a fresh `vm_execute` invocation
 CIST_CLSRET :: CIST_FRESH << 1 // frame is closing to-be-closed variables
 CIST_TBC :: CIST_CLSRET << 1 // frame has to-be-closed variables
 CIST_OAH :: CIST_TBC << 1 // saved original value of `allowhook`

@@ -832,7 +832,7 @@ finishCcall :: proc(L: ^State, ci_idx: int) {
 		ctx := L.frames[ci_idx].u.c.ctx
 		n = int(kf(rawptr(L), i32(status), ctx)) // run it
 	}
-	do_poscall(L, ci_idx, n) // finish the luaD_call
+	do_poscall(L, ci_idx, n) // finish the do_call
 }
 
 // Run every remaining suspended frame of a resumed coroutine to completion (or
@@ -914,7 +914,7 @@ resume :: proc(L: ^State, ud: rawptr) -> Thread_Status {
 				ctx := L.frames[ci_idx].u.c.ctx
 				n = int(kf(rawptr(L), i32(Thread_Status.Yield), ctx))
 			}
-			do_poscall(L, ci_idx, n) // finish the luaD_call
+			do_poscall(L, ci_idx, n) // finish the do_call
 		}
 		unroll(L, nil) // run continuation
 	}

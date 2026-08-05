@@ -1947,7 +1947,7 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 					aux_addvalue(&b) // too long and no precision: keep whole string
 				} else {
 					nb = format_string(buff[:maxitem], form[:], sbytes)
-					kernel.api_pop(L, 1) // drop the luaL_tolstring result
+					kernel.api_pop(L, 1) // drop the aux_tolstring result
 				}
 			}
 		case:

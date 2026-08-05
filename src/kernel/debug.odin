@@ -774,7 +774,7 @@ api_sethook :: proc(L: ^State, fn: Hook_Proc, mask: i32, count: i32) {
 	resethookcount(L)
 	L.hookmask = mask
 	if mask != 0 {
-		settraps(L) // so line/count hooks trip inside luaG_traceexec
+		settraps(L) // so line/count hooks trip inside debug_traceexec
 	}
 }
 

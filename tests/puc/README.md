@@ -28,7 +28,7 @@ From the repository root:
 
 ```powershell
 # Windows
-.\build\puc.ps1                 # build lua.exe, run the whole suite (all.lua)
+.\build\puc.ps1                 # build the interpreter, run the whole suite (all.lua)
 .\build\puc.ps1 -File math.lua  # run one file standalone
 ```
 

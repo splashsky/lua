@@ -15,18 +15,21 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck source=build/brand.sh
+source "$SCRIPT_DIR/brand.sh"
 SRC_DIR="$REPO_ROOT/src"
 COLLECTION="-collection:lang=$SRC_DIR"
 
 OUT_DIR="$REPO_ROOT/build/out"
 mkdir -p "$OUT_DIR"
-LUA="$OUT_DIR/lua"
-LUAC="$OUT_DIR/luac"
+LUA="$OUT_DIR/$BRAND_EXE"
+LUAC="$OUT_DIR/$BRAND_COMPILER_EXE"
 
 if [[ "${1:-}" != "--no-build" ]]; then
     echo "==> Building lua + luac"
-    odin build "$SRC_DIR" "$COLLECTION" -o:speed "-out:$LUA"
-    odin build "$SRC_DIR/luac" "$COLLECTION" -o:speed "-out:$LUAC"
+    odin build "$SRC_DIR" "$COLLECTION" -o:speed "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" "-out:$LUA"
+    odin build "$SRC_DIR/compiler" "$COLLECTION" -o:speed "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" "-out:$LUAC"
 fi
 
 WORK="$(mktemp -d)"

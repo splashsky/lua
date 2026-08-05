@@ -49,7 +49,7 @@ dbg_getinfo_function :: proc(t: ^testing.T) {
 		"local function f(a, b) return a + b end\n" +
 		"local info = debug.getinfo(f)\n" +
 		"assert(type(info) == 'table')\n" +
-		"assert(info.what == 'Lua')\n" +
+		"assert(info.what == '" + kernel.SOURCE_KIND + "')\n" +
 		"assert(info.nparams == 2)\n" +
 		"assert(info.isvararg == false)\n" +
 		"assert(info.linedefined == 1)\n" +

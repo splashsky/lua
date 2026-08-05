@@ -335,7 +335,7 @@ tm_callorderTM :: proc(L: ^State, p1: ^TValue, p2: ^TValue, event: int) -> int {
 		return 0
 	}
 	debug_ordererror(L, p1, p2) // no metamethod: raise "attempt to compare ..."
-	return 0 // unreachable (luaG_ordererror diverges); keeps the type checker happy
+	return 0 // unreachable (debug_ordererror diverges); keeps the type checker happy
 }
 
 // An ordering metamethod with one immediate numeric operand -- reference Lua's

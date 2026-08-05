@@ -38,10 +38,14 @@
 param(
     [string]$File = '',
     [switch]$NoBuild,
-    [switch]$AdaptDevices
+    [switch]$AdaptDevices,
+    [string]$Brand = 'lua'
 )
 
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'brand.ps1')
+$BrandDefines = Get-BrandDefines -Brand $Brand
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
@@ -50,9 +54,9 @@ $PucDir   = Join-Path $RepoRoot 'tests\puc'
 $Collection = "-collection:lang=$SrcDir"
 
 # Build to a space-free temp dir to dodge Odin's space-in-path tokenization bug.
-$OutDir  = Join-Path $env:TEMP 'luao-puc'
+$OutDir  = Join-Path $env:TEMP "lang-puc-$Brand"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$LuaExe  = Join-Path $OutDir 'lua.exe'
+$LuaExe  = Join-Path $OutDir (Get-BrandExe $Brand)
 
 # Windows threads default to a 1 MiB stack, too small for Lua's LUAI_MAXCCALLS
 # (200) nested C-boundary frames; reserve 128 MiB so Lua's own C-stack guard fires
@@ -61,7 +65,7 @@ $StackFlags = '-extra-linker-flags:/STACK:0x8000000'
 
 if (-not $NoBuild) {
     Write-Host "==> Building lua -> $LuaExe"
-    & odin build $SrcDir $Collection '-o:speed' $StackFlags "-out:$LuaExe"
+    & odin build $SrcDir $Collection '-o:speed' $StackFlags @BrandDefines "-out:$LuaExe"
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 }
 
@@ -76,7 +80,7 @@ if (-not (Test-Path $LuaExe)) {
 # the vendored suite in the repository stays verbatim.
 $RunDir = $PucDir
 if ($AdaptDevices) {
-    $RunDir = Join-Path $env:TEMP 'luao-puc-devices'
+    $RunDir = Join-Path $env:TEMP "lang-puc-devices-$Brand"
     Remove-Item -Recurse -Force $RunDir -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
     Copy-Item (Join-Path $PucDir '*') $RunDir -Recurse -Force

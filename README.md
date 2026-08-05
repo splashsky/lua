@@ -1,7 +1,8 @@
 # lua-odin
 
-A faithful, from-scratch reimplementation of **Lua 5.5.0** in **standard-library-only
-[Odin](https://odin-lang.org/)**.
+A faithful, from-scratch, **branding-agnostic** language runtime in
+**standard-library-only [Odin](https://odin-lang.org/)**, whose default profile is
+a reimplementation of **Lua 5.5.0**.
 
 The goal is *correctness first*: an implementation whose observable behavior matches
 reference Lua as closely as we can make it — same language semantics, same garbage
@@ -14,6 +15,24 @@ suite under [`tests/puc/`](tests/puc/), run verbatim. Differential and benchmark
 comparisons against a reference `lua`/`luac` binary are still supported — you point
 the scripts at a build of your own (see [BUILDING.md](BUILDING.md)).
 
+## Branding is a build-time choice
+
+Nothing in the source hardcodes the name of the language it implements. The
+kernel uses neutral subsystem names (`api_*`, `code_*`, `table_*`, `State`),
+and every user-visible name — the `_VERSION` string, the banner, the bytecode
+signature, the source-file extension, the environment-variable prefix, the
+`package.path` templates, the program names — is a `#config` constant in
+[`src/kernel/brand.odin`](src/kernel/brand.odin):
+
+```sh
+./build/build.sh all                # lua  / luac,  _VERSION "Lua 5.5",  *.lua
+BRAND=moon ./build/build.sh all     # moon / moonc, _VERSION "Moon 5.5", *.moon
+```
+
+The defaults reproduce Lua 5.5.0 exactly, so a plain build is the one the
+PUC-Rio suite validates. `build/rebrand-smoke.*` proves the other direction.
+See [BUILDING.md](BUILDING.md#branding) for every knob.
+
 ## Status
 
 Early scaffolding. See the phased plan and progress in the project docs. Every phase is
@@ -24,10 +43,10 @@ truthfully prove correctness (no tests fitted to pass).
 
 ```
 src/        Our Odin implementation.
-  lua/      The kernel: one Odin package (Lua's core is mutually recursive).
+  kernel/   The kernel: one Odin package (the core is mutually recursive).
   stdlib/   Standard libraries, written against the public embedding API.
-  luac/     The `luac` bytecode compiler/dumper (package main).
-  main.odin The standalone `lua` interpreter/REPL (package main).
+  compiler/ The bytecode compiler/dumper (package main).
+  main.odin The standalone interpreter/REPL (package main).
 tests/      Odin unit tests, plus the vendored PUC-Rio 5.5 suite under tests/puc.
 build/      Build/test scripts (tracked) and build output (ignored).
 docs/       Architecture and design notes.
@@ -65,7 +84,7 @@ each complete logical statement, including continuation lines. Editing is
 horizontally scrolled within one physical row; the final terminal column is
 reserved to avoid ambiguous automatic wrapping.
 
-Lines are limited to 511 input bytes, matching `LUA_MAXINPUT`; additional input
+Lines are limited to 511 input bytes, matching `MAXINPUT`; additional input
 rings the terminal bell. The editor uses fixed storage while raw mode is active,
 so allocation failure cannot strand the terminal there. Tab is displayed as
 four spaces but remains one tab byte. Ctrl-D means EOF on an empty line and
@@ -96,15 +115,16 @@ relocatable object (not an executable) with:
 .\build\build.ps1 freestanding
 ```
 
-This emits one `build/out/lua-freestanding.o` on Unix or
-`build/out/lua-freestanding.obj` on Windows for `freestanding_amd64_sysv`.
+This emits one `build/out/<brand>-freestanding.o` on Unix or
+`build/out/<brand>-freestanding.obj` on Windows (`lua-freestanding.*` by
+default) for `freestanding_amd64_sysv`.
 Set `FREESTANDING_TARGET` on Unix or pass
 `-FreestandingTarget` in PowerShell to choose another Odin freestanding target.
 The exact flags are `-target:<target> -no-crt -default-to-nil-allocator
 -no-entry-point -build-mode:obj -use-single-module`.
 For Odin's `freestanding_amd64_win64` and `freestanding_amd64_mingw`
 subtargets the wrappers additionally set
-`-define:LUA_FREESTANDING_WIN64_ABI=true`; Odin exposes the freestanding OS
+`-define:FREESTANDING_WIN64_ABI=true`; Odin exposes the freestanding OS
 automatically but currently exposes no compile-time sub-ABI value for the
 assembly jump shim.
 
@@ -114,20 +134,20 @@ remain honest compile-time failures until `jmp_set`/`jmp_long` exist for those
 architectures. Odin also cannot currently produce a cross-compiled static
 library for freestanding amd64, so the supported deliverable is the object file.
 
-The object contains the Lua kernel and base, coroutine, math, string, table, and
+The object contains the kernel and base, coroutine, math, string, table, and
 utf8 libraries. `io`, `os`, `package`, the interactive debug library, the stream
-platform layer, and the `lua`/`luac` programs are omitted because bare metal has
+platform layer, and the two standalone programs are omitted because bare metal has
 no filesystem, environment, process, or terminal. Base therefore also omits
 `print`, `loadfile`, and `dofile`; `load` from memory remains available.
 
-There is deliberately no default Lua allocator in this configuration. The
-embedder must provide a `lua.Allocator` callback and userdata to `lua.new_state`,
+There is deliberately no default allocator in this configuration. The embedder
+must provide a `kernel.Allocator` callback and userdata to `kernel.new_state`,
 plus any board-specific panic/reset behavior it needs. Odin's default allocator
 is set to nil so an accidental implicit Odin allocation cannot masquerade as a
 working heap.
 
 For object-file consumers, the artifact exports
-`luao_freestanding_newstate(alloc, ud)` and `luao_freestanding_close(L)`. The
+`lang_freestanding_newstate(alloc, ud)` and `lang_freestanding_close(L)`. The
 constructor rejects a nil callback and opens the freestanding library set.
 
 ## Intentional deviations from reference Lua

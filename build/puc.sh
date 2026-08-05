@@ -25,6 +25,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck source=build/brand.sh
+source "$SCRIPT_DIR/brand.sh"
 SRC_DIR="$REPO_ROOT/src"
 PUC_DIR="$REPO_ROOT/tests/puc"
 
@@ -32,7 +35,7 @@ COLLECTION="-collection:lang=$SRC_DIR"
 
 OUT_DIR="$REPO_ROOT/build/out"
 mkdir -p "$OUT_DIR"
-LUA_EXE="$OUT_DIR/lua"
+LUA_EXE="$OUT_DIR/$BRAND_EXE"
 
 NO_BUILD=0
 FILE=""
@@ -45,7 +48,7 @@ done
 
 if [[ "$NO_BUILD" -eq 0 ]]; then
     echo "==> Building lua -> $LUA_EXE"
-    odin build "$SRC_DIR" "$COLLECTION" -o:speed "-out:$LUA_EXE"
+    odin build "$SRC_DIR" "$COLLECTION" -o:speed "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" "-out:$LUA_EXE"
 fi
 
 if [[ ! -x "$LUA_EXE" ]]; then

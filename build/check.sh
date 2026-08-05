@@ -14,6 +14,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck source=build/brand.sh
+source "$SCRIPT_DIR/brand.sh"
 SRC_DIR="$REPO_ROOT/src"
 COLLECTION="-collection:lang=$SRC_DIR"
 
@@ -22,9 +25,11 @@ check_one() {
     local path="$1" is_lib="$2"
     echo "==> check $path"
     if [[ "$is_lib" == "1" ]]; then
-        odin check "$REPO_ROOT/$path" "$COLLECTION" -no-entry-point
+        odin check "$REPO_ROOT/$path" "$COLLECTION" \
+            "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" -no-entry-point
     else
-        odin check "$REPO_ROOT/$path" "$COLLECTION"
+        odin check "$REPO_ROOT/$path" "$COLLECTION" \
+            "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}"
     fi
 }
 

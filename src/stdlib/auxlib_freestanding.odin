@@ -871,7 +871,7 @@ findfield :: proc(L: ^kernel.State, objidx: int, level: int) -> bool {
 	if level == 0 || !kernel.api_istable(L, -1) {
 		return false
 	}
-	kernel.api_pushnil(L) // first key for lua_next
+	kernel.api_pushnil(L) // first key for api_next
 	for kernel.api_next(L, -2) {
 		if kernel.api_type(L, -2) == kernel.TSTRING { // ignore non-string keys
 			if kernel.api_rawequal(L, objidx, -1) {

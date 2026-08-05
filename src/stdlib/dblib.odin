@@ -282,7 +282,7 @@ db_setlocal :: proc "c" (Lp: rawptr) -> i32 {
 	kernel.api_xmove(L, L1, 1)
 	name, ok := kernel.api_setlocal(L1, &ar, nvar)
 	if !ok {
-		kernel.api_pop(L1, 1) // pop the value lua_setlocal didn't consume
+		kernel.api_pop(L1, 1) // pop the value api_setlocal didn't consume
 	}
 	if ok {
 		kernel.api_pushstring(L, name)
