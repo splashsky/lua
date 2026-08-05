@@ -20,15 +20,25 @@
         library `T` is intentionally absent (we ship no ltests build), and every
         suite file guards its `T` usage with `not T or ...`, so those checks are
         skipped cleanly rather than failing.
-      * On Windows, files.lua aborts partway through at its `/dev/null` /
-        `/dev/full` device tests -- those are Unix-only special files (reference
-        Lua on Windows fails there too). All io tests before that point pass. See
-        tests/puc/README.md for the full list of documented platform deviations.
+      * On Windows, files.lua reaches two tests that open Unix-only special files,
+        `/dev/null` and `/dev/full`. Reference Lua on Windows fails there too.
+        Pass `-AdaptDevices` to run the suite from a temp copy in which those two
+        device paths are adapted to the platform: `/dev/null` becomes `NUL`, and
+        the `/dev/full` block (which has no Windows equivalent -- it needs a device
+        whose writes always fail) is skipped and reported. With that, the suite runs
+        to completion and prints `final OK !!!`.
+
+        This is deliberately opt-in, and it substitutes only device *paths* -- no
+        assertion, expectation or test logic is touched. The default run remains
+        the verbatim, unmodified suite, because that is the honest oracle; this
+        switch exists to show how much of the suite the device paths were hiding.
+        See tests/puc/README.md.
 #>
 [CmdletBinding()]
 param(
     [string]$File = '',
-    [switch]$NoBuild
+    [switch]$NoBuild,
+    [switch]$AdaptDevices
 )
 
 $ErrorActionPreference = 'Stop'
@@ -59,7 +69,50 @@ if (-not (Test-Path $LuaExe)) {
     throw "lua.exe not found at $LuaExe -- run without -NoBuild first."
 }
 
-Push-Location $PucDir
+# `-AdaptDevices` runs from a throwaway copy of the suite in which the two Unix-only
+# device paths are adapted to Windows. Nothing else about the tests changes: no
+# assertion is relaxed and no expectation is rewritten, so a pass here still means
+# the interpreter satisfied the real Lua test. We copy rather than edit in place so
+# the vendored suite in the repository stays verbatim.
+$RunDir = $PucDir
+if ($AdaptDevices) {
+    $RunDir = Join-Path $env:TEMP 'luao-puc-devices'
+    Remove-Item -Recurse -Force $RunDir -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
+    Copy-Item (Join-Path $PucDir '*') $RunDir -Recurse -Force
+
+    $filesLua = Join-Path $RunDir 'files.lua'
+    $text = Get-Content $filesLua -Raw
+
+    # /dev/null has a direct Windows equivalent, so that test runs for real.
+    $text = $text -replace '/dev/null', 'NUL'
+
+    # /dev/full does not: it is a device whose every write fails with ENOSPC, and
+    # Windows offers nothing equivalent. Skip exactly that block, matched on its
+    # text rather than by line number so the edit cannot silently drift.
+    $devFull = @'
+  local f = io.output("/dev/full")
+  assert(f:write("abcd"))   -- write to buffer
+  assert(not f:flush())     -- cannot write to device
+  assert(f:write("abcd"))   -- write to buffer
+  assert(not io.flush())    -- cannot write to device
+  assert(f:close())
+'@
+    $replacement = "  -- [-AdaptDevices] /dev/full has no Windows equivalent; block skipped.`r`n"
+    $before = $text
+    $text = $text.Replace(($devFull -replace "`r`n", "`n"), $replacement)
+    if ($text -eq $before) {
+        $text = $text.Replace($devFull, $replacement)
+    }
+    if ($text -eq $before) {
+        throw "-AdaptDevices: could not find the /dev/full block in files.lua; the vendored suite may have changed."
+    }
+
+    Set-Content $filesLua $text -NoNewline
+    Write-Host "==> -AdaptDevices: /dev/null -> NUL; /dev/full block skipped (no Windows equivalent)"
+}
+
+Push-Location $RunDir
 try {
     if ($File -ne '') {
         Write-Host "==> Running suite file '$File' standalone"

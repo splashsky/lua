@@ -53,12 +53,28 @@ correctness work.
 These are intentional, documented differences — not defects — consistent with the
 project's scope decisions (see `docs/ARCHITECTURE.md`).
 
-- **`files.lua` — Unix device files (Windows only).** Partway through, `files.lua`
+- **`files.lua` — Unix device files (Windows only).** Near its end, `files.lua`
   opens the Unix special files `/dev/null` and `/dev/full` to test flushing and
   write-error handling. Those paths don't exist on Windows, so the file aborts
-  there — reference Lua on Windows fails at the exact same point. All of the io
-  library tests *before* that point pass. On macOS/Linux, where the devices exist,
-  `files.lua` runs to completion.
+  there — reference Lua on Windows fails at the exact same point. On macOS/Linux,
+  where the devices exist, `files.lua` runs to completion.
+
+  `files.lua` is the **last** file `all.lua` runs, so every other suite file has
+  already completed by then. To measure exactly how much this hides, run
+
+  ```powershell
+  .\build\puc.ps1 -AdaptDevices
+  ```
+
+  which executes the suite from a temp copy with `/dev/null` mapped to `NUL` and
+  the `/dev/full` block skipped (Windows has no device whose writes always fail).
+  Only those two device *paths* change — no assertion, expectation or test logic
+  is touched. Under that mode the suite **runs to completion and prints
+  `final OK !!!` with exit code 0**, so the two device files are the only thing
+  standing between us and a clean full-suite pass on Windows.
+
+  The plain `.\build\puc.ps1` deliberately stays verbatim, because an unmodified
+  suite is the honest oracle; `-AdaptDevices` is a diagnostic, not the default.
 
 - **`T` internal test library absent.** We do not build the reference `ltests`
   C module, so the global `T` is `nil`. The suite is written to skip `T`-gated
