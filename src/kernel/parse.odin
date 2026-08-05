@@ -337,14 +337,6 @@ isvararg :: #force_inline proc "contextless" (p: ^Proto) -> bool {
 	return (p.flag & u8(PF_VAHID | PF_VATAB)) != 0
 }
 
-// Flag that a function needs a runtime vararg *table*. Mirrors `needvatab` in
-// code.odin (which is file-private there), so we keep our own copy for the two
-// parser sites that promote a virtual vararg to a real table.
-@(private = "file")
-needvatab :: #force_inline proc "contextless" (p: ^Proto) {
-	p.flag |= PF_VATAB
-}
-
 // ---------------------------------------------------------------------------
 // Token-stream conveniences
 // ---------------------------------------------------------------------------

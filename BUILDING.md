@@ -27,10 +27,16 @@ odin check src/compiler   -collection:lang=src   # the compiler CLI (package mai
 odin check src/kernel     -collection:lang=src -no-entry-point   # kernel library
 odin check src/stdlib     -collection:lang=src -no-entry-point   # stdlib library
 odin check tests          -collection:lang=src                   # the test package
+
+# The bare-metal build selects a different set of files via `#+build freestanding`,
+# so the hosted checks above cannot catch a break in it. `odin check` rejects the
+# link-time flags (`-no-crt`, `-build-mode:obj`) and does not need them.
+odin check src/freestanding -collection:lang=src \
+    -target:freestanding_amd64_sysv -default-to-nil-allocator -no-entry-point
 ```
 
 The convenience wrappers `build/check.ps1` (Windows) and `build/check.sh` (Unix) run
-all of these for you.
+all of these for you, including the freestanding check.
 
 ## The `lang` collection
 

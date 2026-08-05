@@ -376,37 +376,6 @@ vm_gettable :: proc(
 	vm_finishget(L, t, key, ra)
 }
 
-// GETTABLE is the variable-key form used by tight Lua loops (`a[i]`, `h[k]`).
-// Keep exactly this one opcode's fast path inline instead of forcing the shared
-// helper into GETTABUP/GETFIELD as well; duplicating all four copies bloats the
-// already-large interpreter enough to lose more instruction-cache time than the
-// call removal saves. Miss handling is still only a cold call.
-@(private = "file")
-vm_gettable_hot :: #force_inline proc(
-	L: ^State,
-	ci_idx: int,
-	pc: int,
-	t: ^TValue,
-	key: ^TValue,
-	ra: int,
-) {
-	if base_type(t) == TTABLE {
-		h := (^Table)(t.value_.gc)
-		tag: Byte
-		if is_integer(key) {
-			tag = table_fastgeti(h, int_value(key), stack_value(L, ra))
-		} else {
-			tag = table_fastget(h, key, stack_value(L, ra))
-		}
-		if !tag_is_empty(tag) {
-			return
-		}
-	}
-	L.frames[ci_idx].u.l.savedpc = pc
-	L.top = L.frames[ci_idx].top
-	vm_finishget(L, t, key, ra)
-}
-
 // OP_GETI already carries an integer in the instruction, so do not manufacture
 // a TValue and route it through the generic helper on every hit. This is the
 // direct counterpart of reference's `luaV_fastgeti` macro: the array tag read is
@@ -492,44 +461,10 @@ vm_finishset :: proc(
 }
 
 // The VM's table write: `t[key] = val` -- the fast path plus `luaV_finishset`.
+// `hres` starts at HNOTATABLE so the non-table case and the failed-fast-path case
+// share one tail instead of spelling the save-and-finish sequence out twice.
 @(private = "file")
 vm_settable :: proc(
-	L: ^State,
-	ci_idx: int,
-	pc: int,
-	t: ^TValue,
-	key: ^TValue,
-	val: ^TValue,
-) {
-	if base_type(t) == TTABLE {
-		h := (^Table)(t.value_.gc)
-		hres: int
-		if is_integer(key) {
-			hres = table_fastseti(h, int_value(key), val)
-		} else {
-			hres = table_fastpset(h, key, val)
-		}
-		if hres == HOK {
-			if is_collectable(val) {
-				gc_barrierback(L, obj2gco(h))
-			}
-			return
-		}
-		L.frames[ci_idx].u.l.savedpc = pc
-		L.top = L.frames[ci_idx].top
-		vm_finishset(L, t, key, val, hres)
-		return
-	}
-	L.frames[ci_idx].u.l.savedpc = pc
-	L.top = L.frames[ci_idx].top
-	vm_finishset(L, t, key, val, HNOTATABLE)
-}
-
-// SETTABLE is the matching variable-key write opcode. As on the read side, one
-// carefully placed inline copy restores the macro-shaped fast path without
-// multiplying it across every field/upvalue opcode in the dispatch loop.
-@(private = "file")
-vm_settable_hot :: #force_inline proc(
 	L: ^State,
 	ci_idx: int,
 	pc: int,
@@ -1021,7 +956,13 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
 				rc := stack_value(L, base + getarg_C(i))
-				vm_gettable_hot(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra)
+				// GETTABLE is the variable-key form used by tight Lua loops
+				// (`a[i]`, `h[k]`), so inline its fast path here. GETTABUP and
+				// GETFIELD deliberately call the same helper out of line:
+				// inlining all three bloats the already-large dispatch loop
+				// enough to lose more instruction-cache time than the removed
+				// call saves. Miss handling stays a cold call either way.
+				#force_inline vm_gettable(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra)
 
 			case .GETI:
 				ra := base + getarg_A(i)
@@ -1044,7 +985,10 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				ra := stack_value(L, base + getarg_A(i))
 				rb := stack_value(L, base + getarg_B(i))
 				rc := vm_rkc(L, base, k, i)
-				vm_settable_hot(L, ci_idx, vm_pc_index(pc, code), ra, rb, rc)
+				// The matching variable-key write. As on the read side, exactly
+				// one inline copy restores the macro-shaped fast path without
+				// multiplying it across every field/upvalue opcode.
+				#force_inline vm_settable(L, ci_idx, vm_pc_index(pc, code), ra, rb, rc)
 
 			case .SETI:
 				ra := stack_value(L, base + getarg_A(i))

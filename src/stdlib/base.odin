@@ -1,5 +1,3 @@
-#+build !freestanding
-
 package stdlib
 
 // base.odin -- the basic library (reference `lbaselib.c`): the global functions
@@ -7,10 +5,14 @@ package stdlib
 // `pcall`, `setmetatable`, `tonumber`, `load`, ...), plus the `_G` and `_VERSION`
 // globals. Everything here is a faithful port; the C functions keep the native
 // ABI (`proc "c" (L: rawptr) -> i32`) and lean on the auxiliary library above.
+//
+// This file carries no build tag and compiles for every target. The three entries
+// that need an OS (`print`, `loadfile`, `dofile`) live in `base_hosted.odin`, and
+// the per-target registration tables live in `base_hosted.odin` and
+// `base_freestanding.odin`.
 
 import "base:runtime"
 import kernel "lang:kernel"
-import stream "lang:stream"
 
 // The name under which the global table is itself exposed (`_G`) -- reference
 // `LUA_GNAME`.
@@ -19,41 +21,14 @@ G_NAME :: "_G"
 // Every native library entry begins by restoring an Odin context and recovering
 // the typed state pointer from the raw ABI pointer. Kept as a tiny helper so each
 // function body reads like its C original.
-@(private = "file")
+@(private)
 state :: #force_inline proc "contextless" (Lp: rawptr) -> ^kernel.State {
 	return (^kernel.State)(Lp)
-}
-
-// Write bytes to the stdout object shared with io.*.
-@(private = "file")
-write_stdout :: proc(s: string) {
-	if len(s) > 0 {
-		stream.write(stream.stdout(), transmute([]u8)s)
-	}
 }
 
 // --------------------------------------------------------------------------------
 // print / warn
 // --------------------------------------------------------------------------------
-
-// `print(...)`: convert each argument with `luaL_tolstring` (honoring `__tostring`),
-// separated by tabs, then a newline -- reference `luaB_print`.
-base_print :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	n := kernel.api_gettop(L)
-	for i in 1 ..= n {
-		s := aux_tolstring(L, i) // pushes the converted string
-		if i > 1 {
-			write_stdout("\t")
-		}
-		write_stdout(s)
-		kernel.api_pop(L, 1) // pop the converted string
-	}
-	write_stdout("\n")
-	stream.flush(stream.stdout())
-	return 0
-}
 
 // `warn(...)`: compose a warning from string arguments -- reference `luaB_warn`.
 // Arguments are validated up front so a bad one cannot leave a half-emitted
@@ -475,7 +450,7 @@ base_ipairs :: proc "c" (Lp: rawptr) -> i32 {
 
 // Shared tail for `load`/`loadfile`: on success optionally install the `env`
 // upvalue; on error return `fail, message` -- reference `load_aux`.
-@(private = "file")
+@(private)
 load_aux :: proc(L: ^kernel.State, status: kernel.Thread_Status, envidx: int) -> i32 {
 	if status == .Ok {
 		if envidx != 0 {
@@ -493,7 +468,7 @@ load_aux :: proc(L: ^kernel.State, status: kernel.Thread_Status, envidx: int) ->
 
 // Validate and return a load mode, rejecting the fixed-buffer 'B' flag from Lua --
 // reference `getMode`.
-@(private = "file")
+@(private)
 getMode :: proc(L: ^kernel.State, idx: int) -> string {
 	mode := aux_optstring(L, idx, "bt")
 	for c in transmute([]u8)mode {
@@ -502,16 +477,6 @@ getMode :: proc(L: ^kernel.State, idx: int) -> string {
 		}
 	}
 	return mode
-}
-
-base_loadfile :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	fname := aux_optstring(L, 1, "")
-	mode := getMode(L, 2)
-	env := !kernel.api_isnone(L, 3) ? 3 : 0
-	status := aux_loadfilex(L, fname, mode)
-	return load_aux(L, status, env)
 }
 
 // Reader slot: a reserved stack index that holds the last chunk piece so the GC
@@ -559,26 +524,6 @@ base_load :: proc "c" (Lp: rawptr) -> i32 {
 	return load_aux(L, status, env)
 }
 
-// `dofile` continuation: return every result the chunk produced -- reference
-// `dofilecont`.
-dofilecont :: proc "c" (Lp: rawptr, status: i32, ctx: kernel.K_Context) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	return i32(kernel.api_gettop(L) - 1)
-}
-
-base_dofile :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
-	L := state(Lp)
-	fname := aux_optstring(L, 1, "")
-	kernel.api_settop(L, 1)
-	if aux_loadfilex(L, fname, "") != .Ok {
-		kernel.api_error(L)
-	}
-	kernel.api_callk(L, 0, kernel.MULTRET, 0, dofilecont)
-	return dofilecont(Lp, 0, 0)
-}
-
 // --------------------------------------------------------------------------------
 // pcall / xpcall
 // --------------------------------------------------------------------------------
@@ -622,35 +567,6 @@ base_xpcall :: proc "c" (Lp: rawptr) -> i32 {
 // --------------------------------------------------------------------------------
 // Registration
 // --------------------------------------------------------------------------------
-
-// The base-library registration table -- reference `base_funcs`. `_G`/`_VERSION`
-// are placeholders (nil func) filled in by `luaopen_base`.
-@(private = "file")
-base_funcs := []Reg {
-	{"assert", base_assert},
-	{"collectgarbage", base_collectgarbage},
-	{"dofile", base_dofile},
-	{"error", base_error},
-	{"getmetatable", base_getmetatable},
-	{"ipairs", base_ipairs},
-	{"loadfile", base_loadfile},
-	{"load", base_load},
-	{"next", base_next},
-	{"pairs", base_pairs},
-	{"pcall", base_pcall},
-	{"print", base_print},
-	{"warn", base_warn},
-	{"rawequal", base_rawequal},
-	{"rawlen", base_rawlen},
-	{"rawget", base_rawget},
-	{"rawset", base_rawset},
-	{"select", base_select},
-	{"setmetatable", base_setmetatable},
-	{"tonumber", base_tonumber},
-	{"tostring", base_tostring},
-	{"type", base_type},
-	{"xpcall", base_xpcall},
-}
 
 // Open the basic library into the global table, wiring `_G` and `_VERSION` --
 // reference `luaopen_base`.

@@ -63,6 +63,32 @@ heap policy, and any panic/reset behavior. The build also passes
 `-default-to-nil-allocator`, so an unintended Odin allocation cannot silently
 reach for a platform heap that does not exist.
 
+**Convention for platform-split files.** A target-dependent subsystem is split as
+*one untagged file holding everything shared* plus *small tagged files holding only
+what genuinely differs*. It is never split as two whole-file forks. Concretely:
+`auxlib.odin` carries no build tag and is compiled for every target, while
+`auxlib_hosted.odin` (`#+build !freestanding`) holds the file loaders,
+`luaL_newstate`, the file/exec result reporters, and the stderr warning system, and
+`auxlib_freestanding.odin` (`#+build freestanding`) holds only `aux_makeseed` —
+the single routine that is not simply *absent* on bare metal but needs a different
+body. `base.odin` follows the same shape, with `print`/`loadfile`/`dofile` in
+`base_hosted.odin`.
+
+The one deliberate exception is a registration table: `base_funcs` is spelled out
+in full in *both* `base_hosted.odin` and `base_freestanding.odin` rather than being
+assembled from a shared list plus per-target extras. Registration order determines
+the order keys are inserted into `_G`, hence that table's node layout and
+`pairs(_G)` iteration order. Lua leaves that unspecified but it is observable, so
+each target owns one explicit ordered list.
+
+Because files in one Odin package share a namespace, a helper needed by a sibling
+file should be `@(private)` (package-visible), not `@(private = "file")`. Marking it
+file-private and then re-declaring a copy next door is how duplication creeps back
+in.
+
+`build/check.*` type-checks the freestanding target alongside the hosted packages
+precisely so this split cannot rot unnoticed.
+
 One small build define remains for amd64 ABI selection, not platform selection:
 the wrappers set `FREESTANDING_WIN64_ABI=true` for Odin's Win64 and MinGW
 freestanding triples. `ODIN_OS` is correctly `Freestanding` for all of them,

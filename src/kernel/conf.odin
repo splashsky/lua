@@ -24,9 +24,25 @@ VERSION_RELEASE_N :: 0
 VERSION_NUM :: VERSION_MAJOR_N * 100 + VERSION_MINOR_N
 VERSION_RELEASE_NUM :: VERSION_NUM * 100 + VERSION_RELEASE_N
 
-VERSION_MAJOR :: "5"
-VERSION_MINOR :: "5"
-VERSION_RELEASE :: "0"
+// The decimal spellings of the same three numbers. Reference `luaconf.h` writes
+// these out by hand alongside the numeric forms, which is two sources of truth for
+// one fact -- exactly the sort of constant that goes stale. We derive them instead,
+// so bumping a number above cannot leave a stale string behind.
+//
+// The slice trick covers one decimal digit per component. If a component ever
+// reaches 10, the assertion below fails at compile time rather than silently
+// truncating, and the derivation needs widening.
+@(private = "file")
+DECIMAL_DIGITS :: "0123456789"
+
+#assert(
+	VERSION_MAJOR_N < 10 && VERSION_MINOR_N < 10 && VERSION_RELEASE_N < 10,
+	"a version component reached two digits; widen the string derivation below",
+)
+
+VERSION_MAJOR :: DECIMAL_DIGITS[VERSION_MAJOR_N:VERSION_MAJOR_N + 1]
+VERSION_MINOR :: DECIMAL_DIGITS[VERSION_MINOR_N:VERSION_MINOR_N + 1]
+VERSION_RELEASE :: DECIMAL_DIGITS[VERSION_RELEASE_N:VERSION_RELEASE_N + 1]
 
 // Human-facing strings derived from these numbers -- `VERSION` (the `_VERSION`
 // global), `RELEASE`, `COPYRIGHT`, `AUTHORS` and the bytecode `SIGNATURE` --

@@ -95,8 +95,9 @@ nvalue :: #force_inline proc "contextless" (o: ^TValue) -> Number {
 }
 
 // Mark that a function will need a runtime vararg *table* (rather than the hidden
-// register-based vararg convention). Reference `needvatab`.
-@(private = "file")
+// register-based vararg convention). Reference `needvatab`. Package-visible: the
+// parser promotes a virtual vararg to a real table at one of its own sites too.
+@(private)
 needvatab :: #force_inline proc "contextless" (p: ^Proto) {
 	p.flag |= PF_VATAB
 }

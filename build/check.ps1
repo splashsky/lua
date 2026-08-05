@@ -10,7 +10,7 @@
         .\build\check.ps1
 #>
 [CmdletBinding()]
-param([string]$Brand = 'lua')
+param([string]$Brand = 'lua', [string]$FreestandingTarget = 'freestanding_amd64_sysv')
 
 $ErrorActionPreference = 'Stop'
 
@@ -43,4 +43,14 @@ foreach ($t in $Targets) {
 }
 
 if ($failed) { throw "One or more packages failed to check." }
+
+# The bare-metal build selects a different set of files via `#+build freestanding`,
+# so the hosted checks above cannot catch a break in it. Check it explicitly, or the
+# platform split rots silently. Linker/codegen flags (-no-crt, -build-mode:obj) are
+# not accepted by `odin check` and are not needed to type-check.
+Write-Host "==> check src\freestanding ($FreestandingTarget)"
+& odin check (Join-Path $SrcDir 'freestanding') $Collection @BrandDefines `
+    "-target:$FreestandingTarget" -default-to-nil-allocator -no-entry-point
+if ($LASTEXITCODE -ne 0) { throw "Freestanding package failed to check." }
+
 Write-Host "All packages check clean."
