@@ -78,15 +78,63 @@ str_conversion_and_argument_errors :: proc(t: ^testing.T) {
 			{string.sub, 'abc', 1.5, "bad argument #2 to 'string.sub' (number has no integer representation)"},
 			{string.sub, 'abc', 1, 'x', "bad argument #3 to 'string.sub' (number expected, got string)"},
 			{string.byte, 'abc', false, "bad argument #2 to 'string.byte' (number expected, got boolean)"},
+			{string.byte, 'abc', 1, {}, "bad argument #3 to 'string.byte' (number expected, got table)"},
 			{math.abs, false, "bad argument #1 to 'math.abs' (number expected, got boolean)"},
 			{math.abs, "bad argument #1 to 'math.abs' (number expected, got no value)"},
 			{math.ult, 'x', 1, "bad argument #1 to 'math.ult' (number expected, got string)"},
+			{math.ult, 1, 1.5, "bad argument #2 to 'math.ult' (number has no integer representation)"},
+			{math.sqrt, false, "bad argument #1 to 'math.sqrt' (number expected, got boolean)"},
+			{math.deg, false, "bad argument #1 to 'math.deg' (number expected, got boolean)"},
+			{math.rad, false, "bad argument #1 to 'math.rad' (number expected, got boolean)"},
+			{math.floor, false, "bad argument #1 to 'math.floor' (number expected, got boolean)"},
+			{math.ceil, false, "bad argument #1 to 'math.ceil' (number expected, got boolean)"},
+			{math.modf, false, "bad argument #1 to 'math.modf' (number expected, got boolean)"},
+			{math.tointeger, "bad argument #1 to 'math.tointeger' (value expected)"},
+			{math.fmod, 2, 0, "bad argument #2 to 'math.fmod' (zero)"},
+			{math.fmod, 1, false, "bad argument #2 to 'math.fmod' (number expected, got boolean)"},
+			{select, "bad argument #1 to 'select' (number expected, got no value)"},
+			{select, 0, "bad argument #1 to 'select' (index out of range)"},
+			{select, false, "bad argument #1 to 'select' (number expected, got boolean)"},
+			{rawlen, false, "bad argument #1 to 'rawlen' (table or string expected, got boolean)"},
+			{rawlen, "bad argument #1 to 'rawlen' (table or string expected, got no value)"},
+			{rawequal, 1, "bad argument #2 to 'rawequal' (value expected)"},
+			{tonumber, "bad argument #1 to 'tonumber' (value expected)"},
+			{tonumber, 1, 16, "bad argument #1 to 'tonumber' (string expected, got number)"},
+			{tonumber, '1', 1, "bad argument #2 to 'tonumber' (base out of range)"},
+			{tonumber, '1', 3.5, "bad argument #2 to 'tonumber' (number has no integer representation)"},
+			{tonumber, {}, 16, "bad argument #1 to 'tonumber' (string expected, got table)"},
+			{utf8.len, false, "bad argument #1 to 'utf8.len' (string expected, got boolean)"},
+			{utf8.len, 'a', false, "bad argument #2 to 'utf8.len' (number expected, got boolean)"},
+			{utf8.len, 'a', 0, "bad argument #2 to 'utf8.len' (initial position out of bounds)"},
+			{utf8.len, 'a', 3, "bad argument #2 to 'utf8.len' (initial position out of bounds)"},
+			{utf8.len, 'a', 1, 3, "bad argument #3 to 'utf8.len' (final position out of bounds)"},
 		}
 		for _, case in ipairs(cases) do
 			local expected = table.remove(case)
 			local ok, err = pcall(table.unpack(case))
 			assert(not ok and err == expected, tostring(err))
 		end
+		local ok, err = pcall(coroutine.isyieldable, nil)
+		assert(not ok and err == "bad argument #1 to 'coroutine.isyieldable' (thread expected, got nil)", tostring(err))
+		local function nested() return 1 + math.abs(false) end
+		local traced, trace = xpcall(nested, debug.traceback)
+		assert(not traced and trace:find("bad argument #1 to 'abs' (number expected, got boolean)", 1, true))
+		assert(trace:find("stack traceback:", 1, true) and trace:find("[C]: in field 'abs'", 1, true))
+		assert(select('#', 1, nil, 3) == 3 and select(-2, 1, 2, 3) == 2)
+		assert(rawlen('abc') == 3 and rawlen({1, 2, 3}) == 3)
+		assert(rawequal(1, 1.0) and not rawequal({}, {}))
+		assert(math.abs('-2.5') == 2.5 and math.floor('3.5') == 3)
+		assert(math.tointeger('42.0') == 42 and math.tointeger(1.5) == nil)
+		assert(math.fmod(math.mininteger, -1) == 0 and math.fmod('7.5', 2) == 1.5)
+		assert(tonumber(12.5) == 12.5 and tonumber('101', 2) == 5)
+		assert(tonumber('  -0xFF ') == -255 and tonumber('x') == nil)
+		assert(tonumber(false) == nil and tonumber('ffffffffffffffff', 16) == -1)
+		assert(utf8.len('a\195\169') == 2 and utf8.len('123', -2, -1) == 2)
+		local u, pos = utf8.len('a\255')
+		assert(u == nil and pos == 2)
+		local running, ismain = coroutine.running()
+		assert(ismain and coroutine.isyieldable() == false)
+		assert(coroutine.isyieldable(running) == false)
 		return 'ok'
 	`
 	testing.expect(t, str_eval(t, L, src) == "ok", "numeric coercion and exact argument errors")

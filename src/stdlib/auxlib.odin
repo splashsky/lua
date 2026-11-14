@@ -173,6 +173,77 @@ aux_typename :: proc(L: ^kernel.State, idx: int) -> string {
 // Argument checkers
 // --------------------------------------------------------------------------------
 
+// Native entries may use these contextless helpers only for their fast paths.
+// Coercion, error reporting, allocation and other ordinary Odin calls need a
+// default context on that branch, often via a no-inline slow helper. The
+// existing aux_* API remains available unchanged to ordinary Odin callers.
+@(private)
+native_tag_error :: #force_no_inline proc "contextless" (L: ^kernel.State, arg, tag: int) -> ! {
+	context = runtime.default_context()
+	tag_error(L, arg, tag)
+}
+
+@(private)
+native_interror :: #force_no_inline proc "contextless" (L: ^kernel.State, arg: int) -> ! {
+	context = runtime.default_context()
+	interror(L, arg)
+}
+
+@(private)
+native_argerror :: #force_no_inline proc "contextless" (L: ^kernel.State, arg: int, msg: string) -> ! {
+	context = runtime.default_context()
+	aux_argerror(L, arg, msg)
+}
+
+@(private)
+native_typeerror :: #force_no_inline proc "contextless" (L: ^kernel.State, arg: int, name: string) -> ! {
+	context = runtime.default_context()
+	aux_typeerror(L, arg, name)
+}
+
+@(private)
+native_checkany :: #force_inline proc "contextless" (L: ^kernel.State, arg: int) {
+	if kernel.api_native_type(L, arg) == kernel.TNONE {native_argerror(L, arg, "value expected")}
+}
+
+@(private)
+native_checknumber :: #force_inline proc "contextless" (L: ^kernel.State, arg: int) -> kernel.Number {
+	d, ok := kernel.api_native_tonumberx(L, arg)
+	if !ok {native_tag_error(L, arg, kernel.TNUMBER)}
+	return d
+}
+
+@(private)
+native_checkinteger :: #force_inline proc "contextless" (L: ^kernel.State, arg: int) -> kernel.Integer {
+	d, ok := kernel.api_native_tointegerx(L, arg)
+	if !ok {native_interror(L, arg)}
+	return d
+}
+
+@(private)
+native_optinteger :: #force_inline proc "contextless" (L: ^kernel.State, arg: int, def: kernel.Integer) -> kernel.Integer {
+	return kernel.api_native_type(L, arg) <= kernel.TNIL ? def : native_checkinteger(L, arg)
+}
+
+@(private)
+native_checklstring :: #force_inline proc "contextless" (L: ^kernel.State, arg: int) -> string {
+	s, ok := kernel.api_native_tolstring(L, arg)
+	if !ok {native_tag_error(L, arg, kernel.TSTRING)}
+	return s
+}
+
+@(private)
+native_checkstack :: #force_inline proc "contextless" (L: ^kernel.State, n: int, msg: string) {
+	if !kernel.api_native_checkstack(L, n) {native_stack_error(L, msg)}
+}
+
+@(private)
+native_stack_error :: #force_no_inline proc "contextless" (L: ^kernel.State, msg: string) -> ! {
+	context = runtime.default_context()
+	if msg != "" {aux_error(L, "stack overflow (%s)", msg)}
+	aux_error(L, "stack overflow")
+}
+
 // Ensure the stack can grow by `space` slots, raising a descriptive stack-overflow
 // error otherwise -- reference `luaL_checkstack`.
 aux_checkstack :: proc(L: ^kernel.State, space: int, msg: string) {

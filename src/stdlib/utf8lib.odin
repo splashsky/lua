@@ -122,32 +122,31 @@ utf8_decode :: proc "contextless" (s: []u8, start: int, strict: bool) -> (next: 
 // (fail, position) if the interval is not well-formed. Reference `utflen`.
 @(private = "file")
 utf8_len :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)aux_checklstring(L, 1)
+	s := transmute([]u8)native_checklstring(L, 1)
 	ln := len(s)
-	posi := u_posrelat(aux_optinteger(L, 2, 1), ln)
-	posj := u_posrelat(aux_optinteger(L, 3, -1), ln)
-	lax := kernel.api_toboolean(L, 4)
+	posi := u_posrelat(native_optinteger(L, 2, 1), ln)
+	posj := u_posrelat(native_optinteger(L, 3, -1), ln)
+	lax := kernel.api_native_toboolean(L, 4)
 	// Reference folds a `--posi` / `--posj` into these argument checks. We keep the
 	// same bounds but decrement explicitly so the byte indices below are 0-based.
-	aux_argcheck(L, 1 <= posi, 2, "initial position out of bounds")
+	if posi < 1 {native_argerror(L, 2, "initial position out of bounds")}
 	posi -= 1
-	aux_argcheck(L, posi <= kernel.Integer(ln), 2, "initial position out of bounds")
+	if posi > kernel.Integer(ln) {native_argerror(L, 2, "initial position out of bounds")}
 	posj -= 1
-	aux_argcheck(L, posj < kernel.Integer(ln), 3, "final position out of bounds")
+	if posj >= kernel.Integer(ln) {native_argerror(L, 3, "final position out of bounds")}
 	n: kernel.Integer = 0
 	for posi <= posj {
 		next, _, ok := utf8_decode(s, int(posi), !lax)
 		if !ok {
-			aux_pushfail(L) // return fail ...
-			kernel.api_pushinteger(L, posi + 1) // ... and the offending position
+			kernel.api_native_pushnil(L) // return fail ...
+			kernel.api_native_pushinteger(L, posi + 1) // ... and the offending position
 			return 2
 		}
 		posi = kernel.Integer(next)
 		n += 1
 	}
-	kernel.api_pushinteger(L, n)
+	kernel.api_native_pushinteger(L, n)
 	return 1
 }
 

@@ -282,6 +282,16 @@ containers that panic or allocate implicitly, so an allocation failure is always
 value we can handle (`Out_Of_Memory`) rather than a crash. OOM is tested at allocation
 points, not hand-waved.
 
+Native library callbacks retain their C ABI. A hot callback may omit its usual
+`runtime.default_context()` only when its fast path calls exclusively
+`"contextless"` helpers. Coercion, allocation, formatting, error reporting, OS
+operations and other ordinary Odin calls must first establish the default context,
+either in a no-inline slow helper or only on the branch that needs it.
+`api_native_*` is a narrow positive-argument fast path for these callbacks, not a
+replacement for the embedding API: the latter keeps its existing procedure types
+and caller-supplied assertion handler. Both paths retain `API_CHECKS`; stress stack
+checks still perform forced relocation.
+
 ## Decision 5 — byte-compatible bytecode is per a fixed ABI config
 
 Lua bytecode chunks embed raw host representations (instruction words, `lua_Number`

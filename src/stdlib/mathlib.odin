@@ -39,16 +39,14 @@ PI :: 3.141592653589793238462643383279502884
 // `math.abs` -- integer stays integer (with two's-complement-safe negation so
 // abs(mininteger) wraps exactly as reference does); floats go through `fabs`.
 math_abs :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	if kernel.api_isinteger(L, 1) {
-		n := kernel.api_tointeger(L, 1)
+	if n, isint := kernel.api_native_exact_integer(L, 1); isint {
 		if n < 0 {
 			n = kernel.Integer(0 - kernel.Unsigned(n)) // avoid UB on mininteger
 		}
-		kernel.api_pushinteger(L, n)
+		kernel.api_native_pushinteger(L, n)
 	} else {
-		kernel.api_pushnumber(L, kernel.Number(math.abs(f64(aux_checknumber(L, 1)))))
+		kernel.api_native_pushnumber(L, kernel.Number(math.abs(f64(native_checknumber(L, 1)))))
 	}
 	return 1
 }
@@ -107,9 +105,8 @@ math_exp :: proc "c" (Lp: rawptr) -> i32 {
 }
 
 math_sqrt :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	kernel.api_pushnumber(L, kernel.Number(math.sqrt(f64(aux_checknumber(L, 1)))))
+	kernel.api_native_pushnumber(L, kernel.Number(math.sqrt(f64(native_checknumber(L, 1)))))
 	return 1
 }
 
@@ -139,16 +136,14 @@ math_log :: proc "c" (Lp: rawptr) -> i32 {
 // `math.deg` / `math.rad` -- degree/radian conversion by the exact constant
 // factor reference uses (grouped identically so rounding matches).
 math_deg :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	kernel.api_pushnumber(L, aux_checknumber(L, 1) * (180.0 / PI))
+	kernel.api_native_pushnumber(L, native_checknumber(L, 1) * (180.0 / PI))
 	return 1
 }
 
 math_rad :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	kernel.api_pushnumber(L, aux_checknumber(L, 1) * (PI / 180.0))
+	kernel.api_native_pushnumber(L, native_checknumber(L, 1) * (PI / 180.0))
 	return 1
 }
 
@@ -181,36 +176,34 @@ math_ldexp :: proc "c" (Lp: rawptr) -> i32 {
 // Push `d` as an integer if it fits exactly in `lua.Integer`, else as a float --
 // reference `pushnumint`.
 @(private = "file")
-pushnumint :: proc(L: ^kernel.State, d: kernel.Number) {
+pushnumint :: proc "contextless" (L: ^kernel.State, d: kernel.Number) {
 	if n, ok := kernel.number_to_integer_range(d); ok {
-		kernel.api_pushinteger(L, n)
+		kernel.api_native_pushinteger(L, n)
 	} else {
-		kernel.api_pushnumber(L, d)
+		kernel.api_native_pushnumber(L, d)
 	}
 }
 
 // `math.tointeger(x)` -- convert to integer if possible, else fail (nil).
 math_toint :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	n, valid := kernel.api_tointegerx(L, 1)
+	n, valid := kernel.api_native_tointegerx(L, 1)
 	if valid {
-		kernel.api_pushinteger(L, n)
+		kernel.api_native_pushinteger(L, n)
 	} else {
-		aux_checkany(L, 1)
-		aux_pushfail(L)
+		native_checkany(L, 1)
+		kernel.api_native_pushnil(L)
 	}
 	return 1
 }
 
 // `math.floor(x)` -- an integer is its own floor; otherwise floor then narrow.
 math_floor :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	if kernel.api_isinteger(L, 1) {
-		kernel.api_settop(L, 1)
+	if kernel.api_native_isinteger(L, 1) {
+		kernel.api_native_trimtop(L, 1)
 	} else {
-		d := math.floor(f64(aux_checknumber(L, 1)))
+		d := math.floor(f64(native_checknumber(L, 1)))
 		pushnumint(L, kernel.Number(d))
 	}
 	return 1
@@ -218,12 +211,11 @@ math_floor :: proc "c" (Lp: rawptr) -> i32 {
 
 // `math.ceil(x)` -- symmetric to floor.
 math_ceil :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	if kernel.api_isinteger(L, 1) {
-		kernel.api_settop(L, 1)
+	if kernel.api_native_isinteger(L, 1) {
+		kernel.api_native_trimtop(L, 1)
 	} else {
-		d := math.ceil(f64(aux_checknumber(L, 1)))
+		d := math.ceil(f64(native_checknumber(L, 1)))
 		pushnumint(L, kernel.Number(d))
 	}
 	return 1
@@ -232,48 +224,46 @@ math_ceil :: proc "c" (Lp: rawptr) -> i32 {
 // `math.fmod(a, b)` -- integer operands use `%` with the reference's guard
 // against the `mininteger % -1` overflow and the `% 0` error; else libc `fmod`.
 math_fmod :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	if kernel.api_isinteger(L, 1) && kernel.api_isinteger(L, 2) {
-		d := kernel.api_tointeger(L, 2)
-		if kernel.Unsigned(d) + 1 <= 1 { // d is -1 or 0
-			aux_argcheck(L, d != 0, 2, "zero")
-			kernel.api_pushinteger(L, 0) // avoid overflow of mininteger / -1
-		} else {
-			kernel.api_pushinteger(L, kernel.api_tointeger(L, 1) % d)
+	if a, aint := kernel.api_native_exact_integer(L, 1); aint {
+		if d, dint := kernel.api_native_exact_integer(L, 2); dint {
+			if kernel.Unsigned(d) + 1 <= 1 { // d is -1 or 0
+				if d == 0 {native_argerror(L, 2, "zero")}
+				kernel.api_native_pushinteger(L, 0) // avoid overflow of mininteger / -1
+			} else {
+				kernel.api_native_pushinteger(L, a % d)
+			}
+			return 1
 		}
-	} else {
-		a := f64(aux_checknumber(L, 1))
-		b := f64(aux_checknumber(L, 2))
-		kernel.api_pushnumber(L, kernel.Number(kernel.num_fmod(a, b)))
 	}
+	a := f64(native_checknumber(L, 1))
+	b := f64(native_checknumber(L, 2))
+	kernel.api_native_pushnumber(L, kernel.Number(kernel.num_fmod(a, b)))
 	return 1
 }
 
 // `math.modf(x)` -> (integer-part, fractional-part). Integer part rounds toward
 // zero; the explicit `n == ip` test keeps the fractional part 0.0 for +/-inf.
 math_modf :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	if kernel.api_isinteger(L, 1) {
-		kernel.api_settop(L, 1) // number is its own integer part
-		kernel.api_pushnumber(L, 0) // no fractional part
+	if kernel.api_native_isinteger(L, 1) {
+		kernel.api_native_trimtop(L, 1) // number is its own integer part
+		kernel.api_native_pushnumber(L, 0) // no fractional part
 	} else {
-		n := f64(aux_checknumber(L, 1))
+		n := f64(native_checknumber(L, 1))
 		ip := n < 0 ? math.ceil(n) : math.floor(n)
 		pushnumint(L, kernel.Number(ip))
-		kernel.api_pushnumber(L, kernel.Number(n == ip ? 0.0 : n - ip))
+		kernel.api_native_pushnumber(L, kernel.Number(n == ip ? 0.0 : n - ip))
 	}
 	return 2
 }
 
 // `math.ult(a, b)` -- unsigned less-than over the integer bit patterns.
 math_ult :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	a := aux_checkinteger(L, 1)
-	b := aux_checkinteger(L, 2)
-	kernel.api_pushboolean(L, kernel.Unsigned(a) < kernel.Unsigned(b))
+	a := native_checkinteger(L, 1)
+	b := native_checkinteger(L, 2)
+	kernel.api_native_pushboolean(L, kernel.Unsigned(a) < kernel.Unsigned(b))
 	return 1
 }
 

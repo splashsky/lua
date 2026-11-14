@@ -441,7 +441,7 @@ api_toboolean :: proc(L: ^State, idx: int) -> bool {
 }
 
 // Number-to-string conversion is deliberately kept out of the hot string path.
-@(private = "file")
+@(private)
 api_tolstring_slow :: #force_no_inline proc(L: ^State, idx: int, o: ^TValue) -> (string, bool) {
 	if !is_number(o) { // not convertible
 		return "", false

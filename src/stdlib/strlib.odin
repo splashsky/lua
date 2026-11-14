@@ -75,7 +75,7 @@ is_digit_byte :: #force_inline proc "contextless" (c: u8) -> bool {
 // including the "inverted comparison" `pos < -len` that avoids ever computing
 // `-pos` (which would overflow for the most-negative integer).
 @(private = "file")
-posrelatI :: proc(pos: kernel.Integer, l: int) -> int {
+posrelatI :: proc "contextless" (pos: kernel.Integer, l: int) -> int {
 	if pos > 0 {
 		return int(pos)
 	} else if pos == 0 {
@@ -91,7 +91,16 @@ posrelatI :: proc(pos: kernel.Integer, l: int) -> int {
 // `getendpos`. Note the different clipping range from `posrelatI`.
 @(private = "file")
 getendpos :: #force_inline proc(L: ^kernel.State, arg: int, def: kernel.Integer, l: int) -> int {
-	pos := aux_optinteger(L, arg, def)
+	return clipendpos(aux_optinteger(L, arg, def), l)
+}
+
+@(private = "file")
+native_getendpos :: #force_inline proc "contextless" (L: ^kernel.State, arg: int, def: kernel.Integer, l: int) -> int {
+	return clipendpos(native_optinteger(L, arg, def), l)
+}
+
+@(private = "file")
+clipendpos :: #force_inline proc "contextless" (pos: kernel.Integer, l: int) -> int {
 	if pos > kernel.Integer(l) {
 		return l
 	} else if pos >= 0 {
@@ -105,10 +114,9 @@ getendpos :: #force_inline proc(L: ^kernel.State, arg: int, def: kernel.Integer,
 
 @(private = "file")
 str_len :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	s := aux_checklstring(L, 1)
-	kernel.api_pushinteger(L, kernel.Integer(len(s)))
+	s := native_checklstring(L, 1)
+	kernel.api_native_pushinteger(L, kernel.Integer(len(s)))
 	return 1
 }
 
@@ -215,20 +223,19 @@ str_rep :: proc "c" (Lp: rawptr) -> i32 {
 
 @(private = "file")
 str_byte :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	s := transmute([]u8)aux_checklstring(L, 1)
+	s := transmute([]u8)native_checklstring(L, 1)
 	l := len(s)
-	pi := aux_optinteger(L, 2, 1)
+	pi := native_optinteger(L, 2, 1)
 	posi := posrelatI(pi, l)
-	pose := getendpos(L, 3, pi, l)
+	pose := native_getendpos(L, 3, pi, l)
 	if posi > pose {
 		return 0 // empty interval; return no values
 	}
 	n := pose - posi + 1
-	aux_checkstack(L, n, "string slice too long")
+	native_checkstack(L, n, "string slice too long")
 	for i in 0 ..< n {
-		kernel.api_pushinteger(L, kernel.Integer(s[posi + i - 1]))
+		kernel.api_native_pushinteger(L, kernel.Integer(s[posi + i - 1]))
 	}
 	return i32(n)
 }

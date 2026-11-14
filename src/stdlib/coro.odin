@@ -198,10 +198,13 @@ getoptco :: proc(L: ^kernel.State) -> ^kernel.State {
 // `luaB_yieldable`.
 @(private = "file")
 co_yieldable :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	co := getoptco(L)
-	kernel.api_pushboolean(L, kernel.api_isyieldable(co))
+	co := L
+	if kernel.api_native_type(L, 1) != kernel.TNONE {
+		co = kernel.api_native_tothread(L, 1)
+		if co == nil {native_typeerror(L, 1, "thread")}
+	}
+	kernel.api_native_pushboolean(L, kernel.api_native_isyieldable(co))
 	return 1
 }
 

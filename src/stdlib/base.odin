@@ -18,9 +18,8 @@ import kernel "lang:kernel"
 // `LUA_GNAME`.
 G_NAME :: "_G"
 
-// Every native library entry begins by restoring an Odin context and recovering
-// the typed state pointer from the raw ABI pointer. Kept as a tiny helper so each
-// function body reads like its C original.
+// Recover the typed state pointer from the raw native ABI pointer. Most entries
+// restore a context; hot entries use the contextless fast-path rule in auxlib.
 @(private)
 state :: #force_inline proc "contextless" (Lp: rawptr) -> ^kernel.State {
 	return (^kernel.State)(Lp)
@@ -58,10 +57,10 @@ base_warn :: proc "c" (Lp: rawptr) -> i32 {
 // `b_str2int`. Returns the parsed value and whether the *entire* string was a valid
 // numeral (leading/trailing spaces allowed).
 @(private = "file")
-b_str2int :: proc(s: string, base: int) -> (n: kernel.Integer, ok: bool) {
+b_str2int :: proc "contextless" (s: string, base: int) -> (n: kernel.Integer, ok: bool) {
 	i := 0
 	m := len(s)
-	is_space :: proc(c: u8) -> bool {
+	is_space :: proc "contextless" (c: u8) -> bool {
 		return c == ' ' || c == '\f' || c == '\n' || c == '\r' || c == '\t' || c == '\v'
 	}
 	for i < m && is_space(s[i]) {
@@ -113,30 +112,32 @@ b_str2int :: proc(s: string, base: int) -> (n: kernel.Integer, ok: bool) {
 
 // `tonumber(v [, base])` -- reference `luaB_tonumber`.
 base_tonumber :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	if kernel.api_isnoneornil(L, 2) {
+	if kernel.api_native_type(L, 2) <= kernel.TNIL {
 		// Standard conversion (no explicit base).
-		if kernel.api_type(L, 1) == kernel.TNUMBER {
-			kernel.api_settop(L, 1) // already a number: return it unchanged
+		if kernel.api_native_type(L, 1) == kernel.TNUMBER {
+			kernel.api_native_trimtop(L, 1) // already a number: return it unchanged
 			return 1
 		}
-		s, ok := kernel.api_tolstring(L, 1)
-		if ok && kernel.api_stringtonumber(L, s) == uint(len(s)) + 1 {
-			return 1 // parsed a full numeral (pushed by api_stringtonumber)
+		s, ok := kernel.api_native_tolstring(L, 1)
+		if ok {
+			context = runtime.default_context()
+			if kernel.api_stringtonumber(L, s) == uint(len(s)) + 1 {
+				return 1 // parsed a full numeral (pushed by api_stringtonumber)
+			}
 		}
-		aux_checkany(L, 1) // there must be *some* argument
+		native_checkany(L, 1) // there must be *some* argument
 	} else {
-		base := aux_checkinteger(L, 2)
-		aux_checktype(L, 1, kernel.TSTRING) // base form requires a string
-		s := aux_checkstring(L, 1)
-		aux_argcheck(L, 2 <= base && base <= 36, 2, "base out of range")
+		base := native_checkinteger(L, 2)
+		if kernel.api_native_type(L, 1) != kernel.TSTRING {native_tag_error(L, 1, kernel.TSTRING)}
+		s := native_checklstring(L, 1)
+		if base < 2 || base > 36 {native_argerror(L, 2, "base out of range")}
 		if v, ok := b_str2int(s, int(base)); ok {
-			kernel.api_pushinteger(L, v)
+			kernel.api_native_pushinteger(L, v)
 			return 1
 		}
 	}
-	kernel.api_pushnil(L) // fail == nil
+	kernel.api_native_pushnil(L) // fail == nil
 	return 1
 }
 
@@ -200,23 +201,22 @@ base_assert :: proc "c" (Lp: rawptr) -> i32 {
 // `select('#', ...)` -> count; `select(n, ...)` -> the arguments from n on --
 // reference `luaB_select`.
 base_select :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	n := kernel.api_gettop(L)
-	if kernel.api_type(L, 1) == kernel.TSTRING {
-		s, _ := kernel.api_tostring(L, 1)
+	n := kernel.api_native_gettop(L)
+	if kernel.api_native_type(L, 1) == kernel.TSTRING {
+		s, _ := kernel.api_native_tolstring(L, 1)
 		if len(s) > 0 && s[0] == '#' {
-			kernel.api_pushinteger(L, kernel.Integer(n - 1))
+			kernel.api_native_pushinteger(L, kernel.Integer(n - 1))
 			return 1
 		}
 	}
-	i := aux_checkinteger(L, 1)
+	i := native_checkinteger(L, 1)
 	if i < 0 {
 		i = kernel.Integer(n) + i
 	} else if i > kernel.Integer(n) {
 		i = kernel.Integer(n)
 	}
-	aux_argcheck(L, 1 <= i, 1, "index out of range")
+	if i < 1 {native_argerror(L, 1, "index out of range")}
 	return i32(kernel.Integer(n) - i)
 }
 
@@ -225,20 +225,18 @@ base_select :: proc "c" (Lp: rawptr) -> i32 {
 // --------------------------------------------------------------------------------
 
 base_rawequal :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	aux_checkany(L, 1)
-	aux_checkany(L, 2)
-	kernel.api_pushboolean(L, kernel.api_rawequal(L, 1, 2))
+	native_checkany(L, 1)
+	native_checkany(L, 2)
+	kernel.api_native_pushboolean(L, kernel.api_native_rawequal(L, 1, 2))
 	return 1
 }
 
 base_rawlen :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	tt := kernel.api_type(L, 1)
-	aux_argexpected(L, tt == kernel.TTABLE || tt == kernel.TSTRING, 1, "table or string")
-	kernel.api_pushinteger(L, kernel.Integer(kernel.api_rawlen(L, 1)))
+	tt := kernel.api_native_type(L, 1)
+	if tt != kernel.TTABLE && tt != kernel.TSTRING {native_typeerror(L, 1, "table or string")}
+	kernel.api_native_pushinteger(L, kernel.Integer(kernel.api_native_rawlen(L, 1)))
 	return 1
 }
 
