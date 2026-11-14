@@ -33,6 +33,44 @@ api_load :: proc(L: ^kernel.State, src: string, rd: ^Src_Reader) -> kernel.Threa
 	return kernel.api_load(L, src_read, rd, "=t", "")
 }
 
+// The undumper has no parser pacing checks of its own. Loading a binary chunk
+// with due debt must start a GC step while preserving existing stack roots.
+@(test)
+test_api_binary_load_runs_gc :: proc(t: ^testing.T) {
+	L := api_new()
+	defer kernel.close_state(L)
+	rd: Src_Reader
+	testing.expect_value(t, dump_load_text(L, "return 123", &rd), kernel.Thread_Status.Ok)
+	bytes := dump_top(L, false)
+	defer delete(bytes)
+	kernel.api_pushstring(L, "surviving stack root")
+	kernel.api_gc(L, kernel.GCCOLLECT)
+	testing.expect_value(t, L.g.gcstate, kernel.GCSpause)
+	kernel.state_setdebt(L.g, 0)
+	testing.expect_value(t, dump_load_binary(L, bytes[:], &rd), kernel.Thread_Status.Ok)
+	testing.expect(t, L.g.gcstate != kernel.GCSpause, "loading binary must run a due GC step")
+	s, ok := kernel.api_tolstring(L, 2)
+	testing.expect(t, ok)
+	testing.expect_value(t, s, "surviving stack root")
+	testing.expect_value(t, kernel.api_pcall(L, 0, 1, 0), kernel.Thread_Status.Ok)
+	testing.expect_value(t, kernel.api_tointeger(L, -1), 123)
+
+	// Repeated discarded loads should not accumulate an unbounded proto tree.
+	kernel.api_pop(L, 1)
+	kernel.api_gc(L, kernel.GCCOLLECT)
+	before := kernel.gettotalbytes(L.g)
+	for i in 0 ..< 2000 {
+		st := dump_load_binary(L, bytes[:], &rd)
+		if st != .Ok {
+			testing.expect(t, false, "binary load failed")
+			break
+		}
+		kernel.api_pop(L, 1)
+	}
+	testing.expect(t, kernel.gettotalbytes(L.g) - before < 300 * 1024, "discarded binary chunks should be collected")
+	testing.expect_value(t, kernel.api_gettop(L), 2)
+}
+
 // ---------------------------------------------------------------------------
 // Push / convert round-trips and type queries
 // ---------------------------------------------------------------------------

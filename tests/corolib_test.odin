@@ -127,3 +127,78 @@ corolib_running_and_close :: proc(t: ^testing.T) {
 	)
 	testing.expect(t, st == .Ok, "running()/isyieldable() on main and close()")
 }
+
+// Upstream 15b2a78: self-close from an error handler overrides the original
+// error, and the wrapped call returns no values. Also exercise explicit close,
+// regular close errors, and a nested protected call that self-close must bypass.
+@(test)
+corolib_close_while_closing_after_error :: proc(t: ^testing.T) {
+	L := corolib_state()
+	defer kernel.close_state(L)
+	st := corolib_run(L, `
+		local function func2close(f) return setmetatable({}, {__close = f}) end
+		local co = coroutine.wrap(function()
+			local a <close> = func2close(function() coroutine.close() end)
+			error('y')
+		end)
+		assert(select('#', co()) == 0)
+
+		local after = false
+		local wrapped = coroutine.wrap(function()
+			local a <close> = func2close(function()
+				pcall(function() coroutine.close(coroutine.running()) end)
+				after = true
+			end)
+			error('original')
+		end)
+		assert(select('#', wrapped()) == 0 and not after)
+
+		local thread = coroutine.create(function()
+			local a <close> = func2close(function() coroutine.close() end)
+			error('original')
+		end)
+		local ok, err = coroutine.resume(thread)
+		assert(not ok and err ~= nil)
+		assert(coroutine.close(thread))
+		assert(coroutine.close(thread))
+
+		local bad = coroutine.wrap(function()
+			local a <close> = func2close(function() error('closing', 0) end)
+			error('original', 0)
+		end)
+		local ok2, err2 = pcall(bad)
+		assert(not ok2 and err2 == 'closing')
+	`)
+	testing.expect(t, st == .Ok, "self-close overrides a prior error without losing other close errors")
+}
+
+// The embedding API must leave exactly one error object after a failing close,
+// preserving its type, and an empty stack after a subsequent close.
+@(test)
+corolib_closethread_stack_invariant :: proc(t: ^testing.T) {
+	L := corolib_state()
+	defer kernel.close_state(L)
+	sources := []string{"error('original', 0)", "error(42, 0)"}
+	for source in sources {
+		co := kernel.api_newthread(L) // anchored on L's stack
+		testing.expect_value(t, stdlib.aux_loadstring(L, source), kernel.Thread_Status.Ok)
+		kernel.api_xmove(L, co, 1)
+		status, _ := kernel.api_resume(co, L, 0)
+		testing.expect_value(t, status, kernel.Thread_Status.Err_Run)
+		testing.expect_value(t, kernel.api_closethread(co, L), kernel.Thread_Status.Err_Run)
+		testing.expect_value(t, co.top, 2)
+		testing.expect_value(t, kernel.api_gettop(co), 1)
+		if source == "error(42, 0)" {
+			testing.expect_value(t, kernel.api_type(co, 1), kernel.TNUMBER)
+			testing.expect_value(t, kernel.api_tointeger(co, 1), 42)
+		} else {
+			msg, ok := kernel.api_tolstring(co, 1)
+			testing.expect(t, ok)
+			testing.expect_value(t, msg, "original")
+		}
+		testing.expect_value(t, kernel.api_closethread(co, L), kernel.Thread_Status.Ok)
+		testing.expect_value(t, co.top, 1)
+		testing.expect_value(t, kernel.api_gettop(co), 0)
+		kernel.api_pop(L, 1)
+	}
+}

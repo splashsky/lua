@@ -83,6 +83,9 @@ co_auxwrap :: proc "c" (Lp: rawptr) -> i32 {
 		stat := kernel.api_status(co)
 		if stat != .Ok && stat != .Yield { // error inside the coroutine?
 			stat = kernel.api_closethread(co, L) // close its to-be-closed variables
+			if stat == .Ok {
+				return 0 // self-close during cleanup overrode the error
+			}
 			kernel.api_xmove(co, L, 1) // move the error message to the caller
 		}
 		if stat != .Err_Mem && kernel.api_type(L, -1) == kernel.TSTRING {

@@ -151,6 +151,18 @@ state_resetthread :: proc(L: ^State, status_in: Thread_Status) -> Thread_Status 
 	return status
 }
 
+// The reset itself must be protected: a __close handler can close this same
+// thread, throwing directly to the outermost close boundary. Propagate ordinary
+// reset errors through that boundary as well, leaving their object at slot 1.
+@(private = "file")
+resetthread_aux :: proc(L: ^State, ud: rawptr) -> Thread_Status {
+	status := state_resetthread(L, (^Thread_Status)(ud)^)
+	if status != .Ok {
+		return throw(L, status)
+	}
+	return .Ok
+}
+
 // Close a thread, returning its final status -- reference `lua_closethread`.
 // `from` is the thread performing the close (used by reference Lua to restore the
 // C-call counter); we thread the yieldable/C-call bookkeeping through `nCcalls`
@@ -163,7 +175,8 @@ api_closethread :: proc(L: ^State, from: ^State) -> Thread_Status {
 	} else {
 		L.n_ccalls = 0
 	}
-	status := state_resetthread(L, L.status)
+	status := run_protected(L, resetthread_aux, &L.status)
+	assert(L.top == (status == .Ok ? 1 : 2), "thread close stack invariant")
 	if L == from { // closing itself: unwind the whole thread, do not return
 		throw_baselevel(L, status)
 	}

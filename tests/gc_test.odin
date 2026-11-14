@@ -136,3 +136,32 @@ gc_never_collects_fixed_strings :: proc(t: ^testing.T) {
 	again := kernel.string_new(L, "__index")
 	testing.expect(t, again == fixed, "fixed metamethod name stays interned")
 }
+
+// An already negative debt plus the largest step must not wrap positive and
+// silently skip the collection. Inspect actual collector progress, not the
+// GCSTEP result alone (which only signals a completed cycle).
+@(test)
+gc_step_maxinteger_negative_debt :: proc(t: ^testing.T) {
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
+	kernel.api_gc(L, kernel.GCCOLLECT)
+	testing.expect_value(t, L.g.gcstate, kernel.GCSpause)
+	kernel.state_setdebt(L.g, -2)
+	result := kernel.api_gc(L, kernel.GCSTEP, int(kernel.MAX_LMEM))
+	testing.expect(t, L.g.gcstate != kernel.GCSpause || result == 1, "large step must run the collector")
+	testing.expect(t, L.g.gc_debt < kernel.MAX_LMEM / 2, "debt must not wrap to a huge positive value")
+
+	// An ordinary step that does not bring the debt due must not run the GC.
+	kernel.api_gc(L, kernel.GCCOLLECT)
+	kernel.state_setdebt(L.g, 200)
+	testing.expect_value(t, kernel.api_gc(L, kernel.GCSTEP, 100), 0)
+	testing.expect_value(t, L.g.gc_debt, 100)
+	testing.expect_value(t, L.g.gcstate, kernel.GCSpause)
+
+	// A zero step forces work even when the collector was stopped by the user,
+	// and must restore the stopped flag afterward.
+	kernel.api_gc(L, kernel.GCSTOP)
+	result = kernel.api_gc(L, kernel.GCSTEP, 0)
+	testing.expect(t, L.g.gcstate != kernel.GCSpause || result == 1, "zero step must force work")
+	testing.expect_value(t, kernel.api_gc(L, kernel.GCISRUNNING), 0)
+}

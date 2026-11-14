@@ -1050,12 +1050,17 @@ api_gc :: proc(L: ^State, what: int, args: ..int) -> int {
 	case GCSTEP:
 		oldstp := g.gcstp
 		n: L_Mem = len(args) > 0 ? L_Mem(args[0]) : 0
+		newdebt: L_Mem
 		work := false
 		g.gcstp = 0 // allow GC to run (other bits must be zero here)
 		if n <= 0 {
-			n = g.gc_debt // force to run one basic step
+			newdebt = 0 // force to run one basic step
+		} else if g.gc_debt >= n - MAX_LMEM {
+			newdebt = g.gc_debt - n // subtraction will not overflow
+		} else {
+			newdebt = -MAX_LMEM // saturate the negative debt
 		}
-		state_setdebt(g, g.gc_debt - n)
+		state_setdebt(g, newdebt)
 		// condGC: only steps when the debt has come due, mirroring `luaC_condGC`.
 		if g.gc_debt <= 0 {
 			gc_step(L)
@@ -1190,6 +1195,7 @@ api_load :: proc(
 	chunkname: string,
 	mode: string = "",
 ) -> Thread_Status {
+	gc_checkGC(L) // pace binary loads too, before parsing allocates its closure
 	z: Zio
 	zio_init(L, &z, reader, data)
 	status := do_protectedparser(L, &z, chunkname, mode)
