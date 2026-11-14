@@ -5,6 +5,13 @@ import "base:runtime"
 // Keep these in a separate file: even excluded declarations in vm.odin can
 // change the switch interpreter's code placement and its branch performance.
 when VM_THREADED {
+	// Non-string lengths can call Lua or raise errors and need the original
+	// context. The handler has already saved the PC and top, as vm_execute does.
+	vm_thread_lenslow :: #force_no_inline proc "contextless" (L: ^State, ra: int, rb: ^TValue, ctx: ^runtime.Context) {
+		context = ctx^
+		vm_objlen(L, ra, rb)
+	}
+
 	// Hits cannot run Lua, move a stack, or change the frame trap. The miss
 	// receives the activation's original context, not the default context.
 	vm_thread_tryget :: #force_inline proc "contextless" (t, key, out: ^TValue) -> bool {
@@ -161,5 +168,20 @@ when VM_THREADED {
 	) -> i32 {
 		context = ctx^
 		return vm_apply_async_hook(L, trap)
+	}
+
+	// Raw arithmetic cannot allocate or raise. Only the zero-divisor error
+	// needs the activation's original context.
+	vm_thread_arith :: #force_inline proc "contextless" (ra, v1, v2: ^TValue, op: Arith_Op) -> Arith_Status {
+		return raw_arith_to(op, v1, v2, ra)
+	}
+
+	vm_thread_aritherror :: #force_no_inline proc "contextless" (L: ^State, ctx: ^runtime.Context, is_mod: bool) {
+		context = ctx^
+		if is_mod {
+			debug_runerror(L, "attempt to perform 'n%%0'")
+		} else {
+			debug_runerror(L, "attempt to divide by zero")
+		}
 	}
 }

@@ -2077,14 +2077,34 @@ when VM_THREADED {
 				if (cl.p.flag & u8(PF_VAHID | PF_VATAB)) != 0 {
 					trap = 0 // hooks begin at the VARARGPREP instruction
 				} else if (ci0.callstatus & CIST_HOOKYIELD) == 0 {
-					context = ctx^
-					do_hookcall(L, ci_idx) // fire the 'call' hook now
-					base = L.frames[ci_idx].func + 1
-					regs = ([^]StackValue)(&L.stack[base])
+					return #must_tail vm_thread_enterhook(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 				}
 			}
 		}
 
+		if trap != 0 {
+			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		next_i := pc[0]
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}
+
+	vm_thread_enterhook :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		context = ctx^
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		do_hookcall(L, ci_idx)
+		base = L.frames[ci_idx].func + 1
+		regs = ([^]StackValue)(&L.stack[base])
 		if trap != 0 {
 			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 		}
@@ -2824,7 +2844,6 @@ when VM_THREADED {
 	}
 
 	vm_thread_MODK :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
-		context = ctx^
 		pc := pc_arg
 		regs := regs_arg
 		cl := cl_arg
@@ -2837,11 +2856,11 @@ when VM_THREADED {
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
 		L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 		L.top = L.frames[ci_idx].top
-		st := vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Mod)
+		st := vm_thread_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Mod)
 		if st == .Ok {
 			pc = vm_pc_add(pc, 1)
 		} else if st == .Div_By_Zero {
-			debug_runerror(L, "attempt to perform 'n%%0'")
+			vm_thread_aritherror(L, ctx, true)
 		}
 
 		if trap != 0 {
@@ -2901,7 +2920,6 @@ when VM_THREADED {
 	}
 
 	vm_thread_IDIVK :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
-		context = ctx^
 		pc := pc_arg
 		regs := regs_arg
 		cl := cl_arg
@@ -2914,11 +2932,11 @@ when VM_THREADED {
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
 		L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 		L.top = L.frames[ci_idx].top
-		st := vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .IDiv)
+		st := vm_thread_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .IDiv)
 		if st == .Ok {
 			pc = vm_pc_add(pc, 1)
 		} else if st == .Div_By_Zero {
-			debug_runerror(L, "attempt to divide by zero")
+			vm_thread_aritherror(L, ctx, false)
 		}
 
 		if trap != 0 {
@@ -3537,7 +3555,6 @@ when VM_THREADED {
 	}
 
 	vm_thread_LEN :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
-		context = ctx^
 		pc := pc_arg
 		regs := regs_arg
 		cl := cl_arg
@@ -3551,9 +3568,13 @@ when VM_THREADED {
 		ra := base + getarg_A(i)
 		L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 		L.top = L.frames[ci_idx].top
-		vm_objlen(L, ra, stack_value(L, base + getarg_B(i)))
+		rb := &regs[getarg_B(i)].val
+		if is_string(rb) {
+			set_int(&regs[getarg_A(i)].val, Integer(str_value(rb).len))
+		} else {
+			vm_thread_lenslow(L, ra, rb, ctx)
+		}
 		trap = L.frames[ci_idx].u.l.trap
-
 
 		if trap != 0 {
 			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)

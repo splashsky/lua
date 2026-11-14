@@ -1,10 +1,9 @@
 <#
-    check.ps1 -- type checks and threaded-source verification (Windows side).
+    check.ps1 -- linker-free type checks (Windows side).
 
-    `odin check` type-checks packages without linking; this wrapper also builds
-    the generator for its drift check, which requires the native toolchain.
-    Library packages need -no-entry-point (they have no `main`); the two
-    executables are checked as-is.
+    `odin check` type-checks packages without linking. Both interpreter modes,
+    including freestanding, are checked regardless of VM_THREADED. The generated
+    source drift check runs in test.ps1, which already needs a linker.
 
     Usage:
         .\build\check.ps1
@@ -15,14 +14,11 @@ param([string]$Brand = 'lua', [string]$FreestandingTarget = 'freestanding_amd64_
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'brand.ps1')
-$BrandDefines = Get-BrandDefines -Brand $Brand
+$BrandDefines = @(Get-BrandDefines -Brand $Brand | Where-Object { $_ -ne '-define:VM_THREADED=true' })
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
 $Collection = "-collection:lang=$SrcDir"
-
-# Refuse generated handlers that no longer match the switch interpreter.
-& (Join-Path $RepoRoot 'build\generate-threaded.ps1') -Check
 
 # Each entry: the path to check, and whether it's a library (no `main`).
 $Targets = @(
@@ -30,7 +26,8 @@ $Targets = @(
     @{ Path = 'src\compiler';   Lib = $false },
     @{ Path = 'src\kernel';    Lib = $true  },
     @{ Path = 'src\stdlib'; Lib = $true  },
-    @{ Path = 'tests';      Lib = $true  }
+    @{ Path = 'tests';      Lib = $true  },
+    @{ Path = 'tools\generate_threaded'; Lib = $false }
 )
 
 $failed = $false
@@ -56,15 +53,12 @@ Write-Host "==> check src\freestanding ($FreestandingTarget)"
     "-target:$FreestandingTarget" -default-to-nil-allocator -no-entry-point
 if ($LASTEXITCODE -ne 0) { throw "Freestanding package failed to check." }
 
-# Keep the optional interpreter type-checked even during the default check.
-if ($env:VM_THREADED -ne '1') {
-    Write-Host '==> check threaded interpreter'
-    & odin check $SrcDir $Collection @BrandDefines '-define:VM_THREADED=true'
-    if ($LASTEXITCODE -ne 0) { throw 'Threaded interpreter failed to check.' }
-    Write-Host "==> check threaded freestanding interpreter ($FreestandingTarget)"
-    & odin check (Join-Path $SrcDir 'freestanding') $Collection @BrandDefines `
-        '-define:VM_THREADED=true' "-target:$FreestandingTarget" -default-to-nil-allocator -no-entry-point
-    if ($LASTEXITCODE -ne 0) { throw 'Threaded freestanding interpreter failed to check.' }
-}
+Write-Host '==> check threaded interpreter'
+& odin check $SrcDir $Collection @BrandDefines '-define:VM_THREADED=true'
+if ($LASTEXITCODE -ne 0) { throw 'Threaded interpreter failed to check.' }
+Write-Host "==> check threaded freestanding interpreter ($FreestandingTarget)"
+& odin check (Join-Path $SrcDir 'freestanding') $Collection @BrandDefines `
+    '-define:VM_THREADED=true' "-target:$FreestandingTarget" -default-to-nil-allocator -no-entry-point
+if ($LASTEXITCODE -ne 0) { throw 'Threaded freestanding interpreter failed to check.' }
 
 Write-Host "All packages check clean."

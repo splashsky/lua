@@ -331,6 +331,7 @@ local mt = {
   __call = function(a, ...) moved(); return ... end,
   __close = function(a) moved() end,
 }
+
 local a, b = setmetatable({}, mt), setmetatable({}, mt)
 local keep = 100
 assert(a.missing + keep == 117)
@@ -348,6 +349,37 @@ return keep + sum
 `
 	testing.expect_value(t, corolib_run(L, src), kernel.Thread_Status.Ok)
 	testing.expect_value(t, kernel.api_tointeger(L, -1), 106)
+}
+
+// Cover string lengths (including a result that overwrites its operand), a
+// moving __len call, and empty integer/float loops with and without hooks.
+@(test)
+length_and_empty_loop_semantics :: proc(t: ^testing.T) {
+	L := corolib_state()
+	defer kernel.close_state(L)
+	stdlib.aux_openlibs(L)
+	kernel.api_pushcfunction(L, stack_move_probe)
+	kernel.api_setglobal(L, "probe")
+	src := `
+local a = 'short'; a = #a; assert(a == 5)
+local b = string.rep('x', 100); b = #b; assert(b == 100)
+local mt = {__len = function() assert(probe()); return 29 end}
+local x = setmetatable({}, mt); x = #x; assert(x == 29)
+assert(not pcall(function() return #true end))
+for i = 1, 200 do end
+for i = 200, 1, -3 do end
+for i = 1, 0 do error('skipped loop ran') end
+for i = 1.0, 3.0, 0.5 do end
+for i = math.maxinteger - 2, math.maxinteger do end
+local n = 0
+local function h() n = n + 1 end
+local function f() for i = 1, 10 do end end
+debug.sethook(h, '', 1); f(); debug.sethook()
+assert(n == 20, n)
+return a + b + x
+`
+	testing.expect_value(t, corolib_run(L, src), kernel.Thread_Status.Ok)
+	testing.expect_value(t, kernel.api_tointeger(L, -1), 134)
 }
 
 // An error longjmps past Lua frames; their old tops must not keep the enlarged

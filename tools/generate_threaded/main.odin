@@ -154,6 +154,8 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src: string) 
 	review(between(src, "vm_finishget :: proc", "// The VM's table read"), "cff1bbd520882786832a21ed0384f86465f24b06c3359529b1c33691aaac40cf", "vm_finishget")
 	review(between(src, "vm_gettable :: proc(", "\n// OP_GETI"), "ec9fd4cce26c455e29ebb7114d3d5d3afb0778e5210a77e0cebde1f4ac98b628", "vm_gettable")
 	review(between(src, "vm_settable :: proc(", "// OP_SETI"), "a1d4edb3b18fe00ac7cdd73b9d337146a3fd483f85f51fe791975d69cf929b77", "vm_settable")
+	review(between(src, "vm_objlen :: proc", "// Convert a number"), "6dce8953407021af089dcb4488b6b4405f3188d3adaef914be3d5623322f4a5f", "vm_objlen")
+	review(between(src, "vm_arith :: #force_inline proc", "// ---------------------------------------------------------------------------\n// The interpreter loop"), "8493f193af8288550b22240f2509f0cf3d7a5b866811e8cbf25ebc489a6a26b3", "vm_arith")
 	review(between(tm_src, "tm_gettmbyobj :: proc", "// The type name"), "b9d33e4481e049c8858bc8a68c5e0edf619dd19e5d4d0abc9b0fda806cfeeded", "tm_gettmbyobj")
 	review(between(table_src, "table_get ::", "// Odin does not reliably inline"), "86124ae5d3c25a8ec0c1fc4bcdfa3b576de9b8401b7597f3693f94230ddaab04", "table_get")
 	review(between(table_src, "table_fastget ::", "// ---------------------------------------------------------------------------\n// Insertion into the hash part"), "8490a704b65daa82efe7a00322f7c5bff9188b22a50549d5f79ac50d2ae846c0", "table_fastget")
@@ -183,6 +185,9 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src: string) 
 	vm := between(src, "vm_execute :: proc", "// Which immediate order")
 	review(before(vm, "\tnewframe: for {\n"), "32340a8a21a1a481d09e46b3a7195ab3778645426030608202fd245973270fdc", "VM prelude")
 	entry := between(vm, "\tnewframe: for {\n", "\n\t\t// The dispatch loop.")
+	// The hook arm is split into its own tail transition below. Reject added
+	// work in that arm until it has been reviewed for the split.
+	review(entry, "fa18d5dad0483f6328d171fe8545a521cb65d0e56bf99ff3ba7f5c2779eaacd3", "VM entry")
 	for name in ([]string{"base", "regs", "cl", "k", "code", "pc"}) {
 		entry = replace_exact(entry, fmt.tprintf("%s :=", name), fmt.tprintf("%s =", name))
 	}
@@ -219,6 +224,14 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src: string) 
 			review(dedent(bodies[i]), "cd52f22d19525c1dac09131a29cb8f0f1af9627a36336f2fd0fe7fbc8ed61895", name)
 		case "CALL":
 			review(dedent(bodies[i]), "ac014f541316692f53230d3e9ae24623c87d0904ded4779d2f29ce46b5dbba86", name)
+		case "LEN":
+			review(dedent(bodies[i]), "7f7bee28051b7d9cab1c261a1f4f9a2a33a256d33e54e4d34adfdb9aa7026e75", name)
+		case "FORPREP":
+			review(dedent(bodies[i]), "bdf3f6be275b44b3ae6654ab10cbb945211f65c5a6073810ee350ef6fbba8407", name)
+		case "MODK":
+			review(dedent(bodies[i]), "c93f0decc3d4ee25a7587823c1051ba36e30113aa260f26dd7b811688965baf3", name)
+		case "IDIVK":
+			review(dedent(bodies[i]), "b344255899646c3cd43b21d4f1f309a452229977f0e0f224a7de6d8d5df8d7c0", name)
 		case:
 		}
 	}
@@ -245,8 +258,13 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src: string) 
 	for name in names {fmt.sbprintf(&b, "\t\tvm_thread_%s,\n", name)}
 	for _ in len(names)..<128 {strings.write_string(&b, "\t\tvm_thread_invalid,\n")}
 	strings.write_string(&b, "\t}\n\n")
-	entry = replace_exact(entry, "do_hookcall(L, ci_idx)", "context = ctx^\n\t\t\t\t\tdo_hookcall(L, ci_idx)")
+	entry = replace_exact(entry, `do_hookcall(L, ci_idx) // fire the 'call' hook now
+					base = L.frames[ci_idx].func + 1
+					regs = ([^]StackValue)(&L.stack[base])`, "return #must_tail vm_thread_enterhook(" + ARGS + ")")
 	emit_proc(&b, "vm_thread_enter", fmt.tprintf("%s\n%s", dedent(entry), dispatch), true)
+	emit_proc(&b, "vm_thread_enterhook", fmt.tprintf("%s\n%s", `do_hookcall(L, ci_idx)
+base = L.frames[ci_idx].func + 1
+regs = ([^]StackValue)(&L.stack[base])`, dispatch))
 	emit_proc(&b, "vm_thread_trace", fmt.tprintf("%s\n%s", dedent(trace), next))
 	emit_proc(&b, "vm_thread_poll", fmt.tprintf("trap = vm_apply_async_hook(L, trap)\n%s", dispatch))
 	transitions, returns := 0, 0
@@ -265,6 +283,27 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src: string) 
 			body = replace_exact(body, "nresults, &thread_ctx)", "nresults, ctx)")
 			body = replace_exact(body, "trap = vm_poll_async_hook(L, trap)", "when ODIN_OS != .Freestanding {\n\tif intrinsics.atomic_load(&async_hook_pending) != 0 {\n\t\ttrap = vm_thread_pollcall(L, trap, ctx)\n\t}\n}")
 		}
+		if name == "LEN" {
+			body = `ra := base + getarg_A(i)
+L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
+L.top = L.frames[ci_idx].top
+rb := &regs[getarg_B(i)].val
+if is_string(rb) {
+	set_int(&regs[getarg_A(i)].val, Integer(str_value(rb).len))
+} else {
+	vm_thread_lenslow(L, ra, rb, ctx)
+}
+trap = L.frames[ci_idx].u.l.trap
+`
+		}
+		if name == "MODK" || name == "IDIVK" {
+			body = replace_exact(body, "vm_arith(", "vm_thread_arith(")
+			if name == "MODK" {
+				body = replace_exact(body, `debug_runerror(L, "attempt to perform 'n%%0'")`, "vm_thread_aritherror(L, ctx, true)")
+			} else {
+				body = replace_exact(body, `debug_runerror(L, "attempt to divide by zero")`, "vm_thread_aritherror(L, ctx, false)")
+			}
+		}
 		transitions += strings.count(body, "continue newframe")
 		body, _ = strings.replace_all(body, "continue newframe", "return #must_tail vm_thread_enter(" + ARGS + ")")
 		body = rewrite_returns(body, &returns)
@@ -278,7 +317,7 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src: string) 
 		terminal := strings.has_suffix(strings.trim_right_space(body), "return #must_tail vm_thread_enter(" + ARGS + ")")
 		body = fmt.tprintf("%s\n", dedent(body))
 		if !terminal {body = fmt.tprintf("%s%s", body, dispatch)}
-		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "SETTABLE" || name == "SELF" || name == "CALL")
+		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "SETTABLE" || name == "SELF" || name == "CALL" || name == "LEN" || name == "MODK" || name == "IDIVK")
 	}
 	if transitions != 6 || returns != 4 {fail(fmt.tprintf("unexpected frame transitions: %d, returns: %d", transitions, returns))}
 	emit_proc(&b, "vm_thread_invalid", fmt.tprintf("%s\n%s", dedent(invalid), dispatch))

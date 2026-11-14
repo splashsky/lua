@@ -170,9 +170,10 @@ EOF
             assert_true "os.date $zone_length-byte zone conversion" 1 || assert_true "os.date $zone_length-byte zone conversion" 0
     done
 
-    for kind in loop calls; do
+    for kind in loop calls numeric; do
         if [[ "$kind" == loop ]]; then body='while true do end'
-        else body='local function f() end; while true do f() end'; fi
+        elif [[ "$kind" == calls ]]; then body='local function f() end; while true do f() end'
+        else body='for i = 1, math.maxinteger do end'; fi
         cat > "$WORK/interrupt.lua" <<EOF
 local ok, msg = pcall(function()
   print('ready'); io.stdout:flush()

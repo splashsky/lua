@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# test.sh -- run the lua-odin test suite (macOS/Linux side).
+# test.sh -- verify generated handlers and run the Odin tests (macOS/Linux).
 #
 # Odin's built-in test runner compiles a directory's @(test) procs and runs
 # them. We point it at tests/ with the same `lang` collection the build uses so
 # the tests can import `lang:kernel` and `lang:stdlib`.
 #
-# Later phases will also invoke the vendored PUC-Rio Lua 5.5 suite from here;
-# for now this runs whatever Odin unit tests exist.
+# The generated threaded handlers are checked before running the unit tests.
+# Both steps require a native linker. The PUC-Rio suite is run by puc.sh.
 #
 # Usage:
 #     ./build/test.sh                  # run all Odin unit tests
@@ -35,6 +35,8 @@ for arg in "$@"; do
         *) ARGS+=("-define:ODIN_TEST_NAMES=tests.$arg") ;;
     esac
 done
+
+bash "$REPO_ROOT/build/generate-threaded.sh" --check
 
 echo "==> Running Odin tests in $TESTS_DIR"
 odin test "${ARGS[@]}"

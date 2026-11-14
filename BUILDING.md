@@ -4,7 +4,7 @@
 
 - **Odin compiler** on your `PATH`. Check with `odin version`.
 - A recent nightly is fine; this project tracks current Odin.
-- **A native linker + system libraries to produce runnable binaries:**
+- **A native linker + system libraries to produce runnable binaries and run tests:**
   - **Windows:** the **Windows SDK** plus the **MSVC** toolchain (e.g. install
     *Visual Studio Build Tools* with the "Desktop development with C++" workload).
     Without these, Odin reports `Windows SDK not found` and cannot link `.exe`s or
@@ -35,10 +35,10 @@ odin check src/freestanding -collection:lang=src \
     -target:freestanding_amd64_sysv -default-to-nil-allocator -no-entry-point
 ```
 
-The convenience wrappers `build/check.ps1` (Windows) and `build/check.sh` (Unix) run
-all of these for you, including the freestanding check. They also build and run
-the threaded VM generator to check for drift, so the wrappers require a native
-linker. The individual `odin check` commands above remain linker-free.
+The convenience wrappers `build/check.ps1` (Windows) and `build/check.sh` (Unix)
+run these and type-check the generator without linking. They check both the switch
+and threaded interpreters, including freestanding, regardless of `VM_THREADED`.
+The generated-source drift check runs in `build/test.*`, which needs a linker.
 
 ## The `lang` collection
 
@@ -97,8 +97,9 @@ The switch opcode bodies are the source of the threaded handlers. After changing
 them, run `bash build/generate-threaded.sh` or `.\build\generate-threaded.ps1` on
 Windows. These build and run the Odin tool in `tools/generate_threaded/`; no
 Python installation is needed. The generator rejects changes to rewritten paths
-and specialized helpers until reviewed; `build/check.*` verifies the generated
-region and type-checks both interpreters, including freestanding. See Decision 2
+and specialized helpers until reviewed; `build/test.*` verifies the generated
+region before testing, while `build/check.*` type-checks both interpreters without
+linking, including freestanding. See Decision 2
 in `docs/ARCHITECTURE.md` for the safety rules and measured tradeoffs.
 
 Internal invariant assertions follow reference Lua's `lua_assert`: they are off

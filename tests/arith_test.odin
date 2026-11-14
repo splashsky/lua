@@ -50,6 +50,44 @@ arithmetic_semantics_chunk :: proc(t: ^testing.T) {
 	}
 }
 
+// K-operand floor division and modulo must preserve errors, float promotion,
+// overflow and metamethod dispatch as well as the ordinary integer results.
+@(test)
+constant_division_and_modulo :: proc(t: ^testing.T) {
+	L := kernel.new_state(kernel.default_allocator())
+	testing.expect(t, L != nil)
+	if L == nil {return}
+	defer kernel.close_state(L)
+	stdlib.aux_openlibs(L)
+	src := `
+local function div(x) return x // 2 end
+local function mod(x) return x % 7 end
+local function negdiv(x) return x // -1 end
+local function negmod(x) return x % -1 end
+local function divzero(x) return x // 0 end
+local function modzero(x) return x % 0 end
+assert(div(-7) == -4 and mod(-8) == 6)
+assert(div(-7.5) == -4.0 and mod(-8.5) == 5.5)
+assert(negdiv(math.mininteger) == math.mininteger and negmod(math.mininteger) == 0)
+local ok, msg = pcall(divzero, 1)
+assert(not ok and msg:find('attempt to divide by zero', 1, true))
+ok, msg = pcall(modzero, 1)
+assert(not ok and msg:find("attempt to perform 'n%0'", 1, true))
+assert(divzero(1.0) == math.huge)
+local nan = modzero(1.0); assert(nan ~= nan)
+local mt = {__idiv = function(a, b) return 30 + b end,
+            __mod = function(a, b) return 40 + b end}
+local x = setmetatable({}, mt)
+assert(div(x) == 32 and mod(x) == 47)
+`
+	status := stdlib.aux_loadstring(L, src)
+	if status == .Ok {status = kernel.api_pcall(L, 0, 0, 0)}
+	if status != .Ok {
+		message, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "constant division and modulo: %s", message)
+	}
+}
+
 // Run raw_arith on two integer operands, expecting an integer result.
 @(private = "file")
 ii :: proc(op: kernel.Arith_Op, a, b: kernel.Integer) -> (kernel.Integer, kernel.Arith_Status) {

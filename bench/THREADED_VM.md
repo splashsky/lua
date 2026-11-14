@@ -1,15 +1,17 @@
 # Threaded VM measurements
 
-The experimental interpreter is now broadly faster, but **is not ready to be
-the default**. In these measurements the empty loop, string patterns and
-closures still take more cycles than the switch VM. Some results, especially
-allocation and I/O, are noisy. The switch-versus-master cycle results also do
-not establish the requested no-regression gate for every workload. Keep the
-switch as the default until those regressions and measurement uncertainties are
-resolved and the other targets have been exercised at runtime.
+The experimental interpreter is broadly faster, but **is not ready to be the
+default**. The integer-loop regression was removed. An empty numeric loop is
+still slower than with the switch, although loops with a body are faster. String
+construction and closures still have slower minima; string patterns, table
+churn and fresh string keys remain uncertain. Allocation and I/O results are
+noisy. Keep the switch as the default until the remaining regressions and
+measurement uncertainties are resolved and the other targets have been
+exercised at runtime.
 
-Not every helper was converted: `GETI`, `SETI`, `SETFIELD`, arithmetic,
-comparison, and concatenation still use their existing paths where applicable.
+Not every helper was converted: `GETI`, `SETI`, `SETFIELD`, register-operand
+division and modulo, comparisons, and concatenation still use existing paths
+where applicable.
 The experiment does not establish that the remaining regressions are inherent
 to threaded dispatch.
 
@@ -19,56 +21,156 @@ Measured on 2026-11-14 on an AMD Ryzen 9 7950X, Linux x86-64, Odin
 `dev-2026-11-nightly:9a69916`, with `-o:speed` PIE builds. Reference is Lua
 5.5.1 from `/tmp/opencode/refbuild/src/lua`; master is commit `6f13068` built
 from an unmodified source archive. Each row runs in a fresh process, with seven
-rotating runs of master, switch, threaded and reference. `perf stat -x, -e
-instructions:u,cycles:u` records user-space events. The minimum instructions
-and cycles are reported independently, in **millions**. Harness names run in
-isolation, as described in `bench/README.md`; the probe files under
-`/tmp/opencode/inv` were not modified.
+rotating runs of switch, threaded and reference; the probes also include master.
+Harness rows were not remeasured on master. Only one measurement driver ran at
+a time, after the test matrix completed. `perf stat -x, -e instructions:u,cycles:u`
+records user-space events. The minimum instructions and cycles are reported
+independently, in **millions**. Harness names run in isolation, as described in
+`bench/README.md`; the probe files under `/tmp/opencode/inv` were not modified.
 
-The machine was heavily loaded. A server restart interrupted the measurement
-driver between rows; its original process continued while the resumed driver
-measured some remaining rows too. Each result below still has seven alternating
-runs, but that overlap adds load and makes small cycle differences particularly
-uncertain. Instruction counts for hash and I/O workloads can also vary with
-string hash seeds. The table is evidence of the remaining regressions, not a
-proof that a small timing difference will reproduce on an idle machine.
+The machine was heavily loaded. Hash seeds and I/O also change instruction counts,
+so small cycle differences and individual minima are not proof of a regression on
+an idle machine. Master and switch instruction distributions overlap on every
+probe: for example, master/switch `self` ranges were 810.6–830.6M and
+810.6–850.6M, `calls` ranges 30,871.0–30,971.0M and 30,671.0–30,871.0M, and
+`w1` ranges 14,696.0–14,946.0M for both. The non-hash loops differed by at most
+about 2,000 instructions in median startup cost. The switch executable's `.text`
+is also byte-identical to the switch build before this follow-up, though master
+has different code placement. A separate 14-run `ncall` comparison gave master
+and switch minima of 99.55M / 99.57M cycles and medians of 101.84M / 101.80M;
+an earlier seven-run comparison had 100.2M / 114.0M minima. Cycle differences
+against master are therefore not settled by instruction counts alone.
 
 | Workload | Master instructions / cycles | Switch instructions / cycles | Threaded instructions / cycles | Reference instructions / cycles |
 |---|---:|---:|---:|---:|
-| probe/empty | 74.7 / 19.5 | 74.7 / 19.6 | 66.7 / 21.6 | 56.6 / 17.4 |
-| probe/move | 120.7 / 24.6 | 120.7 / 24.7 | 104.7 / 24.4 | 96.6 / 24.7 |
-| probe/add | 154.7 / 28.7 | 154.7 / 28.8 | 136.7 / 26.5 | 120.6 / 30.2 |
-| probe/gtab | 286.7 / 55.2 | 286.7 / 55.5 | 246.7 / 46.1 | 174.6 / 42.4 |
-| probe/call0 | 492.7 / 147.7 | 492.7 / 126.0 | 434.7 / 109.0 | 344.6 / 83.5 |
-| probe/call1 | 540.7 / 133.5 | 540.7 / 133.4 | 476.7 / 121.6 | 388.6 / 89.5 |
-| probe/callr | 600.7 / 145.4 | 600.7 / 145.7 | 532.7 / 131.6 | 448.6 / 103.1 |
-| probe/ncall | 492.7 / 99.6 | 492.7 / 99.2 | 422.7 / 79.8 | 436.6 / 100.0 |
-| probe/self | 810.7 / 162.8 | 810.7 / 166.1 | 624.7 / 123.0 | 662.6 / 139.0 |
-| probe/il | 5,000.7 / 953.7 | 5,000.7 / 969.0 | 4,350.7 / 834.4 | 4,000.6 / 826.5 |
-| probe/calls | 30,871.1 / 6,355.5 | 30,671.1 / 6,321.1 | 26,711.1 / 5,427.5 | 25,890.9 / 6,044.0 |
-| probe/w1 | 14,696.0 / 2,891.4 | 14,746.0 / 2,924.3 | 14,236.0 / 2,781.6 | 12,561.1 / 2,746.2 |
-| probe/iobench | 9,536.0 / 1,939.8 | 9,536.0 / 1,947.2 | 9,501.3 / 1,920.4 | 8,011.9 / 1,757.5 |
-| micro/fib(32) | 2,299.7 / 591.0 | 2,299.7 / 592.8 | 2,225.7 / 548.6 | 1,640.4 / 401.3 |
-| micro/intloop | 6,601.7 / 1,242.6 | 6,601.7 / 1,232.4 | 6,661.7 / 1,225.5 | 4,952.9 / 964.1 |
-| micro/floatloop | 9,067.5 / 2,432.4 | 9,067.5 / 2,434.2 | 8,157.5 / 2,335.8 | 7,216.9 / 1,733.1 |
-| micro/strconcat | 913.1 / 498.2 | 913.1 / 536.2 | 924.5 / 522.0 | 879.9 / 364.6 |
-| micro/strpattern | 5,209.7 / 1,031.6 | 5,209.7 / 1,038.2 | 5,302.5 / 1,057.7 | 3,803.5 / 1,066.8 |
-| micro/tablechurn | 4,873.9 / 6,603.7 | 4,873.5 / 6,600.5 | 4,967.8 / 6,582.1 | 4,812.4 / 6,254.4 |
-| micro/tablesort | 6,836.4 / 1,616.3 | 6,836.4 / 1,615.5 | 6,164.1 / 1,508.6 | 4,523.2 / 1,245.7 |
-| micro/closures | 4,232.0 / 1,289.3 | 4,232.0 / 1,298.5 | 4,205.8 / 1,437.0 | 3,026.5 / 877.6 |
-| tables/array_insert | 739.6 / 154.3 | 739.6 / 157.3 | 751.6 / 143.0 | 572.5 / 126.4 |
-| tables/hash_strkey | 1,364.3 / 1,881.7 | 1,364.2 / 1,802.3 | 1,388.3 / 1,855.8 | 1,287.7 / 1,561.4 |
-| tables/hash_prekey | 1,107.1 / 1,241.1 | 1,107.0 / 1,197.8 | 1,147.2 / 1,187.4 | 972.0 / 777.8 |
-| tables/tablesort | 1,908.5 / 450.6 | 1,908.5 / 452.1 | 1,722.3 / 418.7 | 1,266.2 / 350.5 |
-| stdlib/tostring_float | 1,170.6 / 293.2 | 1,170.7 / 330.4 | 1,161.7 / 316.1 | 3,194.8 / 821.9 |
-| stdlib/tonumber_float | 574.1 / 108.9 | 574.1 / 110.3 | 558.1 / 104.4 | 714.0 / 150.2 |
-| stdlib/string_format | 1,467.6 / 370.0 | 1,468.0 / 351.9 | 1,449.1 / 322.9 | 2,350.4 / 623.2 |
-| stdlib/format_int | 911.0 / 227.9 | 911.0 / 219.2 | 891.4 / 221.9 | 797.4 / 191.5 |
-| stdlib/math_transcend | 1,488.0 / 319.4 | 1,488.0 / 307.3 | 1,381.0 / 292.6 | 1,228.7 / 297.1 |
-| stdlib/file_lines | 895.0 / 291.0 | 895.0 / 319.3 | 896.0 / 298.6 | 706.5 / 160.1 |
-| stdlib/os_date | 706.2 / 165.9 | 706.9 / 166.6 | 701.3 / 162.7 | 692.1 / 207.5 |
+| probe/empty | 74.6 / 20.0 | 74.6 / 19.9 | 66.6 / 21.6 | 56.5 / 17.4 |
+| probe/move | 120.6 / 24.6 | 120.6 / 24.8 | 104.6 / 24.4 | 96.5 / 25.0 |
+| probe/add | 154.6 / 28.8 | 154.6 / 29.0 | 136.6 / 27.4 | 120.5 / 29.9 |
+| probe/gtab | 286.6 / 56.2 | 286.6 / 56.2 | 246.6 / 46.3 | 174.5 / 45.6 |
+| probe/call0 | 492.6 / 125.7 | 492.6 / 124.9 | 418.6 / 103.2 | 344.5 / 84.6 |
+| probe/call1 | 540.6 / 133.7 | 540.6 / 133.8 | 460.6 / 117.8 | 388.5 / 90.8 |
+| probe/callr | 600.6 / 145.6 | 600.6 / 145.2 | 516.6 / 127.8 | 448.5 / 103.2 |
+| probe/ncall | 492.6 / 99.3 | 492.6 / 100.1 | 422.6 / 79.8 | 436.5 / 103.8 |
+| probe/self | 810.6 / 160.3 | 810.6 / 160.6 | 624.6 / 122.8 | 662.5 / 144.8 |
+| probe/il | 5,000.6 / 952.9 | 5,000.6 / 951.4 | 4,350.6 / 832.3 | 4,000.5 / 828.5 |
+| probe/calls | 30,871.0 / 6,377.0 | 30,671.0 / 6,356.2 | 26,421.0 / 5,300.6 | 25,890.8 / 6,183.8 |
+| probe/w1 | 14,696.0 / 2,921.6 | 14,696.0 / 2,898.3 | 14,286.0 / 2,805.6 | 12,561.0 / 2,757.4 |
+| probe/iobench | 9,535.9 / 1,955.6 | 9,535.9 / 1,953.4 | 9,501.2 / 1,920.6 | 7,817.1 / 1,704.7 |
+| micro/fib(32) | — | 2,299.7 / 585.2 | 2,169.2 / 537.3 | 1,640.3 / 401.9 |
+| micro/intloop | — | 6,601.6 / 1,202.0 | 6,101.6 / 1,141.2 | 4,952.8 / 968.0 |
+| micro/floatloop | — | 9,067.4 / 2,426.9 | 8,157.4 / 2,340.5 | 7,216.8 / 1,740.7 |
+| micro/strconcat | — | 913.0 / 438.0 | 924.3 / 464.1 | 879.8 / 310.5 |
+| micro/strpattern | — | 5,209.6 / 1,037.6 | 5,164.8 / 1,038.3 | 3,803.4 / 1,071.8 |
+| micro/tablechurn | — | 4,873.3 / 5,468.1 | 4,967.6 / 5,670.7 | 4,812.2 / 5,513.3 |
+| micro/tablesort | — | 6,836.3 / 1,635.2 | 6,164.0 / 1,544.6 | 4,523.1 / 1,286.3 |
+| micro/closures | — | 4,229.1 / 1,068.0 | 4,171.0 / 1,079.7 | 3,028.6 / 682.5 |
+| tables/array_insert | — | 739.5 / 156.0 | 751.5 / 142.0 | 572.4 / 124.9 |
+| tables/hash_strkey | — | 1,364.1 / 1,461.4 | 1,388.3 / 1,423.9 | 1,287.8 / 1,271.2 |
+| tables/hash_prekey | — | 1,106.9 / 834.7 | 1,148.2 / 820.6 | 972.2 / 553.3 |
+| tables/tablesort | — | 1,908.4 / 445.6 | 1,722.2 / 422.0 | 1,266.1 / 342.0 |
+| stdlib/tostring_float | — | 1,170.6 / 288.6 | 1,144.5 / 283.1 | 3,197.0 / 787.5 |
+| stdlib/tonumber_float | — | 574.1 / 110.3 | 558.1 / 104.7 | 714.0 / 152.9 |
+| stdlib/string_format | — | 1,467.5 / 348.4 | 1,442.7 / 337.0 | 2,352.1 / 630.0 |
+| stdlib/format_int | — | 911.2 / 219.2 | 874.4 / 215.4 | 797.1 / 191.1 |
+| stdlib/math_transcend | — | 1,488.0 / 309.4 | 1,366.0 / 286.1 | 1,228.7 / 296.5 |
+| stdlib/file_lines | — | 895.9 / 288.8 | 896.9 / 291.3 | 713.6 / 159.5 |
+| stdlib/os_date | — | 707.0 / 165.2 | 697.8 / 162.1 | 691.9 / 203.2 |
 
 ## Experiments
+
+### Follow-up: loop entry, string length and frame entry
+
+Each comparison below uses seven alternating runs, in millions of user-space
+instructions / cycles. The machine was heavily loaded, so minima and medians
+can differ substantially; these comparisons do not prove every small cycle
+change. The historical 14-run follow-ups in the bullets predate the
+constant-division change; the later confirmation uses the finished code. The
+code remains PIE.
+
+* The empty-loop profile put most samples in `FORLOOP`, including its
+  instruction-dependent back edge and the next opcode's table lookup. The
+  threaded empty probe stays at 66.6 / 21.6 against 74.6 / 19.9 for switch:
+  fewer instructions, more cycles. A dedicated handler for an integer loop
+  whose `FORLOOP` jumps to itself, selected once at `FORPREP`, took the probe
+  to 24.6 / 6.5. It was removed again: it helps only loops with an empty body,
+  which real code does not contain, and it hid the back-edge cost this probe
+  exists to measure. Loops with a body are faster threaded (`il`, `add`,
+  `intloop`, `floatloop`).
+* The `strpattern` inner loop uses `LEN` on strings. Its old threaded handler
+  copied the Odin context, spilled state and called `vm_objlen` for every word.
+  The new string path preserves the saved PC and top updates but avoids that
+  call; other types still use `vm_objlen` with the original context. In one
+  comparison `strpattern` went from 5,302.4 / 1,062.6 to 5,164.8 / 1,049.4
+  (switch 5,209.6 / 1,054.4); the respective cycle ranges were 1,062.6–1,130.1,
+  1,049.4–1,129.4 and 1,054.4–1,126.0. The instruction win is clear; the small
+  cycle differences overlap between runs. Its iterator's `TFORCALL` still enters
+  the ordinary C-call boundary, including the C-call limit and yield handling.
+  A 14-run follow-up had switch/threaded medians of 1,060.0M / 1,063.8M cycles.
+* The old frame-entry handler reserved a context-sized native stack frame even
+  with hooks off. Moving the hook branch into a separate tail transition lets
+  the compiler omit that prologue on the common path. `call1` fell from
+  476.6 / 122.0 to 460.6 / 117.9; `closures` fell from 4,203.0 to 4,171.0
+  instructions, but its cycle improvement is not established. In another
+  comparison its minima were 1,070.6 threaded versus 1,056.4 switch. A 14-run
+  follow-up had medians of 1,101.4M threaded versus 1,096.2M switch.
+  A 929-sample threaded cycle profile before that change attributed about 15%
+  to frame entry, about 3% to `CLOSURE`, and over 40% to allocator procedures.
+  The closure handler copies the context and spills VM state around allocation;
+  its upvalue wiring also tests the GC barrier. These observations do not prove
+  which part causes the residual timing difference.
+* On `hash_strkey`, samples were dominated by allocation, string interning and
+  hash-node loads. String-key writes fall back to the original set path, whose
+  miss can allocate and needs the original context and GC barrier. A seven-run
+  comparison had overlapping ranges of 1,290.2–1,666.8 threaded and
+  1,384.9–1,660.3 switch, reversing the earlier minimum ordering. No new
+  string-write shortcut was retained without a reliable win and a reviewed
+  miss/barrier path. In 14 additional runs switch/threaded medians were
+  1,546.5M / 1,600.5M cycles, so the remaining difference cannot be dismissed.
+* Before the constant-division change, `intloop` had equal threaded instruction
+  counts in two layouts but minima of 1,199.4M and 1,225.7M cycles, versus
+  1,191.5M for switch. The compiler placed several arithmetic handlers at
+  different addresses; that is evidence of a layout-sensitive difference, not
+  proof of its exact cause.
+* A later 982-sample profile attributed 37.3% to `ADD`, 20.6% to `IDIVK`,
+  17.4% to `FORLOOP` and 9.9% to `MODK`. Disassembly showed `IDIVK` and `MODK`
+  copied the whole context even for successful arithmetic. `raw_arith_to` is
+  already contextless and reports division by zero as a status. The new handlers
+  keep the original saved-PC/top updates and send only zero-divisor errors to a
+  no-inline helper with the original context. In seven alternating runs
+  `intloop` improved from 6,661.6 / 1,230.9 to 6,101.6 / 1,135.0, versus
+  switch at 6,601.6 / 1,195.6.
+  The layout change made `add` move from 136.6 / 26.6 to 136.6 / 27.5, still
+  below switch's 154.6 / 28.8. The `il`, native-call and float-loop wins remained.
+* Before the constant-division change, `strconcat` measured 406.5M switch versus
+  441.1M threaded cycles. In 14 additional alternating runs the minima were
+  456.8M and 488.6M, with medians 487.0M and 504.5M; the ranges overlap.
+  The threaded `CONCAT` handler copies the context and spills VM state, but
+  numeric coercion, allocation, GC and metamethods require an ordinary context.
+  The 460-sample threaded profile was dominated by allocation, string interning
+  and GC rather than the handler alone. No safe, measured replacement was retained.
+* `tablechurn` uses both integer arrays and string hashes. Its threaded profile
+  had 4,906 samples, led by string interning (26.9%), `GETTABLE` (10.8%),
+  allocation and numeric conversion. In 14 alternating runs switch/threaded
+  minima were 5,926.8M / 6,032.0M cycles, but medians were 6,153.2M / 6,148.6M.
+  These results do not isolate a reliable dispatch regression from allocation
+  and hash-layout variation.
+
+After the constant-division change, 14 more alternating switch/threaded runs
+gave `strconcat` minima of 408.6M / 438.5M and medians of 457.8M / 483.8M
+cycles; its ranges were 408.6–905.8M / 438.5–910.1M. `closures` minima were
+1,062.6M / 1,087.5M and medians 1,087.5M / 1,100.6M. `strpattern` minima were
+1,032.4M / 1,044.0M and medians 1,091.1M / 1,071.6M. Fresh-string hash minima
+were 1,556.8M / 1,776.8M and medians 2,160.4M / 2,203.9M; `tablechurn` minima
+were 5,934.1M / 5,964.8M and medians 6,606.9M / 6,439.1M. These heavily loaded
+ranges overlap and do not establish that the smaller differences are resolved.
+
+Seven alternating runs before/after that change retained the existing wins:
+for example, `gtab` minima were 45.6M / 46.3M cycles, `calls` 5,318.5M /
+5,336.0M, and `tablesort` 1,525.0M / 1,505.2M. Their instruction counts were
+unchanged apart from hash-seed variation. The `add` probe's small layout-related
+cost is recorded above rather than hidden in the full-table minima.
+
+### Earlier experiments
 
 These are separate seven-run alternating comparisons; each pair is a different
 step, not a comparison across dates. Values are instructions / cycles in
@@ -129,12 +231,12 @@ allocator procedures and frame entry accounted for substantial portions of
 the samples. That points to work beyond the closure opcode itself, but is not
 proof of an inherent limit to this dispatch design.
 
-In the final binaries, `nm -S` reports 33,889 bytes for switch `vm_execute`
+In the follow-up binaries, `nm -S` reports 33,889 bytes for switch `vm_execute`
 plus a 512-byte relative jump table. Threaded handler, entry, trace, poll and
-threaded-helper symbols total 45,523 bytes, plus a 1,024-byte address table.
-Executable text is 876,856 versus 895,140 bytes; data is 62,936 versus 63,960
-bytes. Reference `luaV_execute` is 15,905 bytes and reference executable text is
-283,206 bytes. These symbol sizes are only rough comparisons because inlining
+threaded-helper symbols total 45,419 bytes, plus a 1,024-byte address table.
+GNU `size` reports text totals of 876,856 versus 895,132 bytes and data of
+62,936 versus 63,960 bytes. Reference `luaV_execute` is 15,905 bytes and its
+`size` text total is 283,206 bytes. These are rough comparisons because inlining
 and helper boundaries differ.
 
 Linux x86-64 is the only runtime-tested platform in this work. Windows x64,
@@ -145,9 +247,10 @@ MOVE handlers inspected; no freestanding object was run. The generator is now an
 Odin tool; its guarded rewrites and the duplicated fast paths still require review
 whenever the guarded source changes. See Decision 2 in `docs/ARCHITECTURE.md`.
 
-On Linux x86-64, both interpreter modes passed the normal and single-threaded
+On Linux x86-64, both interpreter modes passed all 314 normal and single-threaded
 Odin tests, the relocation-plus-AddressSanitizer tests, and the PUC-Rio suite in
-normal, relocation, and relocation-plus-AddressSanitizer modes. The CLI and
-rebranding checks also passed. The ordinary threaded AddressSanitizer run was
-additionally used to exercise the native-call fast path, which relocation test
-mode intentionally routes through the original helper.
+normal, relocation, and relocation-plus-AddressSanitizer modes (`final OK !!!`
+in each). CLI tests passed 31/31, including SIGINT during the empty numeric loop
+and byte comparison with reference `luac`; rebranding passed 11/11. The ordinary
+threaded AddressSanitizer run also passed all 314 tests and exercised the native
+call fast path, which relocation mode routes through the original helper.

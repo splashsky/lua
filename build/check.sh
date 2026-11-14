@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 #
-# check.sh -- type checks and threaded-source verification (macOS/Linux side).
+# check.sh -- linker-free type checks (macOS/Linux side).
 #
-# `odin check` type-checks packages without linking; this wrapper also builds
-# the generator for its drift check, which requires a native linker. Library
-# packages need -no-entry-point (they have no `main`); the two executables are
-# checked as-is.
+# `odin check` type-checks packages without linking. Both interpreter modes,
+# including freestanding, are checked regardless of VM_THREADED. The generated
+# source drift check runs in test.sh, which already needs a linker.
 #
 # Usage:
 #     ./build/check.sh
@@ -20,9 +19,11 @@ source "$SCRIPT_DIR/brand.sh"
 SRC_DIR="$REPO_ROOT/src"
 COLLECTION="-collection:lang=$SRC_DIR"
 
-# The switch is the source of the generated threaded handlers. Refuse stale
-# output rather than allowing changes to one interpreter to miss the other.
-bash "$REPO_ROOT/build/generate-threaded.sh" --check
+# Check the switch first even when VM_THREADED=1 was passed to the wrapper.
+CHECK_DEFINES=()
+for define in "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}"; do
+    if [[ "$define" != "-define:VM_THREADED=true" ]]; then CHECK_DEFINES+=("$define"); fi
+done
 
 # "path:is_library" pairs. Library packages have no `main`, so pass -no-entry-point.
 check_one() {
@@ -30,10 +31,10 @@ check_one() {
     echo "==> check $path"
     if [[ "$is_lib" == "1" ]]; then
         odin check "$REPO_ROOT/$path" "$COLLECTION" \
-            "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" -no-entry-point
+            "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}" -no-entry-point
     else
         odin check "$REPO_ROOT/$path" "$COLLECTION" \
-            "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}"
+            "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}"
     fi
 }
 
@@ -42,6 +43,7 @@ check_one src/compiler   0
 check_one src/kernel    1
 check_one src/stdlib 1
 check_one tests      1
+check_one tools/generate_threaded 0
 
 # The bare-metal build selects a different set of files via `#+build freestanding`,
 # so the hosted checks above cannot catch a break in it. Check it explicitly, or the
@@ -50,18 +52,15 @@ check_one tests      1
 FREESTANDING_TARGET="${FREESTANDING_TARGET:-freestanding_amd64_sysv}"
 echo "==> check src/freestanding ($FREESTANDING_TARGET)"
 odin check "$REPO_ROOT/src/freestanding" "$COLLECTION" \
-    "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" \
+    "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}" \
     "-target:$FREESTANDING_TARGET" -default-to-nil-allocator -no-entry-point
 
-# Keep the optional interpreter type-checked even during the default check.
-if [[ "${VM_THREADED:-0}" != "1" ]]; then
-    echo "==> check threaded interpreter"
-    odin check "$REPO_ROOT/src" "$COLLECTION" \
-        "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" -define:VM_THREADED=true
-    echo "==> check threaded freestanding interpreter ($FREESTANDING_TARGET)"
-    odin check "$REPO_ROOT/src/freestanding" "$COLLECTION" \
-        "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" -define:VM_THREADED=true \
-        "-target:$FREESTANDING_TARGET" -default-to-nil-allocator -no-entry-point
-fi
+echo "==> check threaded interpreter"
+odin check "$REPO_ROOT/src" "$COLLECTION" \
+    "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}" -define:VM_THREADED=true
+echo "==> check threaded freestanding interpreter ($FREESTANDING_TARGET)"
+odin check "$REPO_ROOT/src/freestanding" "$COLLECTION" \
+    "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}" -define:VM_THREADED=true \
+    "-target:$FREESTANDING_TARGET" -default-to-nil-allocator -no-entry-point
 
 echo "All packages check clean."

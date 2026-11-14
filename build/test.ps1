@@ -1,9 +1,10 @@
 <#
-    test.ps1 -- run the lua-odin test suite (Windows side).
+    test.ps1 -- verify generated handlers and run the Odin tests (Windows).
 
     Odin's built-in test runner compiles a directory's @(test) procs and runs
     them. We point it at tests/ with the same `lang` collection the build uses so
     the tests can import `lang:kernel` and `lang:stdlib`.
+    The generated threaded handlers are checked first. Both steps need a linker.
 
     The unit tests exercise the default (Lua 5.5.1) profile. `-Brand` rebuilds
     them against a different branding profile; see build\brand.ps1.
@@ -46,6 +47,8 @@ if ($Name -ne '') {
     # Odin filters tests by fully-qualified name via -define:ODIN_TEST_NAMES.
     $Args += "-define:ODIN_TEST_NAMES=tests.$Name"
 }
+
+& (Join-Path $RepoRoot 'build\generate-threaded.ps1') -Check
 
 Write-Host "==> Running Odin tests in $TestsDir"
 & odin test @Args
