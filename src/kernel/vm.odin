@@ -808,18 +808,12 @@ vm_arith :: #force_inline proc(ra, v1, v2: ^TValue, op: Arith_Op) -> Arith_Statu
 // The interpreter loop
 // ---------------------------------------------------------------------------
 
-// Unlike the value stack, a Proto's code array never moves after the prototype
-// has been built. That makes a local instruction pointer safe here: it cannot be
-// invalidated by a call, allocation, or stack growth. We still deliberately keep
-// Call_Info.savedpc as an integer, though. A call frame outlives this dispatch-loop
-// activation, and persistent state is easier to reason about when it contains no
-// pointer that could ever become stale.
-//
-// Odin does not define arithmetic on multipointers, so these forced-inline
-// helpers are our spelling of pointer movement and pointer-to-index conversion.
-// The bargain is intentional: ordinary dispatch avoids one index scale-and-add
-// for every instruction executed, while the less frequent savedpc sync pays one
-// subtraction from the code base.
+// Completed prototypes have immutable code, kept alive by their closures. A
+// loader reader can also obtain an unfinished closure via the debug API and
+// suspend it; compilation can then move its code before that frame resumes.
+// The local PC is used only while this VM activation runs. The persistent
+// savedpc is an index, so a resumed frame re-derives it from the current code.
+// Odin multipointers need these helpers for movement and index conversion.
 @(private = "file")
 vm_pc_add :: #force_inline proc "contextless" (pc: [^]Instruction, offset: int) -> [^]Instruction {
 	// Unsigned arithmetic wraps, so converting a negative instruction offset
@@ -863,13 +857,15 @@ vm_poll_async_hook :: #force_inline proc(L: ^State, trap: i32) -> i32 {
 	}
 }
 
-// Only this activation's register base may be a stack pointer. Persistent state
-// remains indices. Any call that can move the stack (including a GC or hook)
-// must reload the frame's trap before the next fetch, and any register pointer
+// Only this activation's register base may point into the value stack. Persistent
+// stack/frame references remain indices. A call that can move the stack must
+// reload the frame's trap before the next fetch, and any register pointer
 // needed again within that instruction must be re-derived after the call. Cold
 // helpers and top/result bookkeeping still use indices. A frame entry, hook or
 // VARARGPREP refreshes the base immediately; other protected calls refresh the
 // trap so the next fetch re-derives it before touching any register pointer.
+// The VM keeps the frame index, not a frame pointer, across callouts; each frame
+// access resolves the current array again after any frame move.
 vm_execute :: proc(L: ^State, ci_idx_in: int) {
 	ci_idx := ci_idx_in
 
@@ -904,7 +900,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 			}
 		}
 
-		// The dispatch loop. `pc` walks the immutable code array directly; `savedpc` is synced as an index
+		// The dispatch loop. `pc` walks the code array; `savedpc` is synced as an index
 		// before anything that can raise (so error line info is correct) and
 		// before every frame switch (so the caller resumes correctly).
 		for {
@@ -1507,7 +1503,6 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 					callstatus = L.frames[ci_idx].callstatus
 					nres := get_nresults(callstatus)
 					L.ci = ci_idx - 1
-					L.nci = ci_idx
 					L.top = base - 1
 					for nres > 0 {
 						set_nil(stack_value(L, L.top))
@@ -1534,7 +1529,6 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 					callstatus = L.frames[ci_idx].callstatus
 					nres := get_nresults(callstatus)
 					L.ci = ci_idx - 1
-					L.nci = ci_idx
 					if nres == 0 {
 						L.top = base - 1
 					} else {

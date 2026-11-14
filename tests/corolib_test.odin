@@ -7,6 +7,8 @@ package tests
 // the status lifecycle, resume's true/false + error convention, the re-raising
 // wrapper from coroutine.wrap, running()/isyieldable() on the main thread, close().
 
+import "base:runtime"
+import "core:mem"
 import "core:testing"
 import kernel "lang:kernel"
 import stdlib "lang:stdlib"
@@ -26,6 +28,119 @@ corolib_run :: proc(L: ^kernel.State, src: string) -> kernel.Thread_Status {
 		return st
 	}
 	return kernel.api_pcall(L, 0, kernel.MULTRET, 0)
+}
+
+// The Lua-level load rejects 'B'; it is an embedding-API-only load mode.
+corolib_load_fixed :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := (^kernel.State)(Lp)
+	s, _ := kernel.api_tolstring(L, 1)
+	if stdlib.aux_loadbufferx(L, transmute([]u8)s, "=fixed", "B") != .Ok {
+		kernel.api_pushnil(L)
+	}
+	return 1
+}
+
+// The only remaining references to the loaded closure and its nested prototype
+// can be suspended coroutine frames. Exercise ordinary, stripped, and fixed-mode
+// binary chunks, line/count hooks, and full collections before resuming them.
+@(test)
+corolib_suspended_chunk_survives_gc :: proc(t: ^testing.T) {
+	L := corolib_state()
+	defer kernel.close_state(L)
+	kernel.api_pushcfunction(L, stdlib.open_string)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "string")
+	kernel.api_pushcfunction(L, stdlib.open_debug)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "debug")
+	kernel.api_pushcfunction(L, corolib_load_fixed)
+	kernel.api_setglobal(L, "loadfixed")
+	st := corolib_run(L, `
+		local function body(x)
+		  local function step()
+		    local a = coroutine.yield(x + 1)
+		    return a + x
+		  end
+		  return step() + 3
+		end
+		for _, strip in ipairs({false, true}) do
+		  for _, mode in ipairs({'b', 'B'}) do
+		    local bytes = string.dump(body, strip)
+		    local f
+		    if mode == 'B' then f = assert(loadfixed(bytes))
+		    else f = assert(load(bytes, nil, mode)) end
+		    local co = coroutine.create(f)
+		    bytes, f = nil, nil
+		    local hooks = 0
+		    debug.sethook(co, function() hooks = hooks + 1 end, 'l', 3)
+		    local ok, value = coroutine.resume(co, 10)
+		    assert(ok and value == 11 and hooks > 0)
+		    for i = 1, 4 do collectgarbage('collect') end
+		    ok, value = coroutine.resume(co, 20)
+		    assert(ok and value == 33 and coroutine.status(co) == 'dead')
+		  end
+		end
+	`)
+	testing.expect_value(t, st, kernel.Thread_Status.Ok)
+}
+
+// A resize always uses a different address, including prototype code growth
+// and shrinking. Leave the old block untouched on allocation failure.
+corolib_moving_alloc :: proc "c" (_: rawptr, ptr: rawptr, osize, nsize: uint) -> rawptr {
+	context = runtime.default_context()
+	a := kernel.default_allocator()
+	if ptr == nil || nsize == 0 {
+		return a.alloc(a.ud, ptr, osize, nsize)
+	}
+	block := a.alloc(a.ud, nil, 0, nsize)
+	if block != nil {
+		mem.copy(block, ptr, int(min(osize, nsize)))
+		_ = a.alloc(a.ud, ptr, osize, 0)
+	}
+	return block
+}
+
+// Our debug API exposes the loader's partially constructed closure as a C
+// temporary. It can be suspended while the reader returns more source and the
+// parser grows and shrinks that closure's code. A saved PC must survive the move.
+@(test)
+corolib_suspended_partial_chunk_survives_code_growth :: proc(t: ^testing.T) {
+	L := kernel.new_state(kernel.Allocator{alloc = corolib_moving_alloc})
+	defer kernel.close_state(L)
+	kernel.api_pushcfunction(L, stdlib.open_base)
+	kernel.api_call(L, 0, 0)
+	kernel.api_pushcfunction(L, stdlib.open_coroutine)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "coroutine")
+	kernel.api_pushcfunction(L, stdlib.open_string)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "string")
+	kernel.api_pushcfunction(L, stdlib.open_debug)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "debug")
+	st := corolib_run(L, `
+		local parts = {
+		  "local y = ...; y(42); local x = 0; ",
+		  string.rep("x=x+1; ", 5000) .. "return x",
+		}
+		local pos, co = 0
+		local function reader()
+		  pos = pos + 1
+		  if pos == 2 then
+		    local name, f = debug.getlocal(2, 6)
+		    assert(name == '(C temporary)' and type(f) == 'function')
+		    co = coroutine.create(f)
+		    local ok, value = coroutine.resume(co, coroutine.yield)
+		    assert(ok and value == 42)
+		  end
+		  return parts[pos]
+		end
+		assert(load(reader))
+		local ok, value = coroutine.resume(co)
+		assert(ok and value == 5000)
+	`)
+	testing.expect_value(t, st, kernel.Thread_Status.Ok)
 }
 
 @(test)

@@ -77,7 +77,6 @@ new_state_baseline :: proc(t: ^testing.T) {
 
 	// Exactly one frame -- the base frame -- and it is a C/Odin frame whose
 	// function slot is index 0 with the minimum working area above it.
-	testing.expect_value(t, L.nci, 1)
 	testing.expect_value(t, L.ci, 0)
 	base := L.frames[0]
 	testing.expect_value(t, base.func, 0)

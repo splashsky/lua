@@ -18,6 +18,8 @@ package kernel
 // This file defines `Lua_State` and `Global_State`, the stack and frame arrays as
 // index-addressed structures, thread status, and creation and teardown.
 
+import "core:mem"
+
 // ---------------------------------------------------------------------------
 // Call frames
 // ---------------------------------------------------------------------------
@@ -50,8 +52,8 @@ Hook_Proc :: #type proc "c" (L: rawptr, ar: rawptr)
 // `&L.frames[idx]` afterward -- never cache a `^Call_Info` across a call.
 //
 // The `u` union mirrors reference Lua's: a Lua frame needs its saved program
-// counter (for us an *index* into `Proto.code`, not a pointer), a line/count
-// trap flag, and its vararg overflow count; a C frame needs its yield
+// counter (an index into `Proto.code`), a line/count trap flag, and its vararg
+// overflow count; a C frame needs its yield
 // continuation, the caller's error handler to restore, and the continuation's
 // context. `u2` overlays three disjoint uses (a C function's protected-call
 // function index, a yielding function's yielded-value count, a returning
@@ -63,7 +65,7 @@ Call_Info :: struct {
 		l: struct {
 			// only for Lua frames
 			savedpc:    int, // index of the NEXT instruction in Proto.code
-			trap:       i32, // tracing or stack relocation requires VM attention
+			trap:       i32, // tracing or stack/frame relocation requires VM attention
 			nextraargs: int, // # extra args a vararg call received
 		},
 		c: struct {
@@ -242,7 +244,9 @@ State :: struct {
 	frames:          [^]Call_Info,
 	frames_capacity: int, // allocated frame slots
 	ci:              int, // index of the current (innermost) frame
-	nci:             int, // number of frames currently in use
+	// Preserve State's allocation size and subsequent field offsets: heap byte
+	// accounting is observable, even though no separate frame count is needed.
+	_frame_count_padding: int,
 
 	// to-be-closed variables + open upvalues ---------------------------
 	tbclist:         int, // stack index of the newest to-be-closed slot
@@ -438,7 +442,6 @@ preinit_thread :: proc(L: ^State, g: ^Global_State) {
 	L.frames = nil
 	L.frames_capacity = 0
 	L.ci = 0
-	L.nci = 0
 	L.tbclist = 0
 	L.openupval = nil
 	L.gclist = nil
@@ -457,38 +460,64 @@ preinit_thread :: proc(L: ^State, g: ^Global_State) {
 	L.status = .Ok
 }
 
-// The rare allocating half of next_ci. Preserve the 1.5x growth policy and
-// allocation sizes, including the error path, so memory accounting is unchanged.
-grow_ci :: #force_no_inline proc(L: ^State, next: int) {
-	// Grow exactly as before; no frame pointer survives this allocation.
-	newcap := L.frames_capacity + (L.frames_capacity >> 1)
-	if newcap < next + 1 {
-		newcap = next + 1
-	}
+// Resize/move before publishing a new frame: settraps must only scan initialized
+// active frames. In stress mode allocate before freeing, as for the value stack,
+// to expose outdated frame references even if the allocator usually reallocates
+// in place. A failed allocation leaves the old array untouched.
+realloc_ci :: #force_no_inline proc(L: ^State, newcap: int) {
 	oldbytes := uint(L.frames_capacity) * size_of(Call_Info)
 	newbytes := uint(newcap) * size_of(Call_Info)
-	block := state_realloc(L, L.frames, oldbytes, newbytes)
+	block: rawptr
+	when HARDSTACKTESTS {
+		oldgcstop := L.g.gcstopem
+		L.g.gcstopem = 1
+		block = state_realloc(L, nil, 0, newbytes)
+		if block != nil {
+			mem.copy(block, L.frames, int(oldbytes))
+			when .Address not_in ODIN_SANITIZER_FLAGS {
+				mem.set(L.frames, 0xa5, int(oldbytes))
+			}
+			state_free(L, L.frames, oldbytes)
+		}
+		L.g.gcstopem = oldgcstop
+	} else {
+		block = state_realloc(L, L.frames, oldbytes, newbytes)
+	}
 	if block == nil {
 		throw(L, .Err_Mem)
 	}
 	L.frames = ([^]Call_Info)(block)
 	L.frames_capacity = newcap
+	// Like stack relocation, arm the already active Lua frames. The new slot is
+	// initialized by prepCallInfo after we return and must not be scanned yet.
+	settraps(L)
+}
+
+// The rare allocating half of next_ci. Preserve the 1.5x growth policy and
+// allocation sizes, including the error path, so memory accounting is unchanged.
+grow_ci :: #force_no_inline proc(L: ^State, next: int) {
+	newcap := L.frames_capacity + (L.frames_capacity >> 1)
+	if newcap < next + 1 {
+		newcap = next + 1
+	}
+	realloc_ci(L, newcap)
 }
 
 // Ensure a frame exists at index `ci + 1`, growing the frame array if the current
 // one is full, and return that index -- our analogue of reference Lua's
 // `next_ci`/`luaE_extendCI`. Reference keeps freed `CallInfo` nodes on a
 // per-thread free list and reuses them; our contiguous array simply grows its
-// capacity and hands back the next slot. Because callers address frames by index,
-// a reallocation here invalidates nothing (Decision 3). Raises `Err_Mem` through
+// capacity and hands back the next slot. Callers hold indices, so a reallocation
+// cannot invalidate those references (Decision 3). Raises `Err_Mem` through
 // the active boundary on allocation failure.
 next_ci :: #force_inline proc(L: ^State) -> int {
 	next := L.ci + 1
 	if next >= L.frames_capacity {
 		grow_ci(L, next)
+	} else {
+		when HARDSTACKTESTS {realloc_ci(L, L.frames_capacity)}
 	}
 	L.ci = next
-	L.nci = next + 1 // active frames are exactly 0..ci (invariant nci == ci+1)
 	return next
 }
 
@@ -498,7 +527,6 @@ next_ci :: #force_inline proc(L: ^State) -> int {
 // usable top reaches `1 + LUA_MINSTACK`, guaranteeing a minimum working area.
 reset_ci :: proc(L: ^State) {
 	L.ci = 0
-	L.nci = 1
 	base := &L.frames[0]
 	base.func = 0
 	set_nil(stack_value(L, 0)) // the base frame's function entry

@@ -237,7 +237,8 @@ an integer result count.
 Because the value and frame stacks can reallocate, frames, protected boundaries,
 open upvalues, and API stack slots store **indices/offsets**. They resolve a slot
 to a pointer only for an operation on the current backing array. Frame pointers
-are never retained across re-entrant calls.
+are never retained across re-entrant calls. Active frames are exactly `0..L.ci`;
+there is no separate live-frame count to reconcile after an error unwind.
 
 The exception is `vm_execute`'s local register-base pointer. Stack reallocation
 arms the trap on every Lua frame; after a potentially moving call, the VM reloads
@@ -246,9 +247,21 @@ calls include metamethods, GC, hooks, native calls, iterators and varargs. A han
 that needs a register pointer again within the same instruction must re-derive it
 immediately after the call instead of waiting for the next fetch.
 
-`HARDSTACKTESTS` forces even no-growth stack checks and GC shrink paths to allocate
-a different block, poison and free the old block. The test scripts can combine
-this with AddressSanitizer to catch stale uses. As in reference's `ltests` build,
+The saved program counter remains an instruction index. Completed prototypes have
+immutable code rooted by the closure in the live frame's function slot; undumping
+copies the code, including for stripped and fixed-mode chunks. However, a loader
+reader can obtain the still-being-compiled closure through a C temporary exposed
+by the debug API, start it in a coroutine and yield. Compilation can then grow
+or shrink its code before that coroutine resumes. A saved code pointer would be
+outdated; the index lets frame entry re-derive the PC from the current code array.
+The local dispatch PC only exists while its VM activation is running, when that
+reader has not yet returned control to the parser.
+
+`HARDSTACKTESTS` forces even no-growth value-stack checks and GC shrink paths, and
+every frame push, to allocate a different block and free the old block. It poisons
+the old block before freeing outside ASan; the test scripts can combine stress
+with AddressSanitizer to catch outdated references. Frame growth also arms the existing
+per-frame traps, before publishing the new slot. As in reference's `ltests` build,
 stress defaults to a 68,000-slot stack limit so stack-overflow tests finish despite
 quadratic copying; ordinary builds retain the 1,000,000-slot limit. Extra allocations
 can change GC timing and Lua-visible memory measurements in this test mode.

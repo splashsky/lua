@@ -79,7 +79,9 @@ API precondition checks are independent and remain on by default for existing
 embedders; `-define:API_CHECKS=false` opts out. Neither option changes Odin or
 core-library assertions. Input checks and fail-fast guards remain unconditional.
 
-`-define:HARDSTACKTESTS=true` forces stack moves at checks and GC shrink paths.
+`-define:HARDSTACKTESTS=true` forces value-stack moves at checks and GC shrink
+paths, and frame-array moves on every frame push. Old blocks are freed and, in
+non-ASan builds, filled with a recognizable pattern first.
 Its `MAXSTACK_LIMIT` defaults to 68,000, as in reference's `ltests` build, instead
 of the release default of 1,000,000. `-define:MAXSTACK_LIMIT=<n>` overrides the
 limit in either configuration. The C-call limit remains 200. Stress allocations
@@ -205,7 +207,7 @@ Windows (PowerShell):
 Running one test by name uses Odin's `-define:ODIN_TEST_NAMES=tests.<name>` filter
 under the hood.
 
-To exercise forced stack relocation, including under AddressSanitizer:
+To exercise forced stack and frame relocation, including under AddressSanitizer:
 
 ```sh
 bash build/test.sh --stress

@@ -18,7 +18,7 @@ INTERNAL_ASSERTS :: #config(INTERNAL_ASSERTS, ODIN_DEBUG || ODIN_TEST || HARDSTA
 // internal invariants; embedders may explicitly opt out.
 API_CHECKS :: #config(API_CHECKS, true)
 
-// Test-only analogue of reference HARDSTACKTESTS; see realloc_stack.
+// Test-only analogue of reference HARDSTACKTESTS; see realloc_stack and realloc_ci.
 HARDSTACKTESTS :: #config(HARDSTACKTESTS, false)
 #assert(!HARDSTACKTESTS || INTERNAL_ASSERTS, "HARDSTACKTESTS requires internal assertions")
 

@@ -64,6 +64,13 @@ stack_in_use_reports_frame_extent :: proc(t: ^testing.T) {
 	testing.expect_value(t, kernel.stack_in_use(L), 1 + kernel.MINSTACK + 1)
 }
 
+@(test)
+stack_in_use_without_frame_array :: proc(t: ^testing.T) {
+	// The allocation-free thread baseline has no base frame yet.
+	L: kernel.State
+	testing.expect_value(t, kernel.stack_in_use(&L), kernel.MINSTACK)
+}
+
 // Forced moves must really change the backing address, preserve values, and
 // keep the allocator's live-byte accounting balanced.
 @(test)
@@ -121,6 +128,125 @@ stack_hard_move_failure_preserves_old_block :: proc(t: ^testing.T) {
 		kernel.close_state(L)
 		testing.expect_value(t, c.outstanding, 0)
 	}
+}
+
+// Every frame push in stress mode must move even when capacity is sufficient.
+// Verify the old live frames, accounting, and trap arming before initializing the
+// new slot. The temporary Lua frame does not execute or invoke the collector.
+@(test)
+frame_hard_push_moves_and_arms :: proc(t: ^testing.T) {
+	when kernel.HARDSTACKTESTS {
+		L := kernel.new_state(kernel.default_allocator())
+		testing.expect(t, L != nil)
+		defer kernel.close_state(L)
+		old := uintptr(L.frames)
+		bytes := kernel.gettotalbytes(L.g)
+		base_top := L.frames[0].top
+		testing.expect_value(t, kernel.next_ci(L), 1)
+		testing.expect(t, uintptr(L.frames) != old, "frame push must move the array")
+		testing.expect_value(t, L.frames[0].top, base_top)
+		testing.expect_value(t, kernel.gettotalbytes(L.g), bytes)
+		L.frames[1] = kernel.Call_Info{}
+		L.frames[1].top = 42
+		old = uintptr(L.frames)
+		testing.expect_value(t, kernel.next_ci(L), 2)
+		testing.expect(t, uintptr(L.frames) != old, "subsequent push must move the array")
+		testing.expect_value(t, L.frames[1].top, 42)
+		testing.expect_value(t, L.frames[1].u.l.trap, 1)
+		testing.expect_value(t, kernel.gettotalbytes(L.g), bytes)
+		// Fill the remaining capacity with initialized C frames, then force a
+		// capacity-growing move as well as the no-growth moves above.
+		L.frames[2] = kernel.Call_Info{}
+		L.frames[2].callstatus = kernel.CIST_C
+		for i in 3 ..< kernel.INITIAL_FRAMES {
+			testing.expect_value(t, kernel.next_ci(L), i)
+			L.frames[i] = kernel.Call_Info{}
+			L.frames[i].callstatus = kernel.CIST_C
+		}
+		old = uintptr(L.frames)
+		old_capacity := L.frames_capacity
+		testing.expect_value(t, kernel.next_ci(L), kernel.INITIAL_FRAMES)
+		testing.expect(t, uintptr(L.frames) != old, "growing push must move the array")
+		testing.expect(t, L.frames_capacity > old_capacity)
+		testing.expect_value(t, L.frames[1].top, 42)
+		testing.expect_value(t, L.frames[1].u.l.trap, 1)
+		L.ci = 0
+	}
+}
+
+// A failed forced frame move must leave both the old array and its accounting
+// intact and restore the emergency-GC guard before the memory error is thrown.
+@(test)
+frame_hard_move_failure_preserves_old_block :: proc(t: ^testing.T) {
+	when kernel.HARDSTACKTESTS {
+		c: Counting_Allocator
+		L := kernel.new_state(kernel.Allocator{alloc = counting_alloc, ud = &c})
+		testing.expect(t, L != nil)
+		old := uintptr(L.frames)
+		old_bytes := kernel.gettotalbytes(L.g)
+		old_outstanding := c.outstanding
+		old_gcstop := L.g.gcstopem
+		c.fail_at = c.alloc_index
+		c.fail_enabled = true
+		status := kernel.run_protected(L, proc(L: ^kernel.State, _: rawptr) -> kernel.Thread_Status {
+			kernel.next_ci(L)
+			return .Ok
+		}, nil)
+		testing.expect_value(t, status, kernel.Thread_Status.Err_Mem)
+		testing.expect_value(t, uintptr(L.frames), old)
+		testing.expect_value(t, L.ci, 0)
+		testing.expect_value(t, L.g.gcstopem, old_gcstop)
+		testing.expect_value(t, kernel.gettotalbytes(L.g), old_bytes)
+		testing.expect_value(t, c.outstanding, old_outstanding)
+		c.fail_enabled = false
+		kernel.close_state(L)
+		testing.expect_value(t, c.outstanding, 0)
+	}
+}
+
+// Force frame growth without moving the value stack. This checks that callers
+// return to the right Lua frames and that frame relocation arms their traps.
+frame_move_probe :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := (^kernel.State)(Lp)
+	old_ci := L.ci
+	old_stack := uintptr(L.stack)
+	old_capacity := L.frames_capacity
+	ok := true
+	for L.frames_capacity == old_capacity {
+		when kernel.HARDSTACKTESTS {old_frames := uintptr(L.frames)}
+		idx := kernel.next_ci(L)
+		when kernel.HARDSTACKTESTS {ok = ok && uintptr(L.frames) != old_frames}
+		L.frames[idx] = kernel.Call_Info{}
+		L.frames[idx].func = L.frames[old_ci].func
+		L.frames[idx].top = L.frames[old_ci].top
+		L.frames[idx].callstatus = kernel.CIST_C
+	}
+	L.ci = old_ci
+	ok = ok && uintptr(L.stack) == old_stack
+	lua_frames := 0
+	for i in 0 ..= L.ci {
+		if kernel.is_lua_frame(&L.frames[i]) {
+			lua_frames += 1
+			ok = ok && L.frames[i].u.l.trap != 0
+		}
+	}
+	kernel.api_pushboolean(L, ok && lua_frames >= 2)
+	return 1
+}
+
+@(test)
+frame_move_arms_suspended_lua_frames :: proc(t: ^testing.T) {
+	L := api_new()
+	defer kernel.close_state(L)
+	kernel.api_pushcfunction(L, frame_move_probe)
+	kernel.api_setglobal(L, "probe")
+	rd: Src_Reader
+	src := "local function inner(x) if not probe() then return -99 end; return x+22 end; " +
+	       "local function outer(x) local n=inner(x); return n+1 end; local n=outer(100); return n+1"
+	testing.expect_value(t, api_load(L, src, &rd), kernel.Thread_Status.Ok)
+	testing.expect_value(t, kernel.api_pcall(L, 0, 1, 0), kernel.Thread_Status.Ok)
+	testing.expect_value(t, kernel.api_tointeger(L, -1), 124)
 }
 
 // Reallocation from a native callback must arm every suspended Lua frame.
@@ -210,7 +336,7 @@ pcall_unwind_discards_frame_extents :: proc(t: ^testing.T) {
 	src := "local function f(n) if n==0 then return nil+1 end; return 1+f(n-1) end; return f(80)"
 	testing.expect_value(t, api_load(L, src, &rd), kernel.Thread_Status.Ok)
 	testing.expect_value(t, kernel.api_pcall(L, 0, 1, 0), kernel.Thread_Status.Err_Run)
-	testing.expect_value(t, L.nci, L.ci + 1)
+	testing.expect_value(t, L.ci, 0)
 	inuse := kernel.stack_in_use(L)
 	testing.expect(t, L.stack_size <= inuse * 2, "unwound frames must not prevent stack shrinking")
 }

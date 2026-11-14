@@ -613,8 +613,8 @@ resethookcount :: #force_inline proc "contextless" (L: ^State) {
 
 // Mark every live Lua frame as trapping, so the VM will call `luaG_traceexec`
 // before each instruction -- reference Lua's `settraps`. Called when a hook is
-// installed or a stack is relocated. C frames have no per-instruction dispatch,
-// so they are skipped.
+// installed or a stack/frame array is relocated. C frames have no per-instruction
+// dispatch, so they are skipped.
 settraps :: proc(L: ^State) {
 	if L.frames == nil { // a thread may be observed while its stack is being built
 		return

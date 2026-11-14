@@ -205,9 +205,13 @@ inc_top :: proc(L: ^State) -> Thread_Status {
 // `stackinuse`. Used by shrink logic (Phase 5) and honest in isolation now.
 stack_in_use :: proc(L: ^State) -> int {
 	lim := L.top
-	for i in 0 ..< L.nci {
-		if lim < L.frames[i].top {
-			lim = L.frames[i].top
+	// Active frames are exactly 0..ci, including after protected unwinds. A
+	// partially initialized thread has no frame array and hence no active frames.
+	if L.frames != nil {
+		for i in 0 ..= L.ci {
+			if lim < L.frames[i].top {
+				lim = L.frames[i].top
+			}
 		}
 	}
 	res := lim + 1
@@ -463,20 +467,23 @@ do_poscall :: #force_inline proc(L: ^State, ci_idx: int, nres: int) {
 	}
 	moveresults(L, ci.func, nres, fwanted)
 	L.ci = ci_idx - 1 // back to the caller (frames are a stack; caller is one below)
-	L.nci = ci_idx
 }
 
 // Allocate and initialize the next call frame -- reference Lua's `prepCallInfo`.
-// Returns the new frame's index. Only the result-count, CIST_C, and CCMT bits are
-// valid in `status` at this point.
-prepCallInfo :: #force_inline proc(L: ^State, func: int, status: u32, top: int) -> int {
+// Returns the new frame's index and pointer. The pointer is usable only until an
+// operation that can move the frames array. Only result-count, CIST_C, and CCMT
+// bits are valid in `status` at this point.
+prepCallInfo :: #force_inline proc(L: ^State, func: int, status: u32, top: int) -> (int, ^Call_Info) {
 	idx := next_ci(L) // grows the frame array if needed; sets L.ci
 	ci := &L.frames[idx]
 	ci.func = func
 	ci.callstatus = status
 	ci.top = top
+	// Each u2 reader is preceded by its corresponding yield, pcallk, or close
+	// write, but removing this initialization slowed unrelated empty VM loops
+	// with the current compiler, so keep the store.
 	ci.u2 = 0
-	return idx
+	return idx, ci
 }
 
 // precall for a C function (closure or light) -- reference Lua's `precallC`.
@@ -487,7 +494,7 @@ prepCallInfo :: #force_inline proc(L: ^State, func: int, status: u32, top: int) 
 // re-derive the pointer for `poscall`.
 precallC :: #force_inline proc(L: ^State, func: int, status: u32, f: C_Function) -> int {
 	check_stack_p(L, MINSTACK)
-	ci_idx := prepCallInfo(L, func, status | CIST_C, L.top + MINSTACK)
+	ci_idx, _ := prepCallInfo(L, func, status | CIST_C, L.top + MINSTACK)
 	if (L.hookmask & MASKCALL) != 0 {
 		narg := L.top - func - 1
 		do_hook(L, HOOKCALL, -1, 1, narg)
@@ -568,8 +575,7 @@ do_precall :: proc(L: ^State, func_in: int, nresults: int) -> int {
 			nfixparams := int(p.numparams)
 			fsize := int(p.maxstacksize)
 			check_stack_p(L, fsize)
-			ci_idx := prepCallInfo(L, func, status, func + 1 + fsize)
-			ci := &L.frames[ci_idx]
+			ci_idx, ci := prepCallInfo(L, func, status, func + 1 + fsize)
 			ci.u.l.savedpc = 0 // starting instruction
 			ci.u.l.nextraargs = 0
 			ci.u.l.trap = 0
@@ -683,7 +689,6 @@ do_closeprotected :: proc(L: ^State, level: int, status_in: Thread_Status) -> Th
 		// A close raised: undo the partial unwind and go around again.
 		status = st
 		L.ci = old_ci
-		L.nci = old_ci + 1
 		L.allowhook = old_allowhooks
 	}
 }
@@ -711,10 +716,9 @@ do_pcall :: proc(L: ^State, func: Protected_Proc, ud: rawptr, old_top: int, ef: 
 		return a.func(L, a.ud)
 	}, &args)
 	if status != .Ok { // an error escaped `func`
-		L.ci = old_ci
 		// Dropped frames are no longer active. In particular stack_in_use must
 		// not count their stale tops when reclaiming an overflow reserve.
-		L.nci = old_ci + 1
+		L.ci = old_ci
 		L.allowhook = old_allowhooks
 		status = do_closeprotected(L, old_top, status)
 		set_error_object(L, status, old_top)
@@ -918,7 +922,6 @@ precover :: proc(L: ^State, status_in: Thread_Status) -> Thread_Status {
 			break
 		}
 		L.ci = ci // drop to the recovery frame
-		L.nci = ci + 1
 		set_cist_recst(&L.frames[ci], status) // status for pcall to finish with
 		status = run_protected(L, unroll, nil)
 	}
