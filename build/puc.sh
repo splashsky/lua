@@ -54,6 +54,7 @@ for arg in "$@"; do
     esac
 done
 
+if [[ "${VM_THREADED:-0}" == "1" ]]; then LUA_EXE+="-threaded"; fi
 if [[ "$STRESS" == "1" ]]; then LUA_EXE+="-stress"; fi
 if [[ "$ASAN" == "1" ]]; then LUA_EXE+="-asan"; fi
 

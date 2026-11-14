@@ -4,6 +4,8 @@
 
 - **Odin compiler** on your `PATH`. Check with `odin version`.
 - A recent nightly is fine; this project tracks current Odin.
+- **Python 3** for `build/check.*` and regenerating the experimental VM handlers.
+  It is not needed by the runtime or to build an existing generated source tree.
 - **A native linker + system libraries to produce runnable binaries:**
   - **Windows:** the **Windows SDK** plus the **MSVC** toolchain (e.g. install
     *Visual Studio Build Tools* with the "Desktop development with C++" workload).
@@ -71,6 +73,32 @@ Windows (PowerShell):
 ```
 
 Binaries land in `build/out/`, named after the brand (`lua` / `luac` by default).
+
+### Experimental threaded VM
+
+The switch interpreter remains the default. To build and test the experimental
+tail-call-threaded interpreter, set `VM_THREADED=1` for the wrappers:
+
+```sh
+VM_THREADED=1 bash build/build.sh all
+VM_THREADED=1 bash build/test.sh --stress --asan
+VM_THREADED=1 STRESS=1 ASAN=1 bash build/puc.sh
+VM_THREADED=1 REFLUAC=/path/to/luac bash build/clitest.sh
+VM_THREADED=1 bash build/rebrand-smoke.sh
+VM_THREADED=1 bash build/build.sh freestanding
+```
+
+On Windows set `$env:VM_THREADED = '1'` before using the corresponding `.ps1`
+wrappers. Unset the variable (or set it to `0`) for the switch interpreter. For
+direct Odin commands use `-define:VM_THREADED=true`. The PUC wrapper gives its
+threaded binaries distinct names, including in relocation and memory-checker modes.
+
+The switch opcode bodies are the source of the threaded handlers. After changing
+them, run `python3 build/generate-threaded.py` (or `python` on Windows). The
+generator rejects changes to rewritten entry, fetch and edge-poll paths until reviewed;
+`build/check.*` verifies that the generated region is current and type-checks
+both the default and threaded interpreters, including freestanding. See Decision 2
+in `docs/ARCHITECTURE.md` for the safety rules and measured tradeoffs.
 
 Internal invariant assertions follow reference Lua's `lua_assert`: they are off
 in release builds and on in debug, `odin test`, and stress builds. Override this

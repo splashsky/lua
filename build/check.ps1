@@ -21,6 +21,10 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
 $Collection = "-collection:lang=$SrcDir"
 
+# Refuse generated handlers that no longer match the switch interpreter.
+& python (Join-Path $RepoRoot 'build\generate-threaded.py') --check
+if ($LASTEXITCODE -ne 0) { throw 'Threaded VM generation check failed.' }
+
 # Each entry: the path to check, and whether it's a library (no `main`).
 $Targets = @(
     @{ Path = 'src';        Lib = $false },
@@ -52,5 +56,16 @@ Write-Host "==> check src\freestanding ($FreestandingTarget)"
 & odin check (Join-Path $SrcDir 'freestanding') $Collection @BrandDefines `
     "-target:$FreestandingTarget" -default-to-nil-allocator -no-entry-point
 if ($LASTEXITCODE -ne 0) { throw "Freestanding package failed to check." }
+
+# Keep the optional interpreter type-checked even during the default check.
+if ($env:VM_THREADED -ne '1') {
+    Write-Host '==> check threaded interpreter'
+    & odin check $SrcDir $Collection @BrandDefines '-define:VM_THREADED=true'
+    if ($LASTEXITCODE -ne 0) { throw 'Threaded interpreter failed to check.' }
+    Write-Host "==> check threaded freestanding interpreter ($FreestandingTarget)"
+    & odin check (Join-Path $SrcDir 'freestanding') $Collection @BrandDefines `
+        '-define:VM_THREADED=true' "-target:$FreestandingTarget" -default-to-nil-allocator -no-entry-point
+    if ($LASTEXITCODE -ne 0) { throw 'Threaded freestanding interpreter failed to check.' }
+}
 
 Write-Host "All packages check clean."

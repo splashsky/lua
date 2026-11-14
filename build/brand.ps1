@@ -13,7 +13,8 @@
     default build is byte-for-byte the one the PUC-Rio suite validates.
 
     Individual knobs can still be overridden for full control, e.g.
-    `-Brand moon -SourceExt .mn`.
+    `-Brand moon -SourceExt .mn`. VM_THREADED=1 is also forwarded by every
+    wrapper through the environment.
 #>
 
 # The -define: flags for a brand, or an empty array for the default profile.
@@ -28,7 +29,9 @@ function Get-BrandDefines {
 
     $isDefault = ($Brand -ceq 'lua') -and ($Display -eq '') -and
                  ($SourceExt -eq '') -and ($EnvPrefix -eq '')
-    if ($isDefault) { return @() }
+    $vmDefines = @()
+    if ($env:VM_THREADED -eq '1') { $vmDefines += '-define:VM_THREADED=true' }
+    if ($isDefault) { return $vmDefines }
 
     if ($Display -eq '') {
         # "moon" -> "Moon": the conventional display spelling.
@@ -43,7 +46,7 @@ function Get-BrandDefines {
         "-define:SOURCE_EXT=$SourceExt",
         "-define:ENV_PREFIX=$EnvPrefix",
         "-define:NATIVE_OPEN_FMT=$($Brand)open_%s"
-    )
+    ) + $vmDefines
 }
 
 # The interpreter binary name for a brand ("lua.exe", "moon.exe").

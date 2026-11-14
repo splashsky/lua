@@ -20,6 +20,10 @@ source "$SCRIPT_DIR/brand.sh"
 SRC_DIR="$REPO_ROOT/src"
 COLLECTION="-collection:lang=$SRC_DIR"
 
+# The switch is the source of the generated threaded handlers. Refuse stale
+# output rather than allowing changes to one interpreter to miss the other.
+python3 "$REPO_ROOT/build/generate-threaded.py" --check
+
 # "path:is_library" pairs. Library packages have no `main`, so pass -no-entry-point.
 check_one() {
     local path="$1" is_lib="$2"
@@ -48,5 +52,16 @@ echo "==> check src/freestanding ($FREESTANDING_TARGET)"
 odin check "$REPO_ROOT/src/freestanding" "$COLLECTION" \
     "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" \
     "-target:$FREESTANDING_TARGET" -default-to-nil-allocator -no-entry-point
+
+# Keep the optional interpreter type-checked even during the default check.
+if [[ "${VM_THREADED:-0}" != "1" ]]; then
+    echo "==> check threaded interpreter"
+    odin check "$REPO_ROOT/src" "$COLLECTION" \
+        "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" -define:VM_THREADED=true
+    echo "==> check threaded freestanding interpreter ($FREESTANDING_TARGET)"
+    odin check "$REPO_ROOT/src/freestanding" "$COLLECTION" \
+        "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" -define:VM_THREADED=true \
+        "-target:$FREESTANDING_TARGET" -default-to-nil-allocator -no-entry-point
+fi
 
 echo "All packages check clean."

@@ -149,6 +149,47 @@ test_vm_reserved_opcodes :: proc(t: ^testing.T) {
 	}
 }
 
+// Exercise frame entry/return, tail calls, tracing, GC, and resumption of an
+// interrupted arithmetic instruction in one execution. In relocation test
+// mode the frame and value stacks also move during these transitions.
+@(test)
+vm_deep_frames_hooks_and_resume :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local events = 0
+		local function recur(n)
+		  if n == 0 then return 0 end
+		  return 1 + recur(n - 1)
+		end
+		local function tail(n)
+		  if n == 0 then return 42 end
+		  return tail(n - 1)
+		end
+		local co = coroutine.create(function()
+		  local x = setmetatable({value = 17}, {
+		    __add = function(a) coroutine.yield(a.value); return 91 end
+		  })
+		  local z = x + 1
+		  return recur(2000), tail(50000), z
+		end)
+		debug.sethook(co, function() events = events + 1 end, '', 10000)
+		local ok, yielded = coroutine.resume(co)
+		assert(ok and yielded == 17)
+		collectgarbage('collect')
+		local ok2, a, b, c = coroutine.resume(co)
+		assert(ok2 and a == 2000 and b == 42 and c == 91)
+		assert(coroutine.status(co) == 'dead' and events > 0)
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
 // Debug code can mutate the loop's control-variable tag. Preserve this VM's
 // existing tag repair (unlike reference Lua, which preserves the changed tag).
 // Ordinary source code cannot assign to a numeric-for control variable.

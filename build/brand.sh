@@ -14,7 +14,7 @@
 # build is byte-for-byte the one the PUC-Rio suite validates.
 #
 # Individual knobs can still be overridden: BRAND_DISPLAY, SOURCE_EXT,
-# ENV_PREFIX.
+# ENV_PREFIX. VM_THREADED=1 is also forwarded by every wrapper.
 #
 # Source this file, then use $BRAND_DEFINES (an array), $BRAND_EXE and
 # $BRAND_COMPILER_EXE.
@@ -38,6 +38,12 @@ if [[ "$BRAND" != "lua" || -n "${BRAND_DISPLAY:-}" ||
         "-define:ENV_PREFIX=$_env"
         "-define:NATIVE_OPEN_FMT=${BRAND}open_%s"
     )
+fi
+
+# Shared by every wrapper that builds the kernel, including the CLI and
+# rebranding tests. The default still passes no interpreter define.
+if [[ "${VM_THREADED:-0}" == "1" ]]; then
+    BRAND_DEFINES+=("-define:VM_THREADED=true")
 fi
 
 BRAND_EXE="$BRAND"
