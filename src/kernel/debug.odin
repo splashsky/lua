@@ -660,6 +660,11 @@ debug_traceexec :: #force_no_inline proc(L: ^State, pc: int) -> i32 {
 	}
 	npci := pc // the instruction about to execute
 	ci.u.l.savedpc = pc + 1 // reference's `savepc`: savedpc points at the *next* instr
+	// A malformed chunk can reach a reserved encoding while tracing. Reject it
+	// before `is_it` indexes the opcode property table, just as dispatch does.
+	if npci < p.sizecode && int(get_opcode(p.code[npci])) >= NUM_OPCODES {
+		debug_runerror(L, "invalid opcode")
+	}
 	counthook := false
 	L.hookcount -= 1
 	if L.hookcount == 0 && (mask & MASKCOUNT) != 0 {
@@ -707,8 +712,8 @@ debug_traceexec :: #force_no_inline proc(L: ^State, pc: int) -> i32 {
 // particular, a Windows console-control callback runs on a new OS thread: it
 // must not call lua_sethook, walk frames, allocate, or otherwise race the VM.
 // The owner fills the immutable hook description before arming it; the handler
-// publishes only `pending`, and the interpreter thread performs the real
-// lua_sethook at the next call, return, or loop back-edge.
+// publishes `pending` and a global poll hint, and the interpreter thread performs
+// the real lua_sethook at the next call, return, or loop back-edge.
 Async_Hook_Request :: struct {
 	pending: i32,
 	hook:    Hook_Proc,
@@ -718,8 +723,16 @@ Async_Hook_Request :: struct {
 
 // The standalone interpreter has one executing main state. Keeping the mailbox
 // pointer here avoids changing Lua_State's public/internal ABI merely for hosted
-// driver policy. Embedders never arm it, so their VM fast path sees nil.
+// driver policy. As before, whichever State reaches a poll first consumes the
+// currently armed request; the request is not owned by a particular State.
 async_hook_request: ^Async_Hook_Request
+
+// A hint, not a replacement for the per-request pending bit: requests for an
+// unarmed mailbox must not install the currently armed mailbox's hook. The
+// handler stores the mailbox bit first and then publishes this flag. Pollers
+// exchange the flag *before* examining the mailbox, so a concurrent publisher
+// cannot have its notification erased after the mailbox has been inspected.
+async_hook_pending: i32
 
 api_prepare_async_hook :: proc(
 	L: ^State,
@@ -735,9 +748,10 @@ api_prepare_async_hook :: proc(
 }
 
 // This is intentionally the only operation an OS handler performs. It is not a
-// general Lua API call: one atomic store is the whole implementation.
+// general Lua API call: both stores are lock-free and signal-handler-safe.
 api_request_async_hook :: proc "contextless" (request: ^Async_Hook_Request) {
 	intrinsics.atomic_store(&request.pending, i32(1))
+	intrinsics.atomic_store(&async_hook_pending, i32(1))
 }
 
 api_disarm_async_hook :: proc(L: ^State, request: ^Async_Hook_Request) {
@@ -747,12 +761,14 @@ api_disarm_async_hook :: proc(L: ^State, request: ^Async_Hook_Request) {
 	intrinsics.atomic_store(&request.pending, i32(0))
 }
 
-// Called solely by the interpreter thread. Acquire/exchange pairs with the
-// handler's publication, so every ordinary Lua field remains single-threaded.
-// The initial load matters for performance: an exchange is a locked read/modify/
-// write even when no interrupt is pending, whereas the overwhelmingly common
-// zero case needs only an acquire load and a branch.
+// The VM checks the hint before calling this cold path. Clearing it before
+// inspecting pending preserves concurrent publications; an extra poll is harmless.
+// As in the original mailbox design, hook descriptions and the armed pointer are
+// prepared/disarmed by the owning interpreter, not modified by the OS handler.
 api_apply_async_hook :: proc(L: ^State) -> bool {
+	if intrinsics.atomic_exchange(&async_hook_pending, i32(0)) == 0 {
+		return false
+	}
 	request := async_hook_request
 	if request == nil || intrinsics.atomic_load(&request.pending) == 0 {
 		return false

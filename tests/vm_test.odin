@@ -120,6 +120,60 @@ res_string :: proc(fx: ^VM_Fixture, i: int) -> string {
 // Arithmetic and constant folding
 // ---------------------------------------------------------------------------
 
+// Every unused 7-bit encoding must fail as a Lua error rather than falling
+// through dispatch or indexing beyond its jump table. Mutate compiled code just
+// as a malformed binary chunk could, and execute under the public protected API.
+vm_reserved_hook :: proc "c" (L, ar: rawptr) {}
+
+@(test)
+test_vm_reserved_opcodes :: proc(t: ^testing.T) {
+	for traced in ([]bool{false, true}) {
+		for op in kernel.NUM_OPCODES ..< (1 << kernel.SIZE_OP) {
+			fx: Parse_Fixture
+			status := compile(&fx, "return 1")
+			if status == .Ok {
+				p := main_proto(&fx)
+				kernel.set_opcode(&p.code[1], kernel.Op_Code(op))
+				if traced {
+					kernel.api_sethook(fx.L, vm_reserved_hook, kernel.MASKCOUNT, 1)
+				}
+				status = kernel.api_pcall(fx.L, 0, 0, 0)
+				testing.expectf(t, status == .Err_Run, "reserved opcode %d (traced=%v) must raise", op, traced)
+				msg, ok := kernel.api_tolstring(fx.L, -1)
+				testing.expectf(t, ok && contains(msg, "invalid opcode"), "opcode %d: %s", op, msg)
+			} else {
+				testing.expect_value(t, status, kernel.Thread_Status.Ok)
+			}
+			teardown_parser(&fx)
+		}
+	}
+}
+
+// Debug code can mutate the loop's control-variable tag. Preserve this VM's
+// existing tag repair (unlike reference Lua, which preserves the changed tag).
+// Ordinary source code cannot assign to a numeric-for control variable.
+@(test)
+numeric_for_debug_control_tag :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local seen, n = nil, 0
+		for i = 1, 2 do
+		  n = n + 1
+		  if n == 1 then debug.setlocal(1, 5, false)
+		  else seen = type(i) end
+		end
+		return seen
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	seen, ok := kernel.api_tolstring(L, -1)
+	testing.expectf(t, ok && seen == "number", "control tag after debug mutation: %s", seen)
+}
+
 @(test)
 test_vm_integer_arithmetic :: proc(t: ^testing.T) {
 	fx: VM_Fixture

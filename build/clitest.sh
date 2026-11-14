@@ -96,6 +96,43 @@ assert_eq 'lua chained -e' 'ab' "$out"
 
 "$LUA" -Z >/dev/null 2>&1; [[ $? -ne 0 ]] && assert_true 'lua bad option -> nonzero exit' 1 || assert_true 'lua bad option -> nonzero exit' 0
 
+# Linux has a real SIGINT handler. Check both a bare back-edge and repeated Lua
+# calls, and let pcall catch the interrupt; continuing afterward proves that the
+# request and its hook were consumed rather than delivered a second time.
+if [[ "$(uname -s)" == Linux ]]; then
+    for kind in loop calls; do
+        if [[ "$kind" == loop ]]; then body='while true do end'
+        else body='local function f() end; while true do f() end'; fi
+        cat > "$WORK/interrupt.lua" <<EOF
+local ok, msg = pcall(function()
+  print('ready'); io.stdout:flush()
+  $body
+end)
+assert(not ok and string.find(msg, 'interrupted!', 1, true))
+for i = 1, 1000 do local x = i end
+print('consumed once')
+EOF
+        "$LUA" "$WORK/interrupt.lua" >"$WORK/interrupt.out" 2>"$WORK/interrupt.err" &
+        pid=$!
+        ready=0
+        for ((i=0; i<200; i++)); do
+            if grep -qx ready "$WORK/interrupt.out"; then ready=1; break; fi
+            if ! kill -0 "$pid" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        if [[ "$ready" -eq 1 ]]; then kill -INT "$pid" 2>/dev/null || true; fi
+        for ((i=0; i<200; i++)); do
+            if ! kill -0 "$pid" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+        wait "$pid"; code=$?
+        out="$(cat "$WORK/interrupt.out")"
+        [[ "$ready" -eq 1 && "$code" -eq 0 && "$out" == $'ready\nconsumed once' ]] && \
+            assert_true "SIGINT $kind is caught once" 1 || assert_true "SIGINT $kind is caught once" 0
+    done
+fi
+
 echo "==> luac CLI"
 
 srcout="$("$LUA" "$HELLO" X 2>/dev/null)"

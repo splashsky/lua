@@ -1,4 +1,5 @@
 package kernel
+import "base:intrinsics"
 // vm.odin -- our analogue of reference Lua's `lvm.h` / `lvm.c`.
 //
 // The interpreter itself: the loop that decodes and executes bytecode. Unlike a
@@ -23,6 +24,9 @@ package kernel
 // The guard against a runaway `__index`/`__newindex` metamethod chain -- reference
 // Lua's `MAXTAGLOOP`.
 MAXTAGLOOP :: 2000
+
+// The reserved dispatch cases below cover NUM_OPCODES through 2^SIZE_OP - 1.
+#assert(NUM_OPCODES == 85 && SIZE_OP == 7)
 
 // ---------------------------------------------------------------------------
 // Numeric coercions with string parsing (the `for`-loop / tonumber path)
@@ -837,16 +841,23 @@ vm_pc_index :: #force_inline proc "contextless" (pc, code: [^]Instruction) -> in
 // Please resist the tempting simplification of calling this at the top of the
 // dispatch loop. That makes every ordinary bytecode instruction perform an
 // atomic load for an event that almost never occurs. Here straight-line code pays
-// nothing, while loops and frame transitions pay one acquire load per edge. The
-// exchange and lua_sethook happen only after the handler has published a request.
+// nothing, while loops and frame transitions pay one atomic load per edge. Only
+// a set global hint enters the cold mailbox/exchange and lua_sethook path.
 // Freestanding Lua has no console or signal source at all, so the compile-time
-// branch reduces this helper to `return trap` and emits no mailbox access.
+// branch reduces `vm_poll_async_hook` to `return trap` and emits no mailbox access.
+vm_apply_async_hook :: #force_no_inline proc(L: ^State, trap: i32) -> i32 {
+	if api_apply_async_hook(L) {
+		return 1
+	}
+	return trap
+}
+
 vm_poll_async_hook :: #force_inline proc(L: ^State, trap: i32) -> i32 {
 	when ODIN_OS == .Freestanding {
 		return trap
 	} else {
-		if api_apply_async_hook(L) {
-			return 1
+		if intrinsics.atomic_load(&async_hook_pending) != 0 {
+			return vm_apply_async_hook(L, trap)
 		}
 		return trap
 	}
@@ -1485,13 +1496,16 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 
 			case .RETURN0:
 				trap = vm_poll_async_hook(L, trap)
+				callstatus: u32
 				if L.hookmask != 0 {
 					ra := base + getarg_A(i)
 					L.top = ra
 					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					do_poscall(L, ci_idx, 0)
+					callstatus = L.frames[ci_idx].callstatus // hook may move frames
 				} else {
-					nres := get_nresults(L.frames[ci_idx].callstatus)
+					callstatus = L.frames[ci_idx].callstatus
+					nres := get_nresults(callstatus)
 					L.ci = ci_idx - 1
 					L.nci = ci_idx
 					L.top = base - 1
@@ -1501,7 +1515,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 						nres -= 1
 					}
 				}
-				if (L.frames[ci_idx].callstatus & CIST_FRESH) != 0 {
+				if (callstatus & CIST_FRESH) != 0 {
 					return
 				}
 				ci_idx -= 1
@@ -1509,19 +1523,22 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 
 			case .RETURN1:
 				trap = vm_poll_async_hook(L, trap)
+				callstatus: u32
 				if L.hookmask != 0 {
 					ra := base + getarg_A(i)
 					L.top = ra + 1
 					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					do_poscall(L, ci_idx, 1)
+					callstatus = L.frames[ci_idx].callstatus // hook may move frames
 				} else {
-					nres := get_nresults(L.frames[ci_idx].callstatus)
+					callstatus = L.frames[ci_idx].callstatus
+					nres := get_nresults(callstatus)
 					L.ci = ci_idx - 1
 					L.nci = ci_idx
 					if nres == 0 {
 						L.top = base - 1
 					} else {
-						set_obj(stack_value(L, base - 1), stack_value(L, base + getarg_A(i)))
+						set_obj(&regs[-1].val, &regs[getarg_A(i)].val)
 						L.top = base
 						for nres > 1 {
 							set_nil(stack_value(L, L.top))
@@ -1530,7 +1547,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 						}
 					}
 				}
-				if (L.frames[ci_idx].callstatus & CIST_FRESH) != 0 {
+				if (callstatus & CIST_FRESH) != 0 {
 					return
 				}
 				ci_idx -= 1
@@ -1670,6 +1687,21 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				// Always consumed as the operand of a preceding opcode; reaching it
 				// on its own is a compiler bug.
 				debug_runerror(L, "internal error: stray EXTRAARG")
+
+			// Spell each unused encoding separately so LLVM can dispatch the whole
+			// 7-bit domain with one dense jump table. Update this list if the opcode
+			// set or field width changes; these are invalid, not enum members.
+			case Op_Code(85), Op_Code(86), Op_Code(87), Op_Code(88), Op_Code(89),
+			     Op_Code(90), Op_Code(91), Op_Code(92), Op_Code(93), Op_Code(94),
+			     Op_Code(95), Op_Code(96), Op_Code(97), Op_Code(98), Op_Code(99),
+			     Op_Code(100), Op_Code(101), Op_Code(102), Op_Code(103), Op_Code(104),
+			     Op_Code(105), Op_Code(106), Op_Code(107), Op_Code(108), Op_Code(109),
+			     Op_Code(110), Op_Code(111), Op_Code(112), Op_Code(113), Op_Code(114),
+			     Op_Code(115), Op_Code(116), Op_Code(117), Op_Code(118), Op_Code(119),
+			     Op_Code(120), Op_Code(121), Op_Code(122), Op_Code(123), Op_Code(124),
+			     Op_Code(125), Op_Code(126), Op_Code(127):
+				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
+				debug_runerror(L, "invalid opcode")
 			}
 		}
 	}
