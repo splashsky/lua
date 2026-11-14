@@ -6,6 +6,8 @@ package tests
 // formatting, and same-day/same-table differences for os.time/os.difftime so the
 // host time zone cancels out. We never assert on the wall clock's actual value.
 
+import "base:runtime"
+import "core:os"
 import "core:testing"
 import kernel "lang:kernel"
 import stdlib "lang:stdlib"
@@ -125,4 +127,141 @@ oslib_date_bad_specifier :: proc(t: ^testing.T) {
 	// An unknown conversion specifier must raise, not silently pass through.
 	st := oslib_run(L, "return os.date('!%Q', 0)")
 	testing.expect(t, st != .Ok, "an invalid strftime specifier is rejected")
+}
+
+// Every native callback starts with runtime.default_context(), so inspecting
+// this thread's actual default arena detects allocations that a Lua heap or RSS
+// test alone can miss. Warm it first, then demand no per-call accumulation.
+@(test)
+oslib_temporary_arena_is_bounded :: proc(t: ^testing.T) {
+	long_value: [4096]u8
+	for &ch in long_value do ch = 'x'
+	name :: "LUA_ODIN_TEMP_ARENA_TEST_LONG"
+	if !testing.expect(t, os.set_env(name, string(long_value[:])) == nil) do return
+	defer os.unset_env(name)
+	L := oslib_state()
+	defer kernel.close_state(L)
+	src := `
+		for i = 1, 2000 do
+			assert(#os.getenv('LUA_ODIN_TEMP_ARENA_TEST_LONG') == 4096)
+			os.getenv('LUA_ODIN_TEMP_ARENA_TEST_MISSING')
+			os.date('!%c %D %T %F %R', 1700000000)
+			os.date('%c %Z %z', 1700000000)
+			os.date('*t', 1700000000)
+			assert(not pcall(os.date, '%Q', 1700000000))
+			os.time({year=2023, month=11, day=14})
+		end
+	`
+	temp := (^runtime.Default_Temp_Allocator)(runtime.default_context().temp_allocator.data)
+	// Warm the implementation and make the comparison on the same thread.
+	testing.expect_value(t, oslib_run(L, src), kernel.Thread_Status.Ok)
+	before := temp.arena.total_used
+	testing.expect_value(t, oslib_run(L, src), kernel.Thread_Status.Ok)
+	testing.expect_value(t, temp.arena.total_used, before)
+}
+
+Host_String_Fail_Allocator :: struct {
+	count: Counting_Allocator,
+	fail: bool,
+}
+
+host_string_fail_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize, nsize: uint) -> rawptr {
+	a := (^Host_String_Fail_Allocator)(ud)
+	if a.fail && nsize != 0 do return nil
+	return counting_alloc(&a.count, ptr, osize, nsize)
+}
+
+getenv_oom_body :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
+	stdlib.aux_getenv_push(L, (^string)(ud)^)
+	return .Ok
+}
+
+@(thread_local)
+host_finalizer_saw_scope: bool
+@(thread_local)
+host_finalizer_ran: bool
+
+// Set up an immediately pending finalizer without running it. The next
+// api_pushstring GC check must happen only after the host arena scope is closed.
+host_prepare_finalizer :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := (^kernel.State)(Lp)
+	kernel.gc_runtilstate(L, kernel.GCScallfin, true)
+	queued := L.g.tobefnz != nil
+	L.g.gcstp = 0
+	kernel.state_setdebt(L.g, 0)
+	kernel.api_pushboolean(L, queued)
+	return 1
+}
+
+host_record_finalizer :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	temp := (^runtime.Default_Temp_Allocator)(context.temp_allocator.data)
+	host_finalizer_saw_scope = temp.arena.temp_count != 0
+	host_finalizer_ran = true
+	return 0
+}
+
+@(test)
+oslib_getenv_releases_scope_before_finalizer :: proc(t: ^testing.T) {
+	long_value: [4096]u8
+	for &ch in long_value do ch = 'f'
+	name :: "LUA_ODIN_TEMP_ARENA_TEST_FINALIZER"
+	if !testing.expect(t, os.set_env(name, string(long_value[:])) == nil) do return
+	defer os.unset_env(name)
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
+	stdlib.aux_openlibs(L)
+	kernel.api_pushcfunction(L, host_prepare_finalizer)
+	kernel.api_setglobal(L, "prepare_host_finalizer")
+	kernel.api_pushcfunction(L, host_record_finalizer)
+	kernel.api_setglobal(L, "record_host_finalizer")
+	host_finalizer_ran = false
+	host_finalizer_saw_scope = false
+	status := oslib_run(L, `
+		collectgarbage('incremental')
+		local co = coroutine.create(function()
+			collectgarbage('collect')
+			collectgarbage('stop')
+			local obj = setmetatable({}, {__gc = function()
+				record_host_finalizer()
+				coroutine.close()
+			end})
+			obj = nil
+			assert(prepare_host_finalizer())
+			os.getenv('LUA_ODIN_TEMP_ARENA_TEST_FINALIZER')
+			error('the finalizer must close this coroutine')
+		end)
+		assert(coroutine.resume(co))
+		assert(coroutine.status(co) == 'dead')
+	`)
+	testing.expect_value(t, status, kernel.Thread_Status.Ok)
+	testing.expect(t, host_finalizer_ran, "the queued finalizer must run")
+	testing.expect(t, !host_finalizer_saw_scope, "finalizers cannot escape a host arena scope")
+}
+
+// The allocating getenv fallback has a host arena scope around a Lua string
+// allocation. Exercise the actual longjmp, including the emergency-GC retry,
+// rather than only testing the ordinary success and argument-error paths.
+@(test)
+oslib_getenv_oom_ends_temporary_scope :: proc(t: ^testing.T) {
+	long_value: [4096]u8
+	for &ch in long_value do ch = 'q'
+	name := "LUA_ODIN_TEMP_ARENA_TEST_OOM"
+	if !testing.expect(t, os.set_env(name, string(long_value[:])) == nil) do return
+	defer os.unset_env(name)
+	a: Host_String_Fail_Allocator
+	L := kernel.new_state(kernel.Allocator{alloc = host_string_fail_alloc, ud = &a})
+	if !testing.expect(t, L != nil) do return
+	temp := (^runtime.Default_Temp_Allocator)(runtime.default_context().temp_allocator.data)
+	before := temp.arena.total_used
+	for _ in 0 ..< 20 {
+		a.fail = true
+		status := kernel.run_protected(L, getenv_oom_body, &name)
+		a.fail = false
+		testing.expect_value(t, status, kernel.Thread_Status.Err_Mem)
+		testing.expect_value(t, temp.arena.total_used, before)
+	}
+	kernel.close_state(L)
+	testing.expect_value(t, a.count.outstanding, 0)
 }

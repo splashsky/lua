@@ -19,7 +19,6 @@ package stdlib
 // default is C); and OS error wording comes from core:os rather than strerror.
 
 import "base:runtime"
-import "core:fmt"
 import "core:os"
 import "core:time"
 import win32 "core:sys/windows"
@@ -206,9 +205,11 @@ transition_timestamp :: proc(year: i64, rule: win32.SYSTEMTIME, prior_offset: i6
 	return local_nominal - prior_offset
 }
 
-@(private = "file")
-local_at_timestamp :: proc(t: i64) -> (Civil_Time, bool) {
-	when ODIN_OS == .Windows {
+// Only the Windows conversion calls this helper. POSIX resolves its timezone
+// with an explicitly scoped loader in local_date / timestamp_from_local.
+when ODIN_OS == .Windows {
+	@(private = "file")
+	local_at_timestamp :: proc(t: i64) -> (Civil_Time, bool) {
 		utc := civil_at_timestamp(t)
 		// Windows' CRT applies the current TIME_ZONE_INFORMATION recurrence to
 		// every year. SystemTimeToTzSpecificLocalTime(nil, ...) looks tempting,
@@ -233,28 +234,6 @@ local_at_timestamp :: proc(t: i64) -> (Civil_Time, bool) {
 		out := civil_at_timestamp(t + offset)
 		out.offset = offset
 		out.isdst = in_dst ? 1 : 0
-		return out, true
-	} else {
-		zone, loaded := load_local_zone()
-		if loaded {
-			// The abbreviation in Civil_Time is a slice into this temporary TZif
-			// image. This helper is only retained for callers that consume the
-			// result immediately; os.date keeps its own zone alive through formatting.
-			kind, found := local_zone_at(zone, t)
-			if found {
-				out := civil_at_timestamp(t + kind.offset)
-				out.offset = kind.offset
-				out.isdst = kind.is_dst ? 1 : 0
-				out.zone = kind.abbreviation
-				return out, true
-			}
-		}
-		// An unreadable or unsupported zone is not allowed to make os.date fail:
-		// UTC is the documented, deterministic last resort.
-		out := civil_at_timestamp(t)
-		out.offset = 0
-		out.isdst = 0
-		out.zone = "UTC"
 		return out, true
 	}
 }
@@ -308,6 +287,8 @@ timestamp_from_local :: proc(wall: Civil_Time, nominal: i64, wanted_dst: int) ->
 		got, valid := local_at_timestamp(t)
 		return t, got, valid
 	} else {
+		temp := runtime.default_temp_allocator_temp_begin()
+		defer aux_host_temp_end(temp) // no Lua calls in this scope
 		zone, loaded := load_local_zone()
 		if !loaded {
 			got := civil_at_timestamp(nominal)
@@ -466,7 +447,7 @@ getfield :: proc(L: ^kernel.State, key: string, d: int, delta: int) -> int {
 }
 
 @(private = "file")
-checkoption :: proc(L: ^kernel.State, conv: []u8) -> int {
+option_length :: proc(conv: []u8) -> int {
 	option := STRFTIME_OPTIONS
 	oplen := 1
 	oi := 0
@@ -478,7 +459,31 @@ checkoption :: proc(L: ^kernel.State, conv: []u8) -> int {
 		}
 		oi += oplen
 	}
+	return 0
+}
+
+@(private = "file")
+checkoption :: proc(L: ^kernel.State, conv: []u8) -> int {
+	if n := option_length(conv); n != 0 do return n
 	aux_argerror(L, 1, kernel.api_pushfstring(L, "invalid conversion specifier '%%%s'", string(conv)))
+}
+
+// Only retain a zone abbreviation if formatting can reach a real %Z. In
+// particular, %%Z is literal and a bad earlier conversion raises first.
+@(private = "file")
+needs_zone_name :: proc(format: []u8) -> bool {
+	for i := 0; i < len(format); {
+		if format[i] != '%' {
+			i += 1
+			continue
+		}
+		i += 1
+		n := option_length(format[i:])
+		if n == 0 do return false
+		if format[i + n - 1] == 'Z' do return true
+		i += n
+	}
+	return false
 }
 
 @(private = "file")
@@ -519,11 +524,43 @@ zone_name :: proc(c: Civil_Time, dst: bool, buf: []u8) -> string {
 
 @(private = "file")
 add_num :: proc(B: ^Buffer, value: i64, width: int, unpadded: bool = false) {
-	if unpadded {
-		aux_addstring(B, fmt.tprintf("%d", value))
-	} else {
-		aux_addstring(B, fmt.tprintf("%0*d", width, value))
+	// i64 needs at most 20 decimal digits plus a sign. Work in unsigned
+	// arithmetic so even min(i64) can be negated without signed overflow.
+	buf: [21]u8
+	i := len(buf)
+	n := value < 0 ? u64(0) - u64(value) : u64(value)
+	for {
+		i -= 1
+		buf[i] = u8(n % 10) + '0'
+		n /= 10
+		if n == 0 do break
 	}
+	if value < 0 do aux_addchar(B, '-')
+	if !unpadded {
+		padding := width - (len(buf) - i) - (value < 0 ? 1 : 0)
+		for _ in 0 ..< max(padding, 0) do aux_addchar(B, '0')
+	}
+	aux_addlstring(B, buf[i:])
+}
+
+@(private = "file")
+add_clock :: proc(B: ^Buffer, hour, minute, second: int, seconds: bool = true) {
+	add_num(B, i64(hour), 2)
+	aux_addchar(B, ':')
+	add_num(B, i64(minute), 2)
+	if seconds {
+		aux_addchar(B, ':')
+		add_num(B, i64(second), 2)
+	}
+}
+
+@(private = "file")
+add_short_date :: proc(B: ^Buffer, c: Civil_Time) {
+	add_num(B, i64(c.month), 2)
+	aux_addchar(B, '/')
+	add_num(B, i64(c.day), 2)
+	aux_addchar(B, '/')
+	add_num(B, floor_mod(c.year, 100), 2)
 }
 
 @(private = "file")
@@ -539,25 +576,40 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 	case 'B': aux_addstring(B, MONTH_LONG[c.month - 1])
 	case 'c':
 		if alternate && op[0] == '#' {
-			aux_addstring(B, fmt.tprintf("%s, %s %02d, %04d %02d:%02d:%02d",
-				WDAY_LONG[c.wday], MONTH_LONG[c.month - 1], c.day, c.year, c.hour, c.minute, c.second))
+			aux_addstring(B, WDAY_LONG[c.wday])
+			aux_addstring(B, ", ")
+			aux_addstring(B, MONTH_LONG[c.month - 1])
+			aux_addchar(B, ' ')
+			add_num(B, i64(c.day), 2)
+			aux_addstring(B, ", ")
+			add_num(B, c.year, 4)
+			aux_addchar(B, ' ')
+			add_clock(B, c.hour, c.minute, c.second)
 		} else {
 			aux_addstring(B, WDAY_SHORT[c.wday])
 			aux_addchar(B, ' ')
 			aux_addstring(B, MONTH_SHORT[c.month - 1])
 			aux_addchar(B, ' ')
 			if c.day < 10 do aux_addchar(B, ' ')
-			aux_addstring(B, fmt.tprintf("%d %02d:%02d:%02d %04d",
-				c.day, c.hour, c.minute, c.second, c.year))
+			add_num(B, i64(c.day), 0, true)
+			aux_addchar(B, ' ')
+			add_clock(B, c.hour, c.minute, c.second)
+			aux_addchar(B, ' ')
+			add_num(B, c.year, 4)
 		}
 	case 'x':
 		if alternate && op[0] == '#' {
-			aux_addstring(B, fmt.tprintf("%s, %s %02d, %04d",
-				WDAY_LONG[c.wday], MONTH_LONG[c.month - 1], c.day, c.year))
+			aux_addstring(B, WDAY_LONG[c.wday])
+			aux_addstring(B, ", ")
+			aux_addstring(B, MONTH_LONG[c.month - 1])
+			aux_addchar(B, ' ')
+			add_num(B, i64(c.day), 2)
+			aux_addstring(B, ", ")
+			add_num(B, c.year, 4)
 		} else {
-			aux_addstring(B, fmt.tprintf("%02d/%02d/%02d", c.month, c.day, floor_mod(c.year, 100)))
+			add_short_date(B, c)
 		}
-	case 'X': aux_addstring(B, fmt.tprintf("%02d:%02d:%02d", c.hour, c.minute, c.second))
+	case 'X': add_clock(B, c.hour, c.minute, c.second)
 	case 'd', 'e': add_num(B, i64(c.day), ch == 'e' ? 2 : 2, alternate || ch == 'e')
 	case 'H': add_num(B, i64(c.hour), 2, alternate)
 	case 'I':
@@ -592,27 +644,75 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 			sign = "-"
 			off = -off
 		}
-		aux_addstring(B, fmt.tprintf("%s%02d%02d", sign, off / 3600, off % 3600 / 60))
+		aux_addstring(B, sign)
+		add_num(B, off / 3600, 2)
+		add_num(B, off % 3600 / 60, 2)
 	case 'Z':
 		aux_addstring(B, zone_name(c, !utc && c.isdst == 1, zone_buf[:]))
 	case:
 		// C99 aliases admitted on non-Windows hosts.
 		switch ch {
 		case 'C': add_num(B, floor_div(c.year, 100), 2)
-		case 'D': aux_addstring(B, fmt.tprintf("%02d/%02d/%02d", c.month, c.day, floor_mod(c.year, 100)))
-		case 'F': aux_addstring(B, fmt.tprintf("%04d-%02d-%02d", c.year, c.month, c.day))
+		case 'D': add_short_date(B, c)
+		case 'F':
+			add_num(B, c.year, 4)
+			aux_addchar(B, '-')
+			add_num(B, i64(c.month), 2)
+			aux_addchar(B, '-')
+			add_num(B, i64(c.day), 2)
 		case 'n': aux_addchar(B, '\n')
 		case 'r':
 			h := c.hour % 12
 			if h == 0 do h = 12
-			aux_addstring(B, fmt.tprintf("%02d:%02d:%02d %s", h, c.minute, c.second, c.hour < 12 ? "AM" : "PM"))
-		case 'R': aux_addstring(B, fmt.tprintf("%02d:%02d", c.hour, c.minute))
+			add_clock(B, h, c.minute, c.second)
+			aux_addchar(B, ' ')
+			aux_addstring(B, c.hour < 12 ? "AM" : "PM")
+		case 'R': add_clock(B, c.hour, c.minute, 0, false)
 		case 't': aux_addchar(B, '\t')
-		case 'T': aux_addstring(B, fmt.tprintf("%02d:%02d:%02d", c.hour, c.minute, c.second))
+		case 'T': add_clock(B, c.hour, c.minute, c.second)
 		case 'u': add_num(B, i64(c.wday == 0 ? 7 : c.wday), 1, true)
 		case 'V': add_num(B, i64((c.yday + 10 - (c.wday == 0 ? 7 : c.wday)) / 7), 2)
 		}
 	}
+}
+
+// Resolve a POSIX local zone entirely within a temporary region. Most zone
+// abbreviations fit in the caller's stack buffer. For an arbitrarily long TZif
+// abbreviation or POSIX name, root a Lua copy under a protected boundary before
+// ending the region; a throw cannot strand the region or its file image.
+@(private = "file")
+local_date :: proc(L: ^kernel.State, t: i64, zone_buf: []u8, need_zone: bool) -> Civil_Time {
+	temp := runtime.default_temp_allocator_temp_begin()
+	zone, loaded := load_local_zone()
+	c := civil_at_timestamp(t)
+	c.zone = "UTC"
+	status := kernel.Thread_Status.Ok
+	rooted_zone := false
+	if loaded {
+		kind, found := local_zone_at(zone, t)
+		if found {
+			c = civil_at_timestamp(t + kind.offset)
+			c.offset = kind.offset
+			c.isdst = kind.is_dst ? 1 : 0
+			if need_zone {
+				if len(kind.abbreviation) <= len(zone_buf) {
+					copy(zone_buf, kind.abbreviation)
+					c.zone = string(zone_buf[:len(kind.abbreviation)])
+				} else {
+					status = push_host_string_protected(L, &kind.abbreviation)
+					if status == .Ok {
+						c.zone, _ = kernel.api_tostring(L, -1)
+						rooted_zone = true
+					}
+				}
+			}
+		}
+		free_local_zone(&zone)
+	}
+	aux_host_temp_end(temp)
+	if status != .Ok do kernel.throw(L, status)
+	if rooted_zone do kernel.gc_checkGC(L)
+	return c
 }
 
 @(private = "file")
@@ -643,6 +743,7 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 		}
 	}
 	c: Civil_Time
+	local_zone_buf: [128]u8
 	ok := true
 	if utc {
 		c = civil_at_timestamp(t)
@@ -658,25 +759,7 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 		when ODIN_OS == .Windows {
 			c, ok = local_at_timestamp(t)
 		} else {
-			// Keep the TZif bytes alive until after %Z has consumed its
-			// abbreviation slice. The pure parser intentionally borrows its input.
-			zone, loaded := load_local_zone()
-			if loaded {
-				defer free_local_zone(&zone)
-				kind, found := local_zone_at(zone, t)
-				if found {
-					c = civil_at_timestamp(t + kind.offset)
-					c.offset = kind.offset
-					c.isdst = kind.is_dst ? 1 : 0
-					c.zone = kind.abbreviation
-				} else {
-					c = civil_at_timestamp(t)
-					c.zone = "UTC"
-				}
-			} else {
-				c = civil_at_timestamp(t)
-				c.zone = "UTC"
-			}
+			c = local_date(L, t, local_zone_buf[:], needs_zone_name(s[i:]))
 		}
 	}
 	if !ok {
@@ -772,9 +855,7 @@ os_getenv :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	name := aux_checkstring(L, 1)
-	value, found := os.lookup_env(name, context.temp_allocator)
-	if found do kernel.api_pushstring(L, value)
-	else do kernel.api_pushnil(L)
+	if !aux_getenv_push(L, name) do kernel.api_pushnil(L)
 	return 1
 }
 
@@ -804,13 +885,21 @@ os_tmpname :: proc "c" (Lp: rawptr) -> i32 {
 		aux_error(L, "unable to generate a unique filename")
 	}
 	name := os.name(f)
-	kernel.api_pushstring(L, name)
+	// Copy while the file owns its name, but close even if Lua runs out of
+	// memory (a Lua throw skips defers). The stack copy also survives close.
+	status := push_host_string_protected(L, &name)
+	if status == .Ok do name, _ = kernel.api_tostring(L, -1)
+	when ODIN_OS == .Windows {
+		if status != .Ok do _ = os.remove(name)
+	}
 	os.close(f)
 	when ODIN_OS == .Windows {
 		// core:os obtains a collision-free name by creating it. Windows Lua's
 		// tmpnam only returns the name, so remove the probe file before returning.
-		_ = os.remove(name)
+		if status == .Ok do _ = os.remove(name)
 	}
+	if status != .Ok do kernel.throw(L, status)
+	kernel.gc_checkGC(L)
 	return 1
 }
 

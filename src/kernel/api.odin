@@ -570,19 +570,29 @@ api_pushlstring :: proc(L: ^State, s: []u8) -> string {
 	} else {
 		ts = string_newlstr(L, raw_data(s), uint(len(s)))
 	}
+	if ts == nil do throw(L, .Err_Mem)
 	set_string(stack_value(L, L.top), ts)
 	api_incr_top(L)
 	gc_checkGC(L)
 	return string(str_slice(ts))
 }
 
-// Push a NUL-free Odin string -- reference `lua_pushstring`.
-api_pushstring :: proc(L: ^State, s: string) -> string {
+// Push a NUL-free string without running finalizers. A caller holding host
+// resources can release them before calling gc_checkGC; emergency collection
+// on allocation failure does not run finalizers.
+api_pushstring_nogc :: #force_inline proc(L: ^State, s: string) -> string {
 	ts := string_new(L, s)
+	if ts == nil do throw(L, .Err_Mem)
 	set_string(stack_value(L, L.top), ts)
 	api_incr_top(L)
-	gc_checkGC(L)
 	return string(str_slice(ts))
+}
+
+// Push a NUL-free Odin string -- reference `lua_pushstring`.
+api_pushstring :: #force_inline proc(L: ^State, s: string) -> string {
+	result := api_pushstring_nogc(L, s)
+	gc_checkGC(L)
+	return result
 }
 
 // Push a printf-style formatted string -- reference `lua_pushfstring`. Delegates

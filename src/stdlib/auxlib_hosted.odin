@@ -21,6 +21,87 @@ import "core:time"
 import kernel "lang:kernel"
 import stream "lang:stream"
 
+// Odin's arena_temp_end leaves allocations intact if the arena had no block at
+// begin (possible on a new thread). There were no older allocations to preserve,
+// so reset it explicitly. Retain the normal first block for reuse, but don't pin
+// an exceptionally large first allocation for the lifetime of the thread.
+aux_host_temp_end :: proc(temp: runtime.Arena_Temp) {
+	runtime.default_temp_allocator_temp_end(temp)
+	if temp.arena != nil && temp.block == nil {
+		runtime.arena_free_all(temp.arena)
+		if temp.arena.curr_block != nil &&
+		   temp.arena.curr_block.capacity > temp.arena.minimum_block_size {
+			runtime.arena_destroy(temp.arena)
+		}
+	}
+}
+
+// Copy a temporary host string into Lua. The protected boundary catches OOM;
+// no finalizer may run here, since closing the current coroutine would jump past
+// even this boundary. The caller runs the GC check after releasing its resources.
+@(private)
+push_host_string_protected :: proc(L: ^kernel.State, value: ^string) -> kernel.Thread_Status {
+	return kernel.run_protected(L, push_host_string_body, value)
+}
+
+@(private = "file")
+push_host_string_body :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
+	kernel.api_pushstring_nogc(L, (^string)(ud)^)
+	return .Ok
+}
+
+// runtime.Arena normally starts with zeroed backing storage. Our first block
+// is an uninitialized stack buffer, so honor zero-initializing allocation modes
+// explicitly while retaining the ordinary arena behavior for all other modes.
+@(private = "file")
+host_env_arena_allocator :: proc(
+	data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int,
+	old_memory: rawptr, old_size: int, loc := #caller_location,
+) -> (result: []byte, err: runtime.Allocator_Error) {
+	result, err = runtime.arena_allocator_proc(data, mode, size, alignment, old_memory, old_size, loc)
+	if err == nil {
+		if mode == .Alloc {
+			runtime.mem_zero(raw_data(result), len(result))
+		} else if mode == .Resize && old_size >= 0 && old_size < len(result) {
+			runtime.mem_zero(raw_data(result[old_size:]), len(result) - old_size)
+		}
+	}
+	return
+}
+
+// Push an environment value, if present. Give core:os a stack-backed arena so
+// lookup happens only once and can distinguish empty from absent on all hosts.
+// An oversized value gets an explicitly owned overflow block; Lua cannot run a
+// finalizer until that block has been released.
+aux_getenv_push :: #force_inline proc(L: ^kernel.State, name: string) -> bool {
+	buf: [2048]u8 = ---
+	block := runtime.Memory_Block{base = raw_data(buf[:]), capacity = len(buf)}
+	arena := runtime.Arena{
+		backing_allocator = os.heap_allocator(),
+		curr_block = &block,
+		total_capacity = len(buf),
+		minimum_block_size = 4096,
+	}
+	allocator := runtime.Allocator{procedure = host_env_arena_allocator, data = &arena}
+	value, found := os.lookup_env(name, allocator)
+	if arena.curr_block == &block {
+		if found do kernel.api_pushstring(L, value)
+		return found
+	}
+	status := kernel.Thread_Status.Ok
+	if found {
+		status = push_host_string_protected(L, &value)
+	}
+	for arena.curr_block != &block {
+		runtime.arena_free_last_memory_block(&arena)
+	}
+	if status != .Ok {
+		kernel.throw(L, status)
+	}
+	if found do kernel.gc_checkGC(L)
+	return found
+}
+
 // Reader state for loading from a file -- reference `LoadF`.
 Load_F :: struct {
 	n:    int, // number of pre-read (pushed-back) bytes still in `buff`
@@ -149,7 +230,7 @@ aux_loadfilex :: proc(
 // Allocate a NUL-terminated copy of `s` for handing to a C ABI. Freed with
 // `delete_cstring`.
 cstring_from :: proc(s: string) -> cstring {
-	buf := make([]u8, len(s) + 1)
+	buf := make([]u8, len(s) + 1, os.heap_allocator())
 	if len(s) > 0 {
 		runtime.mem_copy(raw_data(buf), raw_data(s), len(s))
 	}
@@ -158,7 +239,7 @@ cstring_from :: proc(s: string) -> cstring {
 }
 
 delete_cstring :: proc(c: cstring) {
-	free(rawptr(c))
+	free(rawptr(c), os.heap_allocator())
 }
 
 // --------------------------------------------------------------------------------

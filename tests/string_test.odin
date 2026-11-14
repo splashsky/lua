@@ -19,6 +19,28 @@ str_contents :: proc(ts: ^kernel.TString) -> string {
 	return string(kernel.str_bytes(ts)[:ts.len])
 }
 
+@(test)
+string_byte_comparison_handles_long_unaligned_ranges :: proc(t: ^testing.T) {
+	a, b: [1040]u8
+	for i in 0 ..< len(a) {
+		a[i] = u8(i % 251)
+		b[i] = a[i]
+	}
+	lengths := [13]int{0, 1, 39, 40, 63, 64, 65, 79, 80, 95, 96, 1000, 1024}
+	for offset in 0 ..< 8 {
+		for n in lengths {
+			testing.expect(t, kernel.mem_eq(([^]u8)(&a[offset]), ([^]u8)(&b[offset]), uint(n)))
+			if n == 0 do continue
+			positions := [3]int{0, n / 2, n - 1}
+			for pos in positions {
+				b[offset + pos] ~= 0xff
+				testing.expect(t, !kernel.mem_eq(([^]u8)(&a[offset]), ([^]u8)(&b[offset]), uint(n)))
+				b[offset + pos] ~= 0xff
+			}
+		}
+	}
+}
+
 // Two short strings with identical contents, built from two distinct buffers, must
 // intern to the exact same object. Pointer equality here is the whole point of
 // interning: it makes string comparison a single pointer compare everywhere else.

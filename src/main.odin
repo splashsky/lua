@@ -123,6 +123,8 @@ index_byte :: proc(s: string, ch: u8) -> int {
 
 // Print the usage summary, blaming `badoption`. Reference print_usage.
 print_usage :: proc(badoption: string) {
+	temp := runtime.default_temp_allocator_temp_begin()
+	defer stdlib.aux_host_temp_end(temp) // diagnostics make no Lua calls
 	stdlib.write_stderr(fmt.tprintf("%s: ", progname))
 	if byte_at(badoption, 1) == 'e' || byte_at(badoption, 1) == 'l' {
 		stdlib.write_stderr(fmt.tprintf("'%s' needs argument\n", badoption))
@@ -149,6 +151,8 @@ print_usage :: proc(badoption: string) {
 
 // Print `msg` prefixed with `pname` (when non-empty). Reference l_message.
 l_message :: proc(pname: string, msg: string) {
+	temp := runtime.default_temp_allocator_temp_begin()
+	defer stdlib.aux_host_temp_end(temp) // diagnostics make no Lua calls
 	if pname != "" {
 		stdlib.write_stderr(fmt.tprintf("%s: ", pname))
 	}
@@ -403,18 +407,24 @@ runargs :: proc(L: ^kernel.State, argv: []string, n: int) -> bool {
 // Reference handle_luainit.
 handle_luainit :: proc(L: ^kernel.State) -> kernel.Thread_Status {
 	name := INIT_VAR_VERSION
-	init, ok := os.lookup_env(name, context.temp_allocator)
+	ok := stdlib.aux_getenv_push(L, name)
 	if !ok {
 		name = INIT_VAR
-		init, ok = os.lookup_env(name, context.temp_allocator)
+		ok = stdlib.aux_getenv_push(L, name)
 	}
 	if !ok {
 		return .Ok
 	}
+	init, _ := kernel.api_tostring(L, -1) // rooted until the hook has returned
+	status: kernel.Thread_Status
 	if len(init) > 0 && init[0] == '@' {
-		return dofile(L, init[1:])
+		status = dofile(L, init[1:])
+	} else {
+		chunkname := "=" + INIT_VAR_VERSION if name == INIT_VAR_VERSION else "=" + INIT_VAR
+		status = dostring(L, init, chunkname)
 	}
-	return dostring(L, init, fmt.tprintf("=%s", name))
+	kernel.api_pop(L, 1)
+	return status
 }
 
 // Load and run the main script named on the command line. A bare "-" (unless it

@@ -26,7 +26,6 @@ package stdlib
 // (as in that reference configuration) unavailable.
 
 import "base:runtime"
-import "core:os"
 import kernel "lang:kernel"
 import stream "lang:stream"
 
@@ -508,23 +507,18 @@ noenv :: proc(L: ^kernel.State) -> bool {
 	return b
 }
 
-// Fetch an environment variable by name, or "" + false if unset. An *empty* value
-// counts as set (reference distinguishes NULL from "").
-@(private = "file")
-getenv_str :: proc(name: string) -> (string, bool) {
-	return os.lookup_env(name, context.temp_allocator)
-}
-
 // Set package[fieldname] from the environment (versioned name first, then the bare
 // name), honoring LUA_NOENV and the ";;" default-insertion rule -- reference
 // `setpath`. Assumes the package table is on top of the stack.
 @(private = "file")
 setpath :: proc(L: ^kernel.State, fieldname: string, envname: string, dft: string) {
 	nver := kernel.api_pushfstring(L, "%s%s", envname, VERSUFFIX) // e.g. "LUA_PATH_5_5"
-	path, have := getenv_str(nver)
+	have := aux_getenv_push(L, nver)
 	if !have {
-		path, have = getenv_str(envname) // fall back to the unversioned name
+		have = aux_getenv_push(L, envname) // fall back to the unversioned name
 	}
+	path := ""
+	if have do path, _ = kernel.api_tostring(L, -1)
 	if !have || noenv(L) {
 		kernel.api_pushstring(L, dft) // no environment override: use the default
 	} else {
@@ -555,7 +549,8 @@ setpath :: proc(L: ^kernel.State, fieldname: string, envname: string, dft: strin
 			aux_pushresult(&b)
 		}
 	}
-	kernel.api_setfield(L, -3, fieldname) // package[fieldname] = value
+	kernel.api_setfield(L, have ? -4 : -3, fieldname) // package[fieldname] = value
+	if have do kernel.api_pop(L, 1) // environment value
 	kernel.api_pop(L, 1) // pop the versioned variable name (nver)
 }
 

@@ -100,6 +100,50 @@ assert_eq 'lua chained -e' 'ab' "$out"
 # calls, and let pcall catch the interrupt; continuing afterward proves that the
 # request and its hook were consumed rather than delivered a second time.
 if [[ "$(uname -s)" == Linux ]]; then
+    # Check actual resident memory, independently of Lua's GC accounting. The
+    # long environment value exercises the allocating fallback; TZ=UTC loads a
+    # TZif file, and the invalid format exercises the Lua error path.
+    cat > "$WORK/host-memory.lua" <<'EOF'
+local pagesize = assert(tonumber(arg[1]))
+local function rss()
+  local f = assert(io.open('/proc/self/statm'))
+  local s = assert(f:read('*l')); f:close()
+  return assert(tonumber(s:match('^%S+%s+(%S+)'))) * pagesize
+end
+for i = 1, 50 do
+  os.getenv('LEAK_TEST_LONG'); os.date('%c %Z', 1700000000)
+end
+collectgarbage('collect')
+local before = rss()
+for i = 1, 10000 do
+  assert(#os.getenv('LEAK_TEST_LONG') == 4096)
+  os.date('%c %D %T %F %R %Z', 1700000000)
+  assert(not pcall(os.date, '%Q', 1700000000))
+end
+for i = 1, 600000 do os.getenv('LEAK_TEST_SMALL') end
+collectgarbage('collect')
+assert(rss() - before < 4 * 1024 * 1024, 'host memory grew without bound')
+EOF
+    printf -v long_value '%*s' 4096 ''
+    long_value="${long_value// /x}"
+    env TZ=UTC LEAK_TEST_SMALL=small-value LEAK_TEST_LONG="$long_value" "$LUA" "$WORK/host-memory.lua" "$(getconf PAGESIZE)" >/dev/null 2>"$WORK/host-memory.err" && \
+        assert_true 'OS calls keep host memory bounded' 1 || assert_true 'OS calls keep host memory bounded' 0
+
+    # POSIX TZ names can exceed the stack abbreviation buffer. They must be
+    # copied intact into Lua before the timezone file/env arena is released.
+    printf -v long_zone '%*s' 200 ''
+    long_zone="${long_zone// /A}"
+    env TZ="${long_zone}0" "$LUA" -e '
+        os.date("%Y", 1700000000)
+        collectgarbage("collect"); collectgarbage("stop")
+        local before = collectgarbage("count")
+        for i=1,1000 do os.date("%Y", 1700000000) end
+        assert(collectgarbage("count") - before < 8)
+        collectgarbage("restart")
+        for i=1,100 do assert(os.date("%Z", 1700000000) == string.rep("A", 200)) end
+    ' >/dev/null 2>&1 && \
+        assert_true 'long POSIX timezone name survives cleanup' 1 || assert_true 'long POSIX timezone name survives cleanup' 0
+
     for kind in loop calls; do
         if [[ "$kind" == loop ]]; then body='while true do end'
         else body='local function f() end; while true do f() end'; fi

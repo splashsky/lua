@@ -15,7 +15,7 @@ platform_error :: proc() -> os.Error {
 }
 
 open :: proc(command, mode: string) -> Open_Result {
-	h, alloc_err := new(Handle)
+	h, alloc_err := new(Handle, os.heap_allocator())
 	if alloc_err != nil {
 		return {err = os.General_Error.Invalid_File}
 	}
@@ -25,7 +25,7 @@ open :: proc(command, mode: string) -> Open_Result {
 	defer sync.mutex_unlock(&spawn_mutex)
 	read_end, write_end, err := os.pipe()
 	if err != nil {
-		free(h)
+		free(h, os.heap_allocator())
 		return {err = err}
 	}
 
@@ -46,7 +46,7 @@ open :: proc(command, mode: string) -> Open_Result {
 		err = platform_error()
 		os.close(read_end)
 		os.close(write_end)
-		free(h)
+		free(h, os.heap_allocator())
 		return {err = err}
 	}
 
@@ -55,7 +55,7 @@ open :: proc(command, mode: string) -> Open_Result {
 	if s == nil {
 		err = stream.last_error()
 		os.close(child_end)
-		free(h)
+		free(h, os.heap_allocator())
 		return {err = err}
 	}
 
@@ -73,7 +73,7 @@ open :: proc(command, mode: string) -> Open_Result {
 	os.close(child_end)
 	if start_err != nil {
 		stream.close(s)
-		free(h)
+		free(h, os.heap_allocator())
 		return {err = start_err}
 	}
 
@@ -93,6 +93,6 @@ wait_process :: proc(process: os.Process) -> Wait_Result {
 
 wait :: proc(h: ^Handle) -> Wait_Result {
 	process := h.process
-	free(h)
+	free(h, os.heap_allocator())
 	return wait_process(process)
 }

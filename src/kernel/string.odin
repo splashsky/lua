@@ -150,6 +150,10 @@ string_hashlongstr :: proc "contextless" (ts: ^TString) -> u32 {
 
 // Are two byte ranges equal? A tiny helper so equality reads clearly.
 mem_eq :: #force_inline proc "contextless" (a: [^]u8, b: [^]u8, n: uint) -> bool {
+	// Long cached host strings otherwise compare one byte at a time on every
+	// lookup. Keep the small-string fast path and use the bounded SIMD-aware
+	// standard comparison for longer byte ranges.
+	if n >= 64 do return mem.compare_ptrs(rawptr(a), rawptr(b), int(n)) == 0
 	for i in 0 ..< n {
 		if a[i] != b[i] {
 			return false
