@@ -11,7 +11,7 @@ package kernel
 //         -define:BRAND="Moon" -define:BRAND_LOWER="moon" \
 //         -define:SOURCE_EXT=".moon" -define:ENV_PREFIX="MOON"
 //
-// The defaults reproduce Lua 5.5.0 exactly -- that is the reference profile the
+// The defaults reproduce Lua 5.5.1 exactly -- that is the reference profile the
 // PUC-Rio test suite under tests/puc/ validates, so a plain build with no
 // defines must stay byte-for-byte behaviour-compatible with reference Lua.
 //
@@ -46,7 +46,7 @@ ENV_PREFIX :: #config(ENV_PREFIX, "LUA")
 // The copyright and authors lines the standalone prints for `-v`. These belong
 // to the reference implementation, so a rebranded distribution is expected to
 // replace them.
-COPYRIGHT_TEXT :: #config(COPYRIGHT_TEXT, "Copyright (C) 1994-2025 Lua.org, PUC-Rio")
+COPYRIGHT_TEXT :: #config(COPYRIGHT_TEXT, "Copyright (C) 1994-2026 Lua.org, PUC-Rio")
 AUTHORS_TEXT :: #config(AUTHORS_TEXT, "R. Ierusalimschy, L. H. de Figueiredo, W. Celes")
 
 // The symbol a native (C ABI) extension module must export, as a `%s` format.
@@ -58,7 +58,7 @@ NATIVE_OPEN_FMT :: #config(NATIVE_OPEN_FMT, "luaopen_%s")
 // ---------------------------------------------------------------------------
 
 // The `_VERSION` global ("Lua 5.5") and the fully-qualified release
-// ("Lua 5.5.0"). The version numbers themselves live in conf.odin.
+// ("Lua 5.5.1"). The version numbers themselves live in conf.odin.
 VERSION :: BRAND + " " + VERSION_MAJOR + "." + VERSION_MINOR
 RELEASE :: VERSION + "." + VERSION_RELEASE
 

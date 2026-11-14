@@ -100,7 +100,7 @@ third-party material from the PUC-Rio Lua distribution, vendored verbatim and no
 authored by this project. It is distributed under Lua's MIT license, reproduced
 here in full:
 
-> Copyright © 1994–2025 Lua.org, PUC-Rio.
+> Copyright © 1994–2026 Lua.org, PUC-Rio.
 >
 > Permission is hereby granted, free of charge, to any person obtaining a copy
 > of this software and associated documentation files (the "Software"), to deal

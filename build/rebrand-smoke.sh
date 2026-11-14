@@ -3,7 +3,7 @@
 # rebrand-smoke.sh -- prove that a rebranded build is really rebranded.
 #
 # The default profile is validated by build/test.sh, build/puc.sh and
-# build/clitest.sh: those are the "did we break Lua 5.5.0?" gates. This script is
+# build/clitest.sh: those are the "did we break Lua 5.5.1?" gates. This script is
 # the other half -- it builds the runtime under a *different* brand and checks
 # that every user-visible name actually followed the `-define:` flags.
 #
@@ -71,7 +71,7 @@ assert_true() {
 echo "==> '$BRAND' branding"
 
 banner="$("$EXE" -v 2>&1 || true)"
-[[ "$banner" == "$DISPLAY_NAME 5.5.0"* ]] && assert_true 'version banner shows the brand' 1 \
+[[ "$banner" == "$DISPLAY_NAME 5.5.1"* ]] && assert_true 'version banner shows the brand' 1 \
     || assert_true 'version banner shows the brand' 0
 
 assert_equal '_VERSION follows the brand' "$DISPLAY_NAME 5.5" \

@@ -2,7 +2,7 @@
 
 A faithful, from-scratch, **branding-agnostic** language runtime in
 **standard-library-only [Odin](https://odin-lang.org/)**, whose default profile is
-a reimplementation of **Lua 5.5.0**.
+a reimplementation of **Lua 5.5.1**.
 
 The goal is *correctness first*: an implementation whose observable behavior matches
 reference Lua as closely as we can make it — same language semantics, same garbage
@@ -29,7 +29,7 @@ signature, the source-file extension, the environment-variable prefix, the
 BRAND=moon ./build/build.sh all     # moon / moonc, _VERSION "Moon 5.5", *.moon
 ```
 
-The defaults reproduce Lua 5.5.0 exactly, so a plain build is the one the
+The defaults reproduce Lua 5.5.1 exactly, so a plain build is the one the
 PUC-Rio suite validates. `build/rebrand-smoke.*` proves the other direction.
 See [BUILDING.md](BUILDING.md#branding) for every knob.
 

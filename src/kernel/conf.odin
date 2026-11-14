@@ -11,14 +11,14 @@ package kernel
 // global, and the bytecode header all agree on exactly one source of truth.
 
 // The Lua version we are faithfully reimplementing. These mirror the numbers in
-// reference Lua 5.5.0's `lua.h` -- do not drift them independently.
+// reference Lua 5.5.1's `lua.h` -- do not drift them independently.
 VERSION_MAJOR_N :: 5
 VERSION_MINOR_N :: 5
-VERSION_RELEASE_N :: 0
+VERSION_RELEASE_N :: 1
 
 // Combined numeric forms, exactly as reference Lua computes them:
 //   VERSION_NUM         = MAJOR*100 + MINOR         (e.g. 505)
-//   VERSION_RELEASE_NUM = VERSION_NUM*100 + RELEASE (e.g. 50500)
+//   VERSION_RELEASE_NUM = VERSION_NUM*100 + RELEASE (e.g. 50501)
 // These matter for bytecode/version checks later, so we compute them the same
 // way rather than hardcoding the results.
 VERSION_NUM :: VERSION_MAJOR_N * 100 + VERSION_MINOR_N

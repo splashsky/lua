@@ -5,7 +5,7 @@
     them. We point it at tests/ with the same `lang` collection the build uses so
     the tests can import `lang:kernel` and `lang:stdlib`.
 
-    The unit tests exercise the default (Lua 5.5.0) profile. `-Brand` rebuilds
+    The unit tests exercise the default (Lua 5.5.1) profile. `-Brand` rebuilds
     them against a different branding profile; see build\brand.ps1.
 
     Usage:

@@ -7,7 +7,7 @@
 # turns the BRAND environment variable into the matching `-define:` flags and
 # binary names, so every script parameterizes the same way:
 #
-#     ./build/build.sh all              # the default Lua 5.5.0 profile
+#     ./build/build.sh all              # the default Lua 5.5.1 profile
 #     BRAND=moon ./build/build.sh all   # a `moon`/`.moon`/`MOON_*` build
 #
 # BRAND=lua (the default) deliberately emits *no* defines at all, so the default

@@ -6,7 +6,7 @@
     turns one `-Brand` argument into the matching `-define:` flags and the
     matching binary names, so every script parameterizes the same way:
 
-        .\build\build.ps1 all                 # the default Lua 5.5.0 profile
+        .\build\build.ps1 all                 # the default Lua 5.5.1 profile
         .\build\build.ps1 all -Brand moon     # a `moon`/`.moon`/`MOON_*` build
 
     `-Brand lua` (the default) deliberately emits *no* defines at all, so the

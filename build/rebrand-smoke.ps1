@@ -2,7 +2,7 @@
     rebrand-smoke.ps1 -- prove that a rebranded build is really rebranded.
 
     The default profile is validated by build\test.ps1, build\puc.ps1 and
-    build\clitest.ps1: those are the "did we break Lua 5.5.0?" gates. This script
+    build\clitest.ps1: those are the "did we break Lua 5.5.1?" gates. This script
     is the other half -- it builds the runtime under a *different* brand and
     checks that every user-visible name actually followed the `-define:` flags.
 
@@ -73,7 +73,7 @@ New-Item -ItemType Directory -Force -Path $Work | Out-Null
 Write-Host "==> '$Brand' branding"
 
 # 1. The banner and _VERSION carry the new brand.
-Assert-True 'version banner shows the brand' (((& $Exe -v) 2>&1) -join '').StartsWith("$Display 5.5.0")
+Assert-True 'version banner shows the brand' (((& $Exe -v) 2>&1) -join '').StartsWith("$Display 5.5.1")
 Assert-Equal '_VERSION follows the brand' "$Display 5.5" (& $Exe -e "io.write(_VERSION)")
 
 # 2. debug.getinfo().what reports the brand for a non-native function.

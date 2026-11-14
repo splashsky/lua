@@ -13,7 +13,7 @@
   - **macOS:** the Xcode command-line tools (`xcode-select --install`).
   - **Linux:** a working `cc`/`clang` and libc.
 - (Optional, for differential tests) a reference `lua`/`luac` built from the official
-  Lua 5.5.0 sources from [lua.org](https://www.lua.org/ftp/) — see "Comparing against
+  Lua 5.5.1 sources from [lua.org](https://www.lua.org/ftp/) — see "Comparing against
   reference Lua" below.
 
 ## Linker-free verification
@@ -85,7 +85,7 @@ This runtime hardcodes no language name. The source uses neutral identifiers
 | `SOURCE_EXT`      | `.lua`                                       | the `package.path` templates |
 | `ENV_PREFIX`      | `LUA`                                        | `LUA_INIT`, `LUA_INIT_5_5`, `LUA_PATH`, `LUA_PATH_5_5`, `LUA_CPATH`, `LUA_NOENV` |
 | `NATIVE_OPEN_FMT` | `luaopen_%s`                                 | the entry-point symbol a native extension module must export |
-| `COPYRIGHT_TEXT`  | `Copyright (C) 1994-2025 Lua.org, PUC-Rio`   | the `-v` banner |
+| `COPYRIGHT_TEXT`  | `Copyright (C) 1994-2026 Lua.org, PUC-Rio`   | the `-v` banner |
 | `AUTHORS_TEXT`    | `R. Ierusalimschy, L. H. de Figueiredo, W. Celes` | credits |
 
 Odin cannot parameterize *identifiers* with `-define:` — defines produce values,
@@ -204,12 +204,12 @@ under the hood.
 We do not vendor the reference C source: the project is self-contained, and the
 PUC-Rio test suite under `tests/puc/` is the correctness oracle. When you want a
 head-to-head comparison anyway, build a reference interpreter yourself from the
-official 5.5.0 tarball at <https://www.lua.org/ftp/>:
+official 5.5.1 tarball at <https://www.lua.org/ftp/>:
 
 ```sh
-curl -R -O https://www.lua.org/ftp/lua-5.5.0.tar.gz
-tar zxf lua-5.5.0.tar.gz
-cd lua-5.5.0 && make            # produces src/lua and src/luac
+curl -R -O https://www.lua.org/ftp/lua-5.5.1.tar.gz
+tar zxf lua-5.5.1.tar.gz
+cd lua-5.5.1 && make            # produces src/lua and src/luac
 ```
 
 Then point the scripts at those binaries — nothing is read from inside this repo:
