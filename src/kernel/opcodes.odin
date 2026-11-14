@@ -155,9 +155,8 @@ setarg :: #force_inline proc "contextless" (i: ^Instruction, v: int, pos, size: 
 // ---------------------------------------------------------------------------
 //
 // Each format-specific getter mirrors reference Lua's `check_exp(checkopm(...))`
-// with an `assert_contextless` that the instruction really is in the format the
-// field belongs to. Those asserts compile out under `-disable-assert`, exactly
-// like `lua_assert`, but catch encode/decode mismatches during development.
+// with a development assertion that the instruction really is in the format the
+// field belongs to. Like `lua_assert`, these compile out in release builds.
 
 getarg_A :: #force_inline proc "contextless" (i: Instruction) -> int {
 	return getarg(i, POS_A, SIZE_A)
@@ -167,11 +166,11 @@ setarg_A :: #force_inline proc "contextless" (i: ^Instruction, v: int) {
 }
 
 getarg_B :: #force_inline proc "contextless" (i: Instruction) -> int {
-	assert_contextless(get_op_mode(get_opcode(i)) == .iABC)
+	when INTERNAL_ASSERTS {assert_contextless(get_op_mode(get_opcode(i)) == .iABC)}
 	return getarg(i, POS_B, SIZE_B)
 }
 getarg_vB :: #force_inline proc "contextless" (i: Instruction) -> int {
-	assert_contextless(get_op_mode(get_opcode(i)) == .ivABC)
+	when INTERNAL_ASSERTS {assert_contextless(get_op_mode(get_opcode(i)) == .ivABC)}
 	return getarg(i, POS_vB, SIZE_vB)
 }
 getarg_sB :: #force_inline proc "contextless" (i: Instruction) -> int {
@@ -185,11 +184,11 @@ setarg_vB :: #force_inline proc "contextless" (i: ^Instruction, v: int) {
 }
 
 getarg_C :: #force_inline proc "contextless" (i: Instruction) -> int {
-	assert_contextless(get_op_mode(get_opcode(i)) == .iABC)
+	when INTERNAL_ASSERTS {assert_contextless(get_op_mode(get_opcode(i)) == .iABC)}
 	return getarg(i, POS_C, SIZE_C)
 }
 getarg_vC :: #force_inline proc "contextless" (i: Instruction) -> int {
-	assert_contextless(get_op_mode(get_opcode(i)) == .ivABC)
+	when INTERNAL_ASSERTS {assert_contextless(get_op_mode(get_opcode(i)) == .ivABC)}
 	return getarg(i, POS_vC, SIZE_vC)
 }
 getarg_sC :: #force_inline proc "contextless" (i: Instruction) -> int {
@@ -215,7 +214,7 @@ setarg_k :: #force_inline proc "contextless" (i: ^Instruction, v: int) {
 }
 
 getarg_Bx :: #force_inline proc "contextless" (i: Instruction) -> int {
-	assert_contextless(get_op_mode(get_opcode(i)) == .iABx)
+	when INTERNAL_ASSERTS {assert_contextless(get_op_mode(get_opcode(i)) == .iABx)}
 	return getarg(i, POS_Bx, SIZE_Bx)
 }
 setarg_Bx :: #force_inline proc "contextless" (i: ^Instruction, v: int) {
@@ -223,7 +222,7 @@ setarg_Bx :: #force_inline proc "contextless" (i: ^Instruction, v: int) {
 }
 
 getarg_Ax :: #force_inline proc "contextless" (i: Instruction) -> int {
-	assert_contextless(get_op_mode(get_opcode(i)) == .iAx)
+	when INTERNAL_ASSERTS {assert_contextless(get_op_mode(get_opcode(i)) == .iAx)}
 	return getarg(i, POS_Ax, SIZE_Ax)
 }
 setarg_Ax :: #force_inline proc "contextless" (i: ^Instruction, v: int) {
@@ -233,7 +232,7 @@ setarg_Ax :: #force_inline proc "contextless" (i: ^Instruction, v: int) {
 // `sBx` is the signed 17-bit field used by the numeric-for jumps and LOADI/LOADF.
 // It is stored excess-OFFSET_sBx, so decode subtracts and encode adds the bias.
 getarg_sBx :: #force_inline proc "contextless" (i: Instruction) -> int {
-	assert_contextless(get_op_mode(get_opcode(i)) == .iAsBx)
+	when INTERNAL_ASSERTS {assert_contextless(get_op_mode(get_opcode(i)) == .iAsBx)}
 	return getarg(i, POS_Bx, SIZE_Bx) - OFFSET_sBx
 }
 setarg_sBx :: #force_inline proc "contextless" (i: ^Instruction, b: int) {
@@ -242,7 +241,7 @@ setarg_sBx :: #force_inline proc "contextless" (i: ^Instruction, b: int) {
 
 // `sJ` is the signed 25-bit jump displacement carried by OP_JMP.
 getarg_sJ :: #force_inline proc "contextless" (i: Instruction) -> int {
-	assert_contextless(get_op_mode(get_opcode(i)) == .isJ)
+	when INTERNAL_ASSERTS {assert_contextless(get_op_mode(get_opcode(i)) == .isJ)}
 	return getarg(i, POS_sJ, SIZE_sJ) - OFFSET_sJ
 }
 setarg_sJ :: #force_inline proc "contextless" (i: ^Instruction, j: int) {

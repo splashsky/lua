@@ -3,10 +3,9 @@ package kernel
 //
 // The interpreter itself: the loop that decodes and executes bytecode. Unlike a
 // naive port, ours is a *trampoline* over the explicit frame stack rather than a
-// recursive walk of the native call stack -- so a call, a yield, or an error is
-// a state transition returning an `Exec_Outcome`, not a native call/return. That
-// is exactly what makes faithful coroutines and pcall/error possible in Odin
-// (see docs/ARCHITECTURE.md, Decision 2).
+// recursive walk of the native call stack. Frame transitions stay in the loop;
+// errors and yields unwind through the protected longjmp boundary. That is what
+// makes faithful coroutines and pcall/error possible in Odin (Decision 2).
 //
 // It also implements the numeric tower (integer/float arithmetic, coercions),
 // comparisons and equality, table indexing, and the metamethod fallback paths
@@ -797,8 +796,8 @@ floatforloop :: proc(L: ^State, ra: int) -> bool {
 // callee's source file previously made the optimiser stop inlining this chain,
 // costing about 30% of arithmetic throughput, so the directive is load-bearing.
 @(private = "file")
-vm_arith :: #force_inline proc(L: ^State, ra: int, v1, v2: ^TValue, op: Arith_Op) -> Arith_Status {
-	return raw_arith_to(op, v1, v2, stack_value(L, ra))
+vm_arith :: #force_inline proc(ra, v1, v2: ^TValue, op: Arith_Op) -> Arith_Status {
+	return raw_arith_to(op, v1, v2, ra)
 }
 
 // ---------------------------------------------------------------------------
@@ -853,16 +852,24 @@ vm_poll_async_hook :: #force_inline proc(L: ^State, trap: i32) -> i32 {
 	}
 }
 
+// Only this activation's register base may be a stack pointer. Persistent state
+// remains indices. Any call that can move the stack (including a GC or hook)
+// must reload the frame's trap before the next fetch, and any register pointer
+// needed again within that instruction must be re-derived after the call. Cold
+// helpers and top/result bookkeeping still use indices. A frame entry, hook or
+// VARARGPREP refreshes the base immediately; other protected calls refresh the
+// trap so the next fetch re-derives it before touching any register pointer.
 vm_execute :: proc(L: ^State, ci_idx_in: int) {
 	ci_idx := ci_idx_in
 
 	// Each iteration of `newframe` (re)loads the per-frame locals for the frame
 	// currently at `ci_idx` -- reference Lua's `startfunc`/`returning` labels.
 	newframe: for {
-		cl := ci_func(L, &L.frames[ci_idx])
+		base := L.frames[ci_idx].func + 1 // stack index of R[0]
+		regs := ([^]StackValue)(&L.stack[base])
+		cl := (^LClosure)(regs[-1].val.value_.gc)
 		k := cl.p.k
 		code := cl.p.code
-		base := L.frames[ci_idx].func + 1 // stack index of R[0]
 		pc := vm_pc_add(code, L.frames[ci_idx].u.l.savedpc)
 		// Reference Lua's `luaG_tracecall`, inlined at the `startfunc`/`returning`
 		// entry. `trap` starts from the hook mask; when any hook is active we arm
@@ -880,6 +887,8 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 					trap = 0 // hooks begin at the VARARGPREP instruction
 				} else if (ci0.callstatus & CIST_HOOKYIELD) == 0 {
 					do_hookcall(L, ci_idx) // fire the 'call' hook now
+					base = L.frames[ci_idx].func + 1
+					regs = ([^]StackValue)(&L.stack[base])
 				}
 			}
 		}
@@ -892,56 +901,57 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 			// trapping, and we consult `luaG_traceexec` before each instruction.
 			// In the common (no-hook) case `trap` is 0 and this costs one branch.
 			if trap != 0 {
-				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
+				// traceexec saves the PC only for a line/count hook; a trap caused
+				// solely by relocation must not otherwise change hook state.
 				trap = debug_traceexec(L, vm_pc_index(pc, code))
-				base = L.frames[ci_idx].func + 1 // reference `updatebase` (no-op in the index model)
+				base = L.frames[ci_idx].func + 1
+				regs = ([^]StackValue)(&L.stack[base]) // reference `updatebase`
 			}
 			i := pc[0]
 			pc = vm_pc_add(pc, 1)
 			switch get_opcode(i) {
 
 			case .MOVE:
-				set_obj(stack_value(L, base + getarg_A(i)), stack_value(L, base + getarg_B(i)))
+				set_obj(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val)
 
 			case .LOADI:
-				set_int(stack_value(L, base + getarg_A(i)), Integer(getarg_sBx(i)))
+				set_int(&regs[getarg_A(i)].val, Integer(getarg_sBx(i)))
 
 			case .LOADF:
-				set_float(stack_value(L, base + getarg_A(i)), Number(getarg_sBx(i)))
+				set_float(&regs[getarg_A(i)].val, Number(getarg_sBx(i)))
 
 			case .LOADK:
-				set_obj(stack_value(L, base + getarg_A(i)), &k[getarg_Bx(i)])
+				set_obj(&regs[getarg_A(i)].val, &k[getarg_Bx(i)])
 
 			case .LOADKX:
-				set_obj(stack_value(L, base + getarg_A(i)), &k[getarg_Ax(pc[0])])
+				set_obj(&regs[getarg_A(i)].val, &k[getarg_Ax(pc[0])])
 				pc = vm_pc_add(pc, 1)
 
 			case .LOADFALSE:
-				set_bool(stack_value(L, base + getarg_A(i)), false)
+				set_bool(&regs[getarg_A(i)].val, false)
 
 			case .LFALSESKIP:
-				set_bool(stack_value(L, base + getarg_A(i)), false)
+				set_bool(&regs[getarg_A(i)].val, false)
 				pc = vm_pc_add(pc, 1) // skip the next instruction (a LOADTRUE)
 
 			case .LOADTRUE:
-				set_bool(stack_value(L, base + getarg_A(i)), true)
+				set_bool(&regs[getarg_A(i)].val, true)
 
 			case .LOADNIL:
-				ra := base + getarg_A(i)
+				ra := getarg_A(i)
 				b := getarg_B(i)
 				for j := 0; j <= b; j += 1 {
-					set_nil(stack_value(L, ra + j))
+					set_nil(&regs[ra + j].val)
 				}
 
 			case .GETUPVAL:
-				ra := base + getarg_A(i)
-				set_obj(stack_value(L, ra), upval_value(cl.upvals[getarg_B(i)]))
+				set_obj(&regs[getarg_A(i)].val, upval_value(cl.upvals[getarg_B(i)]))
 
 			case .SETUPVAL:
-				ra := base + getarg_A(i)
+				ra := getarg_A(i)
 				uv := cl.upvals[getarg_B(i)]
-				set_obj(upval_value(uv), stack_value(L, ra))
-				rav := stack_value(L, ra)
+				rav := &regs[ra].val
+				set_obj(upval_value(uv), rav)
 				if is_collectable(rav) {
 					gc_barrier(L, obj2gco(uv), rav.value_.gc)
 				}
@@ -951,6 +961,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				upval := upval_value(cl.upvals[getarg_B(i)])
 				rc := &k[getarg_C(i)]
 				vm_gettable(L, ci_idx, vm_pc_index(pc, code), upval, rc, ra)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .GETTABLE:
 				ra := base + getarg_A(i)
@@ -963,23 +974,27 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				// enough to lose more instruction-cache time than the removed
 				// call saves. Miss handling stays a cold call either way.
 				#force_inline vm_gettable(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .GETI:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
 				vm_geti(L, ci_idx, vm_pc_index(pc, code), rb, Integer(getarg_C(i)), ra)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .GETFIELD:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
 				rc := &k[getarg_C(i)]
 				vm_gettable(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .SETTABUP:
 				upval := upval_value(cl.upvals[getarg_A(i)])
 				rb := &k[getarg_B(i)]
 				rc := vm_rkc(L, base, k, i)
 				vm_settable(L, ci_idx, vm_pc_index(pc, code), upval, rb, rc)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .SETTABLE:
 				ra := stack_value(L, base + getarg_A(i))
@@ -989,17 +1004,20 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				// one inline copy restores the macro-shaped fast path without
 				// multiplying it across every field/upvalue opcode.
 				#force_inline vm_settable(L, ci_idx, vm_pc_index(pc, code), ra, rb, rc)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .SETI:
 				ra := stack_value(L, base + getarg_A(i))
 				rc := vm_rkc(L, base, k, i)
 				vm_seti(L, ci_idx, vm_pc_index(pc, code), ra, Integer(getarg_B(i)), rc)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .SETFIELD:
 				ra := stack_value(L, base + getarg_A(i))
 				rb := &k[getarg_B(i)]
 				rc := vm_rkc(L, base, k, i)
 				vm_settable(L, ci_idx, vm_pc_index(pc, code), ra, rb, rc)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .NEWTABLE:
 				ra := base + getarg_A(i)
@@ -1019,6 +1037,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 					table_resize(L, t, c, b)
 				}
 				gc_checkGC(L) // pace the collector (table anchored at ra)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .SELF:
 				ra := base + getarg_A(i)
@@ -1026,64 +1045,65 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				rc := &k[getarg_C(i)]
 				set_obj(stack_value(L, ra + 1), rb) // R[A+1] := object
 				vm_gettable(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra) // R[A] := object[method]
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .ADDI:
-				ra := base + getarg_A(i)
-				v1 := stack_value(L, base + getarg_B(i))
+				ra := &regs[getarg_A(i)].val
+				v1 := &regs[getarg_B(i)].val
 				aux: TValue
 				set_int(&aux, Integer(getarg_sC(i)))
-				if vm_arith(L, ra, v1, &aux, .Add) == .Ok {
+				if vm_arith(ra, v1, &aux, .Add) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 
 			case .ADDK:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Add) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Add) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .SUBK:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Sub) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Sub) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .MULK:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Mul) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Mul) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .MODK:
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
-				st := vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Mod)
+				st := vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Mod)
 				if st == .Ok {
 					pc = vm_pc_add(pc, 1)
 				} else if st == .Div_By_Zero {
 					debug_runerror(L, "attempt to perform 'n%%0'")
 				}
 			case .POWK:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Pow) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Pow) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .DIVK:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Div) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Div) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .IDIVK:
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
-				st := vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .IDiv)
+				st := vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .IDiv)
 				if st == .Ok {
 					pc = vm_pc_add(pc, 1)
 				} else if st == .Div_By_Zero {
 					debug_runerror(L, "attempt to divide by zero")
 				}
 			case .BANDK:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Band) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Band) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .BORK:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Bor) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Bor) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .BXORK:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), &k[getarg_C(i)], .Bxor) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &k[getarg_C(i)], .Bxor) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 
@@ -1105,61 +1125,61 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				}
 
 			case .ADD:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Add) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Add) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .SUB:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Sub) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Sub) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .MUL:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Mul) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Mul) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .MOD:
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
-				st := vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Mod)
+				st := vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Mod)
 				if st == .Ok {
 					pc = vm_pc_add(pc, 1)
 				} else if st == .Div_By_Zero {
 					debug_runerror(L, "attempt to perform 'n%%0'")
 				}
 			case .POW:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Pow) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Pow) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .DIV:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Div) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Div) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .IDIV:
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
-				st := vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .IDiv)
+				st := vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .IDiv)
 				if st == .Ok {
 					pc = vm_pc_add(pc, 1)
 				} else if st == .Div_By_Zero {
 					debug_runerror(L, "attempt to divide by zero")
 				}
 			case .BAND:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Band) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Band) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .BOR:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Bor) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Bor) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .BXOR:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Bxor) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Bxor) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .SHL:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Shl) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Shl) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 			case .SHR:
-				if vm_arith(L, base + getarg_A(i), stack_value(L, base + getarg_B(i)), stack_value(L, base + getarg_C(i)), .Shr) == .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, &regs[getarg_B(i)].val, &regs[getarg_C(i)].val, .Shr) == .Ok {
 					pc = vm_pc_add(pc, 1)
 				}
 
@@ -1171,6 +1191,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				tm_trybinTM(L, ra, rb, result, getarg_C(i))
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .MMBINI:
 				ra := stack_value(L, base + getarg_A(i))
@@ -1180,6 +1201,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				tm_trybiniTM(L, ra, Integer(imm), getarg_k(i) != 0, result, getarg_C(i))
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .MMBINK:
 				ra := stack_value(L, base + getarg_A(i))
@@ -1189,23 +1211,26 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				tm_trybinassocTM(L, ra, imm, getarg_k(i) != 0, result, getarg_C(i))
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .UNM:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
-				if vm_arith(L, ra, rb, rb, .Unm) != .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, rb, rb, .Unm) != .Ok {
 					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					L.top = L.frames[ci_idx].top
 					tm_trybinTM(L, rb, rb, ra, TM_UNM)
+					trap = L.frames[ci_idx].u.l.trap
 				}
 
 			case .BNOT:
 				ra := base + getarg_A(i)
 				rb := stack_value(L, base + getarg_B(i))
-				if vm_arith(L, ra, rb, rb, .Bnot) != .Ok {
+				if vm_arith(&regs[getarg_A(i)].val, rb, rb, .Bnot) != .Ok {
 					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					L.top = L.frames[ci_idx].top
 					tm_trybinTM(L, rb, rb, ra, TM_BNOT)
+					trap = L.frames[ci_idx].u.l.trap
 				}
 
 			case .NOT:
@@ -1221,6 +1246,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				vm_objlen(L, ra, stack_value(L, base + getarg_B(i)))
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .CONCAT:
 				ra := base + getarg_A(i)
@@ -1230,12 +1256,14 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				vm_concat(L, n)
 				L.top = ra + 1 // result at ra; anchor it for the GC
 				gc_checkGC(L)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .CLOSE:
 				ra := base + getarg_A(i)
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				func_close(L, ra, int(Thread_Status.Ok), true)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .TBC:
 				ra := base + getarg_A(i)
@@ -1255,6 +1283,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				cond := vm_equalobj(L, ra, rb)
+				trap = L.frames[ci_idx].u.l.trap
 				oldpc := pc
 				pc = docondjump(pc, i, cond)
 				if uintptr(pc) <= uintptr(oldpc) {
@@ -1273,6 +1302,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					L.top = L.frames[ci_idx].top
 					cond = lessthanothers(L, ra, rb)
+					trap = L.frames[ci_idx].u.l.trap
 				}
 				oldpc := pc
 				pc = docondjump(pc, i, cond)
@@ -1292,6 +1322,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 					L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 					L.top = L.frames[ci_idx].top
 					cond = lessequalothers(L, ra, rb)
+					trap = L.frames[ci_idx].u.l.trap
 				}
 				oldpc := pc
 				pc = docondjump(pc, i, cond)
@@ -1326,24 +1357,28 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 			case .LTI:
 				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Lt)
+				trap = L.frames[ci_idx].u.l.trap
 				if uintptr(pc) <= uintptr(oldpc) {
 					trap = vm_poll_async_hook(L, trap)
 				}
 			case .LEI:
 				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Le)
+				trap = L.frames[ci_idx].u.l.trap
 				if uintptr(pc) <= uintptr(oldpc) {
 					trap = vm_poll_async_hook(L, trap)
 				}
 			case .GTI:
 				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Gt)
+				trap = L.frames[ci_idx].u.l.trap
 				if uintptr(pc) <= uintptr(oldpc) {
 					trap = vm_poll_async_hook(L, trap)
 				}
 			case .GEI:
 				oldpc := pc
 				pc = vm_orderI(L, ci_idx, code, pc, base, i, .Ge)
+				trap = L.frames[ci_idx].u.l.trap
 				if uintptr(pc) <= uintptr(oldpc) {
 					trap = vm_poll_async_hook(L, trap)
 				}
@@ -1502,18 +1537,18 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				continue newframe
 
 			case .FORLOOP:
-				ra := base + getarg_A(i)
-				if is_integer(stack_value(L, ra + 1)) { // integer loop
-					count := s2u(int_value(stack_value(L, ra)))
+				ra := getarg_A(i)
+				if is_integer(&regs[ra + 1].val) { // integer loop
+					count := s2u(int_value(&regs[ra].val))
 					if count > 0 {
-						step := int_value(stack_value(L, ra + 1))
-						idx := int_value(stack_value(L, ra + 2))
-						set_int(stack_value(L, ra), u2s(count - 1)) // decrement counter
-						set_int(stack_value(L, ra + 2), int_add(idx, step)) // advance control
+						step := int_value(&regs[ra + 1].val)
+						idx := int_value(&regs[ra + 2].val)
+						set_int(&regs[ra].val, u2s(count - 1)) // decrement counter
+						set_int(&regs[ra + 2].val, int_add(idx, step)) // advance control
 						pc = vm_pc_add(pc, -(getarg_Bx(i))) // jump back
 						trap = vm_poll_async_hook(L, trap)
 					}
-				} else if floatforloop(L, ra) { // float loop
+				} else if floatforloop(L, base + ra) { // float loop
 					pc = vm_pc_add(pc, -(getarg_Bx(i)))
 					trap = vm_poll_async_hook(L, trap)
 				}
@@ -1546,6 +1581,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				L.top = ra + 3 + 3
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				do_call(L, ra + 3, getarg_C(i)) // runs to completion
+				trap = L.frames[ci_idx].u.l.trap
 				// The following TFORLOOP is fetched normally next iteration.
 
 			case .TFORLOOP:
@@ -1572,6 +1608,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				}
 				if last > h.asize {
 					table_resizearray(L, h, last)
+					trap = L.frames[ci_idx].u.l.trap
 				}
 				for n > 0 {
 					val := stack_value(L, ra + int(n))
@@ -1590,6 +1627,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				pushclosure(L, p, cl.upvals, base, ra)
 				L.top = ra + 1 // closure at ra; anchor it for the GC
 				gc_checkGC(L)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .VARARG:
 				ra := base + getarg_A(i)
@@ -1598,6 +1636,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
 				L.top = L.frames[ci_idx].top
 				tm_getvarargs(L, ci_idx, ra, n, vatab)
+				trap = L.frames[ci_idx].u.l.trap
 
 			case .GETVARG:
 				ra := base + getarg_A(i)
@@ -1625,6 +1664,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 					L.oldpc = 1 // next opcode is seen as a "new" line
 				}
 				base = L.frames[ci_idx].func + 1 // function has a new base now
+				regs = ([^]StackValue)(&L.stack[base])
 
 			case .EXTRAARG:
 				// Always consumed as the operand of a preceding opcode; reaching it

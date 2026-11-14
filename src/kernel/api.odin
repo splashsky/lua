@@ -26,12 +26,11 @@ package kernel
 //
 // Reference Lua's `api_check` compiles to nothing in a release build; it exists
 // to catch embedder mistakes (bad indices, popping too much) during development.
-// We keep it as a plain assert: honest, and it costs nothing worth worrying
-// about while correctness is the goal. If we ever want a release build to drop
-// these, this is the single chokepoint to gate.
+// API_CHECKS controls these separately from internal consistency assertions and
+// defaults to the existing checked behavior for embedders.
 @(private = "file")
 api_check :: #force_inline proc(cond: bool, msg: string, loc := #caller_location) {
-	assert(cond, msg, loc)
+	when API_CHECKS {assert(cond, msg, loc)}
 }
 
 // The pointer we hand back for "no valid value here" -- reference Lua's
@@ -222,9 +221,9 @@ api_rotate :: proc(L: ^State, idx: int, n_rot: int) {
 	// rotation count already within [-len, len] and only *checks* it under an
 	// api-check that is compiled out of release builds -- which is why a legitimate
 	// degenerate call like `lua_insert(L, -1)` (rotate a single-element segment by
-	// 1) works there despite failing that check. We keep our api-checks live for
-	// safety, so we instead reduce the count modulo the length (Euclidean `%%`, so
-	// the result is always in [0, len)). This is identical to reference's `t - n`
+	// 1) works there despite failing that check. We instead reduce the count modulo
+	// the length (Euclidean `%%`, so the result is always in [0, len)). This is
+	// identical to reference's `t - n`
 	// for every in-range count and gracefully folds the full-rotation boundary into
 	// the identity case rather than tripping an assertion.
 	length := t - p + 1
@@ -262,7 +261,11 @@ api_checkstack :: proc(L: ^State, n: int) -> bool {
 	ci := &L.frames[L.ci]
 	res: bool
 	if L.stack_size - L.top > n {
-		res = true
+		when HARDSTACKTESTS {
+			res = realloc_stack(L, L.stack_size, false) == .Ok
+		} else {
+			res = true
+		}
 	} else {
 		res = grow_stack(L, n, false) == .Ok
 	}
@@ -638,7 +641,7 @@ api_pushthread :: proc(L: ^State) -> bool {
 @(private = "file")
 getGtable :: #force_inline proc(L: ^State, res: ^TValue) {
 	tag := table_getint(table_value(&L.g.registry), RIDX_GLOBALS, res)
-	assert(!tag_is_empty(tag))
+	when INTERNAL_ASSERTS {assert(!tag_is_empty(tag))}
 }
 
 // Core indexed read with metamethod fallback, writing the result to stack slot
@@ -1163,7 +1166,8 @@ api_pcallk :: proc(
 		status = do_pcall(L, f_call, &c, funcidx, func_ef)
 	} else {
 		// Yieldable protected call: retain the continuation across a possible yield.
-		ci := &L.frames[L.ci]
+		ci_idx := L.ci
+		ci := &L.frames[ci_idx]
 		ci.u.c.k = k
 		ci.u.c.ctx = ctx
 		ci.u2 = funcidx
@@ -1172,6 +1176,8 @@ api_pcallk :: proc(
 		set_oah(ci, L.allowhook)
 		ci.callstatus |= CIST_YPCALL
 		do_call(L, funcidx, nresults) // yieldable call
+		// The call may grow the frame array even when it returns normally.
+		ci = &L.frames[ci_idx]
 		ci.callstatus &= ~CIST_YPCALL
 		L.errfunc = ci.u.c.old_errfunc
 		status = .Ok

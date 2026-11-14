@@ -72,6 +72,19 @@ Windows (PowerShell):
 
 Binaries land in `build/out/`, named after the brand (`lua` / `luac` by default).
 
+Internal invariant assertions follow reference Lua's `lua_assert`: they are off
+in release builds and on in debug, `odin test`, and stress builds. Override this
+with `-define:INTERNAL_ASSERTS=true` or `false` (stress requires true). Embedding
+API precondition checks are independent and remain on by default for existing
+embedders; `-define:API_CHECKS=false` opts out. Neither option changes Odin or
+core-library assertions. Input checks and fail-fast guards remain unconditional.
+
+`-define:HARDSTACKTESTS=true` forces stack moves at checks and GC shrink paths.
+Its `MAXSTACK_LIMIT` defaults to 68,000, as in reference's `ltests` build, instead
+of the release default of 1,000,000. `-define:MAXSTACK_LIMIT=<n>` overrides the
+limit in either configuration. The C-call limit remains 200. Stress allocations
+may change GC timing and Lua-visible heap measurements; this is a test mode.
+
 ## Branding
 
 This runtime hardcodes no language name. The source uses neutral identifiers
@@ -191,6 +204,22 @@ Windows (PowerShell):
 
 Running one test by name uses Odin's `-define:ODIN_TEST_NAMES=tests.<name>` filter
 under the hood.
+
+To exercise forced stack relocation, including under AddressSanitizer:
+
+```sh
+bash build/test.sh --stress
+STRESS=1 bash build/puc.sh
+bash build/test.sh --asan
+bash build/test.sh --stress --asan
+ASAN=1 bash build/puc.sh
+STRESS=1 ASAN=1 bash build/puc.sh
+```
+
+The PowerShell equivalents are `build/test.ps1 [-Stress] [-Asan]` and
+`build/puc.ps1 [-Stress] [-Asan]`. ASan requires a supported Odin toolchain.
+The PUC wrappers give stress and ASan binaries distinct output names; normal
+invocations still build and run the release binary.
 
 > **Note (Windows, spaces in the repo path):** `odin test` compiles the test binary
 > and then runs it; if the output path contains a space (e.g. an `OneDrive - Microsoft`

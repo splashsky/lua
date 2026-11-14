@@ -113,3 +113,9 @@ Only same-session, back-to-back lua-odin/reference runs should be treated as a
 comparison. Even then, repeat noisy results and consider alternating interpreter
 order when investigating a small difference; the standard runner intentionally
 runs lua-odin first for a stable, easy-to-understand protocol.
+
+On a loaded Linux machine, wall-clock times are especially noisy. As an additional
+comparison, alternate builds and collect `perf stat -x, -e cycles:u,instructions:u`
+for at least five runs of each workload, reporting the minimum cycles and instruction
+counts. Instruction counts help distinguish a genuine path change from scheduling
+noise; use isolated benchmark names for the same reason as above.

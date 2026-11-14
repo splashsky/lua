@@ -148,7 +148,7 @@ run_protected :: #force_no_inline proc(L: ^State, f: Protected_Proc, ud: rawptr)
 	// that `throw` already stored on `lj`.
 	if (transmute(proc "c" (^Jmp_Buf) -> i32)jmp_set)(&lj.b) == 0 {
 		st := f(L, ud)
-		assert(!is_error_status(st), "protected proc returned an error status instead of throwing it")
+		when INTERNAL_ASSERTS {assert(!is_error_status(st), "protected proc returned an error status instead of throwing it")}
 		lj.status = st
 	}
 	L.errorJmp = lj.previous // unlink this boundary

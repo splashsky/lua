@@ -221,7 +221,7 @@ load_constants :: proc(S: ^LoadState, f: ^Proto) {
 		case VSHRSTR, VLNGSTR:
 			// Reference borrows `f.source` to anchor the string while creating
 			// it, then moves it into the constant slot and clears `source`.
-			assert(f.source == nil)
+			when INTERNAL_ASSERTS {assert(f.source == nil)}
 			load_string(S, f, &f.source)
 			if f.source == nil {
 				undump_error(S, "bad format for constant string")

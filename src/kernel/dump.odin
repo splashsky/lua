@@ -130,7 +130,7 @@ dump_size :: proc(D: ^DumpState, sz: uint) {
 // width-independent on the wire (a varint), so our 64-bit `int` is fine here as
 // long as it is non-negative -- which every prototype count is.
 dump_int :: proc(D: ^DumpState, x: int) {
-	assert(x >= 0)
+	when INTERNAL_ASSERTS {assert(x >= 0)}
 	dump_varint(D, u64(x))
 }
 
@@ -211,7 +211,7 @@ dump_constants :: proc(D: ^DumpState, f: ^Proto) {
 			dump_string(D, str_value(o))
 		case:
 			// nil / false / true carry no payload; nothing more to write.
-			assert(tt == VNIL || tt == VFALSE || tt == VTRUE)
+			when INTERNAL_ASSERTS {assert(tt == VNIL || tt == VFALSE || tt == VTRUE)}
 		}
 	}
 }

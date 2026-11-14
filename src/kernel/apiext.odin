@@ -53,7 +53,7 @@ getupvalref :: proc(L: ^State, fidx: int, n: int) -> (slot: ^^UpVal, f: ^LClosur
 	fi := index2value(L, fidx)
 	// Callers are contractually required to pass a Lua closure here. We assert on
 	// the tag rather than silently misbehaving, matching reference `api_check`.
-	assert(type_tag(fi) == VLCL, "api_upvaluejoin/upvalueid on a non-" + BRAND + " closure")
+	when API_CHECKS {assert(type_tag(fi) == VLCL, "api_upvaluejoin/upvalueid on a non-" + BRAND + " closure")}
 	cl := api_closure_value(fi)
 	// Reference `getupvalref` does NOT assert on an out-of-range index: it returns
 	// a pointer to a static NULL upvalue so callers can detect the miss. We mirror
@@ -89,7 +89,7 @@ api_upvalueid :: proc(L: ^State, fidx: int, n: int) -> rawptr {
 	case VLCF:
 		return nil // light C functions have no upvalues
 	case:
-		assert(false, "api_upvalueid on a non-function value")
+		when API_CHECKS {assert(false, "api_upvalueid on a non-function value")}
 		return nil
 	}
 }
@@ -105,7 +105,7 @@ api_upvaluejoin :: proc(L: ^State, fidx1: int, n1: int, fidx2: int, n2: int) {
 	// Reference `api_check`s that both indices resolved; the stdlib wrapper
 	// (`db_upvaluejoin`) has already validated them, so this only guards against
 	// a misbehaving direct C-API caller.
-	assert(ok1 && ok2, "invalid upvalue index")
+	when API_CHECKS {assert(ok1 && ok2, "invalid upvalue index")}
 	up1^ = up2^
 	gc_barrier(L, obj2gco(f1), obj2gco(up1^))
 }
@@ -176,7 +176,7 @@ api_closethread :: proc(L: ^State, from: ^State) -> Thread_Status {
 		L.n_ccalls = 0
 	}
 	status := run_protected(L, resetthread_aux, &L.status)
-	assert(L.top == (status == .Ok ? 1 : 2), "thread close stack invariant")
+	when INTERNAL_ASSERTS {assert(L.top == (status == .Ok ? 1 : 2), "thread close stack invariant")}
 	if L == from { // closing itself: unwind the whole thread, do not return
 		throw_baselevel(L, status)
 	}

@@ -613,8 +613,12 @@ resethookcount :: #force_inline proc "contextless" (L: ^State) {
 
 // Mark every live Lua frame as trapping, so the VM will call `luaG_traceexec`
 // before each instruction -- reference Lua's `settraps`. Called when a hook is
-// installed. C frames have no per-instruction dispatch, so they are skipped.
+// installed or a stack is relocated. C frames have no per-instruction dispatch,
+// so they are skipped.
 settraps :: proc(L: ^State) {
+	if L.frames == nil { // a thread may be observed while its stack is being built
+		return
+	}
 	for i := L.ci; i >= 0; i -= 1 {
 		if is_lua_frame(&L.frames[i]) {
 			L.frames[i].u.l.trap = 1
@@ -645,7 +649,8 @@ changedline :: proc(p: ^Proto, oldpc, newpc: int) -> bool {
 // the frame's register top before calling the hook, so the hook sees a tidy
 // stack. Instructions that *do* use top (a multi-value CALL/RETURN setup) are
 // left alone.
-debug_traceexec :: proc(L: ^State, pc: int) -> i32 {
+// Keep this cold path out of the dispatch loop to reduce register pressure.
+debug_traceexec :: #force_no_inline proc(L: ^State, pc: int) -> i32 {
 	ci := &L.frames[L.ci]
 	mask := L.hookmask
 	p := ci_func(L, ci).p
@@ -914,7 +919,7 @@ api_getinfo :: proc(L: ^State, what: string, ar: ^Debug_Info) -> bool {
 	ci_idx := -1
 	if len(what) > 0 && what[0] == '>' {
 		fv = stack_value(L, L.top - 1)
-		assert(is_function(fv), "function expected in api_getinfo")
+		when API_CHECKS {assert(is_function(fv), "function expected in api_getinfo")}
 		what = what[1:]
 		L.top -= 1 // pop the function
 	} else {

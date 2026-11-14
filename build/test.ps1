@@ -11,11 +11,14 @@
     Usage:
         .\build\test.ps1                 # run all Odin unit tests
         .\build\test.ps1 -Name foo       # run only tests matching a name
+        .\build\test.ps1 -Stress -Asan   # force stack moves under AddressSanitizer
 #>
 [CmdletBinding()]
 param(
     [string]$Name = '',
-    [string]$Brand = 'lua'
+    [string]$Brand = 'lua',
+    [switch]$Stress,
+    [switch]$Asan
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,7 +39,9 @@ $OutDir  = Join-Path $env:TEMP "lang-tests-$Brand"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $OutPath = Join-Path $OutDir 'tests.exe'
 
-$Args = @($TestsDir, $Collection, "-out:$OutPath") + (Get-BrandDefines -Brand $Brand)
+$Args = @($TestsDir, $Collection, "-out:$OutPath", '-define:INTERNAL_ASSERTS=true') + (Get-BrandDefines -Brand $Brand)
+if ($Stress) { $Args += '-define:HARDSTACKTESTS=true' }
+if ($Asan) { $Args += '-sanitize:address' }
 if ($Name -ne '') {
     # Odin filters tests by fully-qualified name via -define:ODIN_TEST_NAMES.
     $Args += "-define:ODIN_TEST_NAMES=tests.$Name"

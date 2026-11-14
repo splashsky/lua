@@ -152,7 +152,7 @@ tm_init :: proc(L: ^State) -> Thread_Status {
 // the metamethod is absent (an "empty"/nil raw slot counts as absent).
 tm_gettm :: proc "contextless" (events: ^Table, event: int, ename: ^TString) -> ^TValue {
 	tm := table_Hgetshortstr(events, ename)
-	assert_contextless(event <= TM_EQ)
+	when INTERNAL_ASSERTS {assert_contextless(event <= TM_EQ)}
 	if is_nil(tm) { // no such metamethod
 		events.flags |= Byte(u32(1) << u32(event)) // remember its absence
 		return nil

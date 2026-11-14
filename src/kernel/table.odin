@@ -118,14 +118,18 @@ Table :: struct {
 // stale, uninitialised payload bytes: readers and the GC must inspect the tag
 // first and touch the payload only when the tag says it is live.
 arr_val :: #force_inline proc "contextless" (t: ^Table, k: u32) -> ^Value {
-	assert_contextless((t.asize == 0) == (t.array == nil))
-	assert_contextless(k < t.asize)
+	when INTERNAL_ASSERTS {
+		assert_contextless((t.asize == 0) == (t.array == nil))
+		assert_contextless(k < t.asize)
+	}
 	return &t.array[-1 - int(k)]
 }
 
 arr_tag :: #force_inline proc "contextless" (t: ^Table, k: u32) -> ^u8 {
-	assert_contextless((t.asize == 0) == (t.array == nil))
-	assert_contextless(k < t.asize)
+	when INTERNAL_ASSERTS {
+		assert_contextless((t.asize == 0) == (t.array == nil))
+		assert_contextless(k < t.asize)
+	}
 	bytes := ([^]u8)(t.array)
 	return &bytes[size_of(u32) + int(k)]
 }
@@ -762,7 +766,7 @@ newcheckedkey :: proc "contextless" (t: ^Table, key: ^TValue, value: ^TValue) {
 		arr_set(t, i - 1, value)
 	} else {
 		ok := insertkey(t, key, value)
-		assert_contextless(ok, "newcheckedkey: insert into sized table cannot fail")
+		when INTERNAL_ASSERTS {assert_contextless(ok, "newcheckedkey: insert into sized table cannot fail")}
 	}
 }
 
@@ -892,7 +896,7 @@ table_finishset :: proc(
 	value: ^TValue,
 	hres: int,
 ) -> Thread_Status {
-	assert(hres != HOK)
+	when INTERNAL_ASSERTS {assert(hres != HOK)}
 	key := key_in
 	aux: TValue
 	if hres == HNOTFOUND {
@@ -1090,7 +1094,7 @@ concretesize :: #force_inline proc "contextless" (size: u32) -> uint {
 	if size == 0 {
 		return 0
 	}
-	assert_contextless(uint(size) <= (max(uint) - size_of(u32)) / (size_of(Value) + 1))
+	when INTERNAL_ASSERTS {assert_contextless(uint(size) <= (max(uint) - size_of(u32)) / (size_of(Value) + 1))}
 	return uint(size) * (size_of(Value) + 1) + size_of(u32)
 }
 
@@ -1107,7 +1111,7 @@ array_resize :: proc(
 	[^]Value,
 	bool,
 ) {
-	assert_contextless((t.asize == 0) == (t.array == nil))
+	when INTERNAL_ASSERTS {assert_contextless((t.asize == 0) == (t.array == nil))}
 	if oldasize == newasize {
 		return t.array, true
 	}
@@ -1120,7 +1124,7 @@ array_resize :: proc(
 	if block == nil {
 		return nil, false
 	}
-	assert_contextless(uintptr(block) % align_of(Value) == 0)
+	when INTERNAL_ASSERTS {assert_contextless(uintptr(block) % align_of(Value) == 0)}
 	np := ([^]Value)(rawptr(uintptr(block) + uintptr(newasize) * size_of(Value)))
 	if oldasize > 0 {
 		tomove := oldasize < newasize ? oldasize : newasize
@@ -1232,7 +1236,7 @@ reinsert_old_slice :: proc "contextless" (t: ^Table, oldasize: u32, newasize: u3
 			set_int(&key, u2s(u64(i) + 1))
 			arr_get(t, i, tag, &aux)
 			ok := insertkey(t, &key, &aux)
-			assert_contextless(ok, "reinsert_old_slice: hash sized for these keys")
+			when INTERNAL_ASSERTS {assert_contextless(ok, "reinsert_old_slice: hash sized for these keys")}
 		}
 	}
 }
@@ -1390,7 +1394,7 @@ binsearch :: proc "contextless" (t: ^Table, i0: u32, j0: u32) -> u32 {
 
 @(private = "file")
 newhint :: #force_inline proc "contextless" (t: ^Table, hint: u32) -> Unsigned {
-	assert_contextless(t.asize > 0)
+	when INTERNAL_ASSERTS {assert_contextless(t.asize > 0)}
 	(^u32)(t.array)^ = hint
 	return Unsigned(hint)
 }

@@ -124,7 +124,7 @@ MAXUPVAL :: 255
 //
 // Reference Lua points `v.p` either at a stack slot or at its own `u.value`, and
 // distinguishes the two by comparing those addresses. Our index-not-pointer rule
-// (Decision 4) forbids retaining a stack pointer across reallocation, so we model
+// (Decision 3) forbids retaining a stack pointer across reallocation, so we model
 // the state explicitly instead: `open` says which case we're in, and an open
 // upvalue names its slot by `(thread, stk_index)`, resolved against the live
 // backing array only at the moment of access.
@@ -364,7 +364,7 @@ func_findupval :: proc(L: ^State, level: int) -> ^UpVal {
 // `luaF_unlinkupval`. Pure pointer surgery: point our predecessor's link at our
 // successor, and (if we have one) our successor back at our predecessor's link.
 unlink_upval :: proc(uv: ^UpVal) {
-	assert(uv.open, "unlink_upval: upvalue must be open")
+	when INTERNAL_ASSERTS {assert(uv.open, "unlink_upval: upvalue must be open")}
 	uv.open_prev^ = uv.open_next
 	if uv.open_next != nil {
 		uv.open_next.open_prev = uv.open_prev
@@ -478,7 +478,7 @@ prepcallclosemth :: proc(L: ^State, level: int, status: int, yy: bool) {
 // otherwise the value must have a `__close` metamethod. Dummy nodes bridge gaps
 // wider than a single delta can express.
 func_newtbcupval :: proc(L: ^State, level: int) {
-	assert(level > L.tbclist, "func_newtbcupval: level must be above the current tbc top")
+	when INTERNAL_ASSERTS {assert(level > L.tbclist, "func_newtbcupval: level must be above the current tbc top")}
 	if is_falsy(stack_value(L, level)) {
 		return // nil/false variables never need closing
 	}

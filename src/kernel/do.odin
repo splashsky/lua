@@ -22,10 +22,11 @@ package kernel
 // nearest boundary, and coroutine resume and yield.
 //
 // Phase 2 delivers the piece the whole runtime leans on before any of that: the
-// value stack's index-safe growth. Because our slots are addressed by index, the
-// reallocation that would force reference Lua to walk every pointer and rebase it
-// (`correctstack`) is, for us, a no-op -- which is exactly the payoff of the
-// index model (Decision 4).
+// value stack's index-safe growth. Persistent slots are indices, so reference
+// Lua's `correctstack` needs no persistent-pointer fixup here; it does arm the
+// Lua-frame traps to refresh the interpreter's temporary register base.
+
+import "core:mem"
 
 // ---------------------------------------------------------------------------
 // Stack-size constants (reference Lua: lua.h, lstate.h, ldo.c, ldo.h)
@@ -48,7 +49,12 @@ BASIC_STACK_SIZE :: 2 * MINSTACK
 // (`LUAI_MAXSTACK`, 1,000,000 -- it fits under INT_MAX/2) always wins, but we
 // compute the minimum honestly so a hypothetical tiny-pointer platform stays
 // correct (ldo.c's `MAXSTACK`).
-MAXSTACK_LIMIT :: 1_000_000
+// Reference's ltests build uses 68000 to keep forced-move overflow tests finite.
+when HARDSTACKTESTS {
+	MAXSTACK_LIMIT :: #config(MAXSTACK_LIMIT, 68000)
+} else {
+	MAXSTACK_LIMIT :: #config(MAXSTACK_LIMIT, 1_000_000)
+}
 STACKERRSPACE :: 200
 MAXSTACK_BYSIZET :: int(MAX_SIZET / uint(size_of(StackValue)) - uint(STACKERRSPACE))
 MAXSTACK :: min(MAXSTACK_LIMIT, MAXSTACK_BYSIZET)
@@ -75,8 +81,8 @@ MAXCCALLS :: 200
 // The reference version follows this with `correctstack`, rebasing `top`,
 // `tbclist`, every open upvalue, and every frame's `func`/`top` pointers onto the
 // moved array. We store all of those as indices, so there is nothing to rebase --
-// the moved array is addressed exactly as the old one was. That deletion is the
-// entire reason the kernel speaks in indices.
+// the moved array is addressed exactly as the old one was. Local interpreter
+// register pointers are refreshed via the per-frame traps.
 realloc_stack :: proc(L: ^State, newsize: int, raise: bool) -> Thread_Status {
 	oldsize := L.stack_size
 	oldbytes := uint(oldsize + EXTRA_STACK) * size_of(StackValue)
@@ -85,11 +91,25 @@ realloc_stack :: proc(L: ^State, newsize: int, raise: bool) -> Thread_Status {
 	// Stop emergency collection for the duration of the reallocation: an
 	// emergency GC triggered mid-realloc would traverse a stack that is, for a
 	// moment, in an inconsistent state. Reference Lua's `luaD_reallocstack`
-	// brackets the allocation the same way. (Indices, not pointers, mean we still
-	// need no `correctstack` afterward.)
+	// brackets the allocation the same way. Persistent indices need no fixup.
 	oldgcstop := L.g.gcstopem
 	L.g.gcstopem = 1
-	newblock := state_realloc(L, L.stack, oldbytes, newbytes)
+	newblock: rawptr
+	when HARDSTACKTESTS {
+		// Allocate before freeing, so a same-size move cannot reuse the old
+		// address. Poison before the real free for non-sanitized runs; ASan can
+		// also diagnose any subsequent use of the freed block.
+		newblock = state_realloc(L, nil, 0, newbytes)
+		if newblock != nil {
+			mem.copy(newblock, L.stack, int(min(oldbytes, newbytes)))
+			when .Address not_in ODIN_SANITIZER_FLAGS {
+				mem.set(L.stack, 0xa5, int(oldbytes))
+			}
+			state_free(L, L.stack, oldbytes)
+		}
+	} else {
+		newblock = state_realloc(L, L.stack, oldbytes, newbytes)
+	}
 	L.g.gcstopem = oldgcstop
 	if newblock == nil {
 		if raise {
@@ -99,6 +119,9 @@ realloc_stack :: proc(L: ^State, newsize: int, raise: bool) -> Thread_Status {
 	}
 	L.stack = ([^]StackValue)(newblock)
 	L.stack_size = newsize
+	// Persistent frame/upvalue state stays indexed; executing Lua frames must
+	// refresh their temporary register base after even an in-place reallocation.
+	settraps(L)
 	// Erase the newly grown tail so nothing downstream scans stale bytes.
 	// When shrinking, the loop range is empty and this does nothing.
 	for i in (oldsize + EXTRA_STACK) ..< (newsize + EXTRA_STACK) {
@@ -165,6 +188,7 @@ check_stack :: proc(L: ^State, n: int) -> Thread_Status {
 	if L.stack_size - L.top <= n {
 		return grow_stack(L, n, true)
 	}
+	when HARDSTACKTESTS {return realloc_stack(L, L.stack_size, true)}
 	return .Ok
 }
 
@@ -220,6 +244,8 @@ check_stack_p :: #force_inline proc(L: ^State, n: int) {
 	// check at the call site and the allocating/error path out of line.
 	if L.stack_size - L.top <= n {
 		#force_no_inline grow_stack(L, n, true)
+	} else {
+		when HARDSTACKTESTS {#force_no_inline realloc_stack(L, L.stack_size, true)}
 	}
 }
 
@@ -610,6 +636,8 @@ shrink_stack :: proc(L: ^State) {
 	if inuse <= MAXSTACK && L.stack_size > max {
 		nsize := inuse > MAXSTACK / 2 ? MAXSTACK : inuse * 2
 		realloc_stack(L, nsize, false) // ok if it fails
+	} else {
+		when HARDSTACKTESTS {realloc_stack(L, L.stack_size, false)}
 	}
 }
 
@@ -655,6 +683,7 @@ do_closeprotected :: proc(L: ^State, level: int, status_in: Thread_Status) -> Th
 		// A close raised: undo the partial unwind and go around again.
 		status = st
 		L.ci = old_ci
+		L.nci = old_ci + 1
 		L.allowhook = old_allowhooks
 	}
 }
@@ -683,6 +712,9 @@ do_pcall :: proc(L: ^State, func: Protected_Proc, ud: rawptr, old_top: int, ef: 
 	}, &args)
 	if status != .Ok { // an error escaped `func`
 		L.ci = old_ci
+		// Dropped frames are no longer active. In particular stack_in_use must
+		// not count their stale tops when reclaiming an overflow reserve.
+		L.nci = old_ci + 1
 		L.allowhook = old_allowhooks
 		status = do_closeprotected(L, old_top, status)
 		set_error_object(L, status, old_top)
@@ -886,6 +918,7 @@ precover :: proc(L: ^State, status_in: Thread_Status) -> Thread_Status {
 			break
 		}
 		L.ci = ci // drop to the recovery frame
+		L.nci = ci + 1
 		set_cist_recst(&L.frames[ci], status) // status for pcall to finish with
 		status = run_protected(L, unroll, nil)
 	}

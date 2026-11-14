@@ -110,6 +110,28 @@ corolib_error_propagation :: proc(t: ^testing.T) {
 	testing.expect(t, st == .Ok, "resume returns errors; wrap propagates them")
 }
 
+// A successful yieldable pcall/xpcall can grow the frame array before returning
+// to its C frame. Its continuation bookkeeping must use the relocated frame.
+@(test)
+corolib_yieldable_pcall_survives_frame_growth :: proc(t: ^testing.T) {
+	L := corolib_state()
+	defer kernel.close_state(L)
+	st := corolib_run(
+		L,
+		"local function f(n) if n==0 then return 42 end; return 1+f(n-1) end\n" +
+		"for _,mode in ipairs({'pcall','xpcall'}) do\n" +
+		"  local co=coroutine.create(function()\n" +
+		"    local ok,v\n" +
+		"    if mode=='pcall' then ok,v=pcall(f,100)\n" +
+		"    else ok,v=xpcall(f,function(e) return e end,100) end\n" +
+		"    assert(ok and v==142); return 7\n" +
+		"  end)\n" +
+		"  local ok,v=coroutine.resume(co); assert(ok and v==7)\n" +
+		"end",
+	)
+	testing.expect(t, st == .Ok, "yieldable protected calls survive frame-array growth")
+}
+
 @(test)
 corolib_running_and_close :: proc(t: ^testing.T) {
 	L := corolib_state()

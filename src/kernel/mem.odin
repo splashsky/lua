@@ -8,8 +8,8 @@ package kernel
 // reporting OOM never itself needs to allocate.
 //
 // Because our value and frame stacks are growable arrays, this is also where the
-// grow/shrink helpers live -- and why the rest of the kernel stores indices, not
-// pointers, into anything that can move (see docs/ARCHITECTURE.md, Decision 4).
+// grow/shrink helpers live -- and why persistent state stores indices, not
+// pointers, into anything that can move (see docs/ARCHITECTURE.md, Decision 3).
 //
 // Phase 1 scope: the fallible allocator abstraction plus the pure size/growth
 // arithmetic (all testable without a live `State`). The two pieces that *need* a

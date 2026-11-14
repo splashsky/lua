@@ -165,7 +165,7 @@ gc_newobj :: proc(L: ^State, tt: Byte, size: uint) -> ^GCObject {
 // immediately after creation, while the object is still the head of `allgc`.
 gc_fix :: proc(L: ^State, o: ^GCObject) {
 	g := L.g
-	assert(g.allgc == o, "gc_fix: object must be the newest allgc entry")
+	when INTERNAL_ASSERTS {assert(g.allgc == o, "gc_fix: object must be the newest allgc entry")}
 	set2gray(o) // fixed objects are gray forever...
 	o.marked = (o.marked & ~Byte(AGE_BITS)) | G_OLD // ...and old forever
 	g.allgc = o.next // unlink from the sweep list
@@ -248,11 +248,11 @@ gc_barrier_ :: proc(L: ^State, o: ^GCObject, v: ^GCObject) {
 	if keepinvariant(g) { // during propagate/atomic: mark the new child
 		reallymarkobject(g, v)
 		if isold(o) {
-			assert(!isold(v)) // an old object cannot already be older here
+			when INTERNAL_ASSERTS {assert(!isold(v))} // an old object cannot already be older here
 			setage(v, G_OLD0) // adopt the child into the old generation
 		}
 	} else { // during sweep: recolor the parent white (incremental only)
-		assert(issweepphase(g))
+		when INTERNAL_ASSERTS {assert(issweepphase(g))}
 		if g.gckind == KGC_INC {
 			makewhite(g, o)
 		}

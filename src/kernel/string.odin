@@ -140,7 +140,7 @@ string_hash :: proc "contextless" (str: [^]u8, l: uint, seed: u32) -> u32 {
 // caching the result (flagged by `extra == 1`). Short strings never call this;
 // they're hashed eagerly at creation. Reference Lua's `luaS_hashlongstr`.
 string_hashlongstr :: proc "contextless" (ts: ^TString) -> u32 {
-	assert_contextless(ts.tt == VLNGSTR)
+	when INTERNAL_ASSERTS {assert_contextless(ts.tt == VLNGSTR)}
 	if ts.extra == 0 {
 		ts.hash = string_hash(str_bytes(ts), ts.len, ts.hash)
 		ts.extra = 1
@@ -161,7 +161,7 @@ mem_eq :: #force_inline proc "contextless" (a: [^]u8, b: [^]u8, n: uint) -> bool
 // Equality of two long strings -- reference Lua's `luaS_eqlngstr`. Short-string
 // equality is just pointer identity (thanks to interning) and needs no helper.
 string_eqlngstr :: proc "contextless" (a: ^TString, b: ^TString) -> bool {
-	assert_contextless(a.tt == VLNGSTR && b.tt == VLNGSTR)
+	when INTERNAL_ASSERTS {assert_contextless(a.tt == VLNGSTR && b.tt == VLNGSTR)}
 	return a == b || (a.len == b.len && mem_eq(str_bytes(a), str_bytes(b), a.len))
 }
 

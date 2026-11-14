@@ -10,6 +10,18 @@ package kernel
 // these here (rather than scattered) means the CLI banner, the `_VERSION`
 // global, and the bytecode header all agree on exactly one source of truth.
 
+// Match reference lua_assert: internal invariants are development checks.
+// Debug, test and stress builds exercise them without disabling Odin's assertions.
+INTERNAL_ASSERTS :: #config(INTERNAL_ASSERTS, ODIN_DEBUG || ODIN_TEST || HARDSTACKTESTS)
+
+// Preserve the existing embedding API precondition checks independently of
+// internal invariants; embedders may explicitly opt out.
+API_CHECKS :: #config(API_CHECKS, true)
+
+// Test-only analogue of reference HARDSTACKTESTS; see realloc_stack.
+HARDSTACKTESTS :: #config(HARDSTACKTESTS, false)
+#assert(!HARDSTACKTESTS || INTERNAL_ASSERTS, "HARDSTACKTESTS requires internal assertions")
+
 // The Lua version we are faithfully reimplementing. These mirror the numbers in
 // reference Lua 5.5.1's `lua.h` -- do not drift them independently.
 VERSION_MAJOR_N :: 5

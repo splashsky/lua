@@ -12,6 +12,7 @@
 #     ./build/puc.sh                  # build, then run the whole suite (all.lua)
 #     ./build/puc.sh math.lua         # run a single suite file standalone
 #     ./build/puc.sh --no-build       # skip the build, reuse the last binary
+#     STRESS=1 ASAN=1 ./build/puc.sh  # force stack moves under AddressSanitizer
 #
 # Notes:
 #   * `-e "_U=true"` enables the suite's "user tests" mode. The internal C test
@@ -41,17 +42,30 @@ mkdir -p "$OUT_DIR"
 LUA_EXE="$OUT_DIR/$BRAND_EXE"
 
 NO_BUILD=0
+STRESS="${STRESS:-0}"
+ASAN="${ASAN:-0}"
 FILE=""
 for arg in "$@"; do
     case "$arg" in
         --no-build) NO_BUILD=1 ;;
+        --stress) STRESS=1 ;;
+        --asan) ASAN=1 ;;
         *) FILE="$arg" ;;
     esac
 done
 
+if [[ "$STRESS" == "1" ]]; then LUA_EXE+="-stress"; fi
+if [[ "$ASAN" == "1" ]]; then LUA_EXE+="-asan"; fi
+
 if [[ "$NO_BUILD" -eq 0 ]]; then
     echo "==> Building lua -> $LUA_EXE"
-    odin build "$SRC_DIR" "$COLLECTION" -o:speed "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" "-out:$LUA_EXE"
+    TEST_FLAGS=()
+    if [[ "$STRESS" == "1" ]]; then
+        TEST_FLAGS+=("-define:HARDSTACKTESTS=true")
+    fi
+    if [[ "$ASAN" == "1" ]]; then TEST_FLAGS+=("-sanitize:address"); fi
+    if [[ "$STRESS" == "1" || "$ASAN" == "1" ]]; then TEST_FLAGS+=("-define:INTERNAL_ASSERTS=true"); fi
+    odin build "$SRC_DIR" "$COLLECTION" -o:speed "${TEST_FLAGS[@]+"${TEST_FLAGS[@]}"}" "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}" "-out:$LUA_EXE"
 fi
 
 if [[ ! -x "$LUA_EXE" ]]; then

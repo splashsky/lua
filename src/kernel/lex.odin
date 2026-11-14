@@ -856,7 +856,7 @@ lex_next :: proc(ls: ^LexState) {
 // Peek one token ahead without consuming the current one -- reference
 // `luaX_lookahead`. Only one token of look-ahead is ever needed (asserted).
 lex_lookahead :: proc(ls: ^LexState) -> int {
-	assert(ls.lookahead.token == TK_EOS)
+	when INTERNAL_ASSERTS {assert(ls.lookahead.token == TK_EOS)}
 	ls.lookahead.token = llex(ls, &ls.lookahead.seminfo)
 	return ls.lookahead.token
 }

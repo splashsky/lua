@@ -12,6 +12,7 @@
 # Usage:
 #     ./build/test.sh                  # run all Odin unit tests
 #     ./build/test.sh foo              # run only tests matching a name
+#     ./build/test.sh --stress --asan  # force stack moves under AddressSanitizer
 
 set -euo pipefail
 
@@ -25,11 +26,15 @@ TESTS_DIR="$REPO_ROOT/tests"
 
 COLLECTION="-collection:lang=$SRC_DIR"
 
-ARGS=("$TESTS_DIR" "$COLLECTION" "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}")
-if [[ -n "${1:-}" ]]; then
-    # Odin filters tests by fully-qualified name via -define:ODIN_TEST_NAMES.
-    ARGS+=("-define:ODIN_TEST_NAMES=tests.$1")
-fi
+ARGS=("$TESTS_DIR" "$COLLECTION" "-define:INTERNAL_ASSERTS=true" "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}")
+for arg in "$@"; do
+    case "$arg" in
+        --stress) ARGS+=("-define:HARDSTACKTESTS=true") ;;
+        --asan) ARGS+=("-sanitize:address") ;;
+        --*) echo "Unknown argument '$arg'." >&2; exit 1 ;;
+        *) ARGS+=("-define:ODIN_TEST_NAMES=tests.$arg") ;;
+    esac
+done
 
 echo "==> Running Odin tests in $TESTS_DIR"
 odin test "${ARGS[@]}"

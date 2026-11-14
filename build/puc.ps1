@@ -11,6 +11,7 @@
         .\build\puc.ps1                 # build, then run the whole suite (all.lua)
         .\build\puc.ps1 -File math.lua  # run a single suite file standalone
         .\build\puc.ps1 -NoBuild        # skip the build, reuse the last lua.exe
+        .\build\puc.ps1 -Stress -Asan   # force stack moves under AddressSanitizer
 
     Notes:
       * We build to a space-free temp path. Odin's test/run steps mis-handle the
@@ -39,7 +40,9 @@ param(
     [string]$File = '',
     [switch]$NoBuild,
     [switch]$AdaptDevices,
-    [string]$Brand = 'lua'
+    [string]$Brand = 'lua',
+    [switch]$Stress,
+    [switch]$Asan
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +60,12 @@ $Collection = "-collection:lang=$SrcDir"
 $OutDir  = Join-Path $env:TEMP "lang-puc-$Brand"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $LuaExe  = Join-Path $OutDir (Get-BrandExe $Brand)
+if ($Stress -or $Asan) {
+    $Suffix = ''
+    if ($Stress) { $Suffix += '-stress' }
+    if ($Asan) { $Suffix += '-asan' }
+    $LuaExe = Join-Path $OutDir "$Brand$Suffix.exe"
+}
 
 # Windows threads default to a 1 MiB stack, too small for Lua's LUAI_MAXCCALLS
 # (200) nested C-boundary frames; reserve 128 MiB so Lua's own C-stack guard fires
@@ -65,7 +74,11 @@ $StackFlags = '-extra-linker-flags:/STACK:0x8000000'
 
 if (-not $NoBuild) {
     Write-Host "==> Building lua -> $LuaExe"
-    & odin build $SrcDir $Collection '-o:speed' $StackFlags @BrandDefines "-out:$LuaExe"
+    $TestFlags = @()
+    if ($Stress) { $TestFlags += '-define:HARDSTACKTESTS=true' }
+    if ($Asan) { $TestFlags += '-sanitize:address' }
+    if ($Stress -or $Asan) { $TestFlags += '-define:INTERNAL_ASSERTS=true' }
+    & odin build $SrcDir $Collection '-o:speed' $StackFlags @TestFlags @BrandDefines "-out:$LuaExe"
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 }
 

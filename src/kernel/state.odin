@@ -40,11 +40,11 @@ Hook_Proc :: #type proc "c" (L: rawptr, ar: rawptr)
 // `Call_Info` is one activation record on a thread's explicit call-frame stack --
 // reference Lua's `CallInfo`. The reference struct is a doubly linked list node
 // holding raw stack *pointers*; ours lives in a growable array and stores stack
-// *indices* instead (Decision 4: nothing that can move is addressed by pointer).
+// *indices* instead (Decision 3: persistent state never retains a movable pointer).
 // The previous/next links become simple index arithmetic (frame `ci-1` is the
 // caller), which is why they aren't fields here.
 //
-// CRITICAL (Decision 4, reaffirmed in the Phase-5 design review): because the
+// CRITICAL (Decision 3, reaffirmed in the Phase-5 design review): because the
 // frame array can be reallocated by any nested call/metamethod/hook, code must
 // hold a frame *index* across any re-entrant operation and re-derive
 // `&L.frames[idx]` afterward -- never cache a `^Call_Info` across a call.
@@ -63,7 +63,7 @@ Call_Info :: struct {
 		l: struct {
 			// only for Lua frames
 			savedpc:    int, // index of the NEXT instruction in Proto.code
-			trap:       i32, // nonzero while tracing lines/counts
+			trap:       i32, // tracing or stack relocation requires VM attention
 			nextraargs: int, // # extra args a vararg call received
 		},
 		c: struct {
@@ -747,7 +747,7 @@ close_state :: proc(L: ^State) {
 	}
 
 	// Everything but the global block itself must now be accounted for.
-	assert(gettotalbytes(g) == L_Mem(size_of(Global_State)))
+	when INTERNAL_ASSERTS {assert(gettotalbytes(g) == L_Mem(size_of(Global_State)))}
 
 	raw_free(g.alloc, g, size_of(Global_State))
 }

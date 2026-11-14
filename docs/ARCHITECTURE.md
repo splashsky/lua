@@ -232,14 +232,32 @@ Lua: an ordinary callback is non-yieldable across its native frame, while a yiel
 callback must register a continuation. A callback returns a *tagged outcome*, not just
 an integer result count.
 
-## Decision 3 — indices, never retained pointers
+## Decision 3 — persistent indices, temporary VM pointers
 
-Because the value and frame stacks are Odin arrays that **grow** (and growth may
-reallocate the backing memory), we never hold a raw pointer into them across anything
-that could reallocate or trigger GC. Frames, protected boundaries, open upvalues, and
-API stack slots all store **indices/offsets** and resolve them to a pointer only for
-the duration of an operation on the current backing array. This is the Odin-safe
-equivalent of Lua's care around stack reallocation.
+Because the value and frame stacks can reallocate, frames, protected boundaries,
+open upvalues, and API stack slots store **indices/offsets**. They resolve a slot
+to a pointer only for an operation on the current backing array. Frame pointers
+are never retained across re-entrant calls.
+
+The exception is `vm_execute`'s local register-base pointer. Stack reallocation
+arms the trap on every Lua frame; after a potentially moving call, the VM reloads
+the trap and re-derives the base at the next fetch, before dereferencing it. Such
+calls include metamethods, GC, hooks, native calls, iterators and varargs. A handler
+that needs a register pointer again within the same instruction must re-derive it
+immediately after the call instead of waiting for the next fetch.
+
+`HARDSTACKTESTS` forces even no-growth stack checks and GC shrink paths to allocate
+a different block, poison and free the old block. The test scripts can combine
+this with AddressSanitizer to catch stale uses. As in reference's `ltests` build,
+stress defaults to a 68,000-slot stack limit so stack-overflow tests finish despite
+quadratic copying; ordinary builds retain the 1,000,000-slot limit. Extra allocations
+can change GC timing and Lua-visible memory measurements in this test mode.
+
+Internal invariant assertions follow reference `lua_assert`: release builds omit
+them; debug, Odin test and stress builds enable them. Embedding API precondition
+checks have their own `API_CHECKS` switch and remain enabled by default to preserve
+the existing embedding contract. Input checks and fail-fast guards are not
+disabled by these switches.
 
 ## Decision 4 — a fallible allocator and honest OOM
 
