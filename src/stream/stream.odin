@@ -23,9 +23,12 @@ import "core:bytes"
 import "core:io"
 import "core:os"
 import "core:strings"
+import "core:sync"
 
 EOF :: -1
 DEFAULT_BUFFER_SIZE :: 8192
+STREAM_EOF :: u32(1)
+STREAM_ERROR :: u32(2)
 
 Buffer_Mode :: enum {
 	Unbuffered,
@@ -46,6 +49,18 @@ Direction :: enum {
 }
 
 Stream :: struct {
+	mutex:             ^sync.Mutex,
+	// Keep these outside state: reopen replaces state while feof/ferror can read
+	// the indicators without taking the stream mutex.
+	flags:             u32,
+	serial:            u64,
+	flush_refs:        int,
+	next:              ^Stream,
+	using state:       Stream_State,
+}
+
+@(private = "file")
+Stream_State :: struct {
 	file:              ^os.File,
 	owns_file:         bool,
 	readable:          bool,
@@ -62,8 +77,6 @@ Stream :: struct {
 	raw_cursor:        i64,
 	logical_pos:       i64,
 	direction:         Direction,
-	eof_flag:          bool,
-	error_flag:        bool,
 	text_eof:          bool,
 	raw_saved:         bool,
 	raw_saved_byte:    u8,
@@ -75,13 +88,20 @@ Stream :: struct {
 	last_before:       i64,
 	last_after:        i64,
 	temp_path:         string,
-	next:              ^Stream,
 }
 
 @(private = "file")
 stream_head: ^Stream
 @(private = "file")
+stream_list_mutex: sync.Mutex
+@(private = "file")
+stream_list_cond: sync.Cond
+@(private = "file")
+stream_serial: u64
+@(private = "file", thread_local)
 last_os_error: os.Error
+@(private = "file")
+standard_mutex: sync.Mutex
 @(private = "file")
 standard_input: ^Stream
 @(private = "file")
@@ -104,19 +124,24 @@ clear_error :: proc() {
 
 @(private = "file")
 fail :: proc(s: ^Stream, err: os.Error) -> bool {
-	s.error_flag = true
+	_ = sync.atomic_or_explicit(&s.flags, STREAM_ERROR, .Release)
 	set_error(err)
 	return false
 }
 
 @(private = "file")
 link_stream :: proc(s: ^Stream) {
+	sync.mutex_lock(&stream_list_mutex)
+	defer sync.mutex_unlock(&stream_list_mutex)
+	stream_serial += 1
+	s.serial = stream_serial
 	s.next = stream_head
 	stream_head = s
 }
 
 @(private = "file")
 unlink_stream :: proc(s: ^Stream) {
+	// The caller holds stream_list_mutex.
 	p := &stream_head
 	for p^ != nil {
 		if p^ == s {
@@ -133,22 +158,22 @@ resize_buffers :: proc(s: ^Stream, size: int) -> bool {
 	if actual_size < 1 {
 		actual_size = 1
 	}
-	new_read, err1 := make([]u8, actual_size)
+	new_read, err1 := make([]u8, actual_size, os.heap_allocator())
 	if err1 != nil {
 		set_error(os.Error(err1))
 		return false
 	}
-	new_write, err2 := make([]u8, actual_size)
+	new_write, err2 := make([]u8, actual_size, os.heap_allocator())
 	if err2 != nil {
-		delete(new_read)
+		delete(new_read, os.heap_allocator())
 		set_error(os.Error(err2))
 		return false
 	}
 	if s.read_buffer != nil {
-		delete(s.read_buffer)
+		delete(s.read_buffer, os.heap_allocator())
 	}
 	if s.write_buffer != nil {
-		delete(s.write_buffer)
+		delete(s.write_buffer, os.heap_allocator())
 	}
 	s.read_buffer = new_read
 	s.write_buffer = new_write
@@ -161,12 +186,21 @@ resize_buffers :: proc(s: ^Stream, size: int) -> bool {
 
 @(private = "file")
 make_stream :: proc(f: ^os.File, owns: bool, readable, writable, append_mode, text_mode: bool) -> ^Stream {
-	s, alloc_err := new(Stream)
+	// Stream lifetimes can span Odin contexts and threads, including the process
+	// lifetime for standard streams. Do not retain a caller's temporary allocator.
+	s, alloc_err := new(Stream, os.heap_allocator())
 	if alloc_err != nil {
 		set_error(os.Error(alloc_err))
 		if owns && f != nil {
 			os.close(f)
 		}
+		return nil
+	}
+	s.mutex, alloc_err = new(sync.Mutex, os.heap_allocator())
+	if alloc_err != nil {
+		set_error(os.Error(alloc_err))
+		if owns && f != nil do os.close(f)
+		free(s, os.heap_allocator())
 		return nil
 	}
 	s.file = f
@@ -180,7 +214,8 @@ make_stream :: proc(f: ^os.File, owns: bool, readable, writable, append_mode, te
 		if owns {
 			os.close(f)
 		}
-		free(s)
+		free(s.mutex, os.heap_allocator())
+		free(s, os.heap_allocator())
 		return nil
 	}
 	pos, err := os.seek(f, 0, .Current)
@@ -213,40 +248,50 @@ from_file :: proc(f: ^os.File, owns, readable, writable, text_mode: bool) -> ^St
 
 @(private = "file")
 ensure_standard_streams :: proc() {
-	if standard_input != nil {
-		return
+	// The caller holds standard_mutex, including when reading the pointers.
+	if standard_input == nil {
+		standard_input = make_stream(os.stdin, false, true, false, false, true)
+		if standard_input != nil && os.is_tty(os.stdin) {
+			// A terminal has one input owner. The native editor reads console events
+			// (Windows) or raw bytes (Linux) directly, while io.read uses this Stream.
+			// Keeping terminal stdin unbuffered from its first use prevents an earlier
+			// LUA_INIT, -e chunk, or script from reading 8192 bytes ahead and stranding
+			// bytes that the later editor could no longer see. We never discard bytes
+			// from a non-seekable terminal to switch owners.
+			standard_input.mode = .Unbuffered
+		}
 	}
-	standard_input = make_stream(os.stdin, false, true, false, false, true)
-	standard_output = make_stream(os.stdout, false, false, true, false, true)
-	standard_error = make_stream(os.stderr, false, false, true, false, true)
-	if standard_output != nil {
-		standard_output.mode = os.is_tty(os.stdout) ? .Line : .Full
+	if standard_output == nil {
+		standard_output = make_stream(os.stdout, false, false, true, false, true)
+		if standard_output != nil {
+			standard_output.mode = os.is_tty(os.stdout) ? .Line : .Full
+		}
 	}
-	if standard_input != nil && os.is_tty(os.stdin) {
-		// A terminal has one input owner. The native editor reads console events
-		// (Windows) or raw bytes (Linux) directly, while io.read uses this Stream.
-		// Keeping terminal stdin unbuffered from its first use prevents an earlier
-		// LUA_INIT, -e chunk, or script from reading 8192 bytes ahead and stranding
-		// bytes that the later editor could no longer see. We never discard bytes
-		// from a non-seekable terminal to switch owners.
-		standard_input.mode = .Unbuffered
-	}
-	if standard_error != nil {
-		standard_error.mode = .Unbuffered
+	if standard_error == nil {
+		standard_error = make_stream(os.stderr, false, false, true, false, true)
+		if standard_error != nil {
+			standard_error.mode = .Unbuffered
+		}
 	}
 }
 
 stdin :: proc() -> ^Stream {
+	sync.mutex_lock(&standard_mutex)
+	defer sync.mutex_unlock(&standard_mutex)
 	ensure_standard_streams()
 	return standard_input
 }
 
 stdout :: proc() -> ^Stream {
+	sync.mutex_lock(&standard_mutex)
+	defer sync.mutex_unlock(&standard_mutex)
 	ensure_standard_streams()
 	return standard_output
 }
 
 stderr :: proc() -> ^Stream {
+	sync.mutex_lock(&standard_mutex)
+	defer sync.mutex_unlock(&standard_mutex)
 	ensure_standard_streams()
 	return standard_error
 }
@@ -308,7 +353,7 @@ tmpfile :: proc() -> ^Stream {
 		return nil
 	}
 	path := os.name(f)
-	s.temp_path = strings.clone(path)
+	s.temp_path = strings.clone(path, os.heap_allocator())
 	return s
 }
 
@@ -385,6 +430,14 @@ flush :: proc(s: ^Stream) -> bool {
 	if s == nil {
 		return false
 	}
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
+	return flush_unlocked(s)
+}
+
+@(private = "file")
+flush_unlocked :: proc(s: ^Stream) -> bool {
+	// The caller holds s.mutex.
 	if s.write_count > 0 {
 		when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD {
 			// Darwin and FreeBSD stdio retain the unwritten tail after a partial
@@ -411,11 +464,35 @@ flush :: proc(s: ^Stream) -> bool {
 }
 
 flush_all :: proc() -> bool {
+	// Serials preserve the list order even if streams are removed or new ones
+	// opened while a flush is in progress. A flush reference pins each selected
+	// stream until its lock has been released, so close can safely unlink it.
+	sync.mutex_lock(&stream_list_mutex)
+	limit := stream_serial
+	sync.mutex_unlock(&stream_list_mutex)
 	ok := true
-	for s := stream_head; s != nil; s = s.next {
-		if !flush(s) {
+	for limit > 0 {
+		sync.mutex_lock(&stream_list_mutex)
+		s := stream_head
+		for s != nil && s.serial > limit do s = s.next
+		if s == nil {
+			sync.mutex_unlock(&stream_list_mutex)
+			break
+		}
+		limit = s.serial - 1
+		s.flush_refs += 1
+		sync.mutex_unlock(&stream_list_mutex)
+		// Never wait for a stream while holding the list lock: a flush can block
+		// on a pipe whose peer needs to close or open a different stream.
+		sync.mutex_lock(s.mutex)
+		if !flush_unlocked(s) {
 			ok = false
 		}
+		sync.mutex_unlock(s.mutex)
+		sync.mutex_lock(&stream_list_mutex)
+		s.flush_refs -= 1
+		if s.flush_refs == 0 do sync.cond_broadcast(&stream_list_cond)
+		sync.mutex_unlock(&stream_list_mutex)
 	}
 	return ok
 }
@@ -439,11 +516,11 @@ discard_read_ahead :: proc(s: ^Stream) -> bool {
 prepare_read :: proc(s: ^Stream) -> bool {
 	if !s.readable {
 		set_error(os.Error(os.General_Error.Invalid_File))
-		s.error_flag = true
+		_ = sync.atomic_or_explicit(&s.flags, STREAM_ERROR, .Release)
 		return false
 	}
 	if s.direction == .Write {
-		if !flush(s) {
+		if !flush_unlocked(s) {
 			return false
 		}
 		s.raw_cursor = s.logical_pos
@@ -456,7 +533,7 @@ prepare_read :: proc(s: ^Stream) -> bool {
 prepare_write :: proc(s: ^Stream) -> bool {
 	if !s.writable {
 		set_error(os.Error(os.General_Error.Invalid_File))
-		s.error_flag = true
+		_ = sync.atomic_or_explicit(&s.flags, STREAM_ERROR, .Release)
 		return false
 	}
 	if s.direction == .Read {
@@ -509,7 +586,18 @@ raw_next :: proc(s: ^Stream) -> (u8, i64, i64, bool) {
 }
 
 getc :: proc(s: ^Stream) -> i32 {
-	if s == nil || !prepare_read(s) {
+	if s == nil {
+		return EOF
+	}
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
+	return getc_unlocked(s)
+}
+
+@(private = "file")
+getc_unlocked :: proc(s: ^Stream) -> i32 {
+	// The caller holds s.mutex.
+	if !prepare_read(s) {
 		return EOF
 	}
 	if s.pushback {
@@ -520,12 +608,12 @@ getc :: proc(s: ^Stream) -> i32 {
 		return i32(s.pushback_byte)
 	}
 	if s.text_eof {
-		s.eof_flag = true
+		_ = sync.atomic_or_explicit(&s.flags, STREAM_EOF, .Release)
 		return EOF
 	}
 	b, before, after, ok := raw_next(s)
 	if !ok {
-		s.eof_flag = true
+		_ = sync.atomic_or_explicit(&s.flags, STREAM_EOF, .Release)
 		return EOF
 	}
 	when ODIN_OS == .Windows {
@@ -536,7 +624,7 @@ getc :: proc(s: ^Stream) -> i32 {
 			if b == 0x1a {
 				s.text_eof = true
 				s.logical_pos = before
-				s.eof_flag = true
+				_ = sync.atomic_or_explicit(&s.flags, STREAM_EOF, .Release)
 				return EOF
 			}
 			if b == '\r' {
@@ -561,14 +649,19 @@ getc :: proc(s: ^Stream) -> i32 {
 }
 
 ungetc :: proc(c: i32, s: ^Stream) -> i32 {
-	if s == nil || c == EOF || s.pushback {
+	if s == nil || c == EOF {
+		return EOF
+	}
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
+	if s.pushback {
 		return EOF
 	}
 	s.pushback = true
 	s.pushback_byte = u8(c)
 	s.pushback_after = s.last_after
 	s.logical_pos = s.last_before
-	s.eof_flag = false
+	_ = sync.atomic_and_explicit(&s.flags, ~STREAM_EOF, .Release)
 	return c
 }
 
@@ -598,7 +691,7 @@ read_bulk :: proc(s: ^Stream, dst: []u8, stop_at_delimiter: bool, delimiter: u8)
 		// `raw_saved` is the look-ahead after a lone CR. Like pushback, it must
 		// pass through getc so raw_cursor/logical_pos retain their exact cookies.
 		if s.pushback || s.raw_saved {
-			c := getc(s)
+			c := getc_unlocked(s)
 			if c == EOF {
 				return
 			}
@@ -611,11 +704,11 @@ read_bulk :: proc(s: ^Stream, dst: []u8, stop_at_delimiter: bool, delimiter: u8)
 			continue
 		}
 		if s.text_eof {
-			s.eof_flag = true
+			_ = sync.atomic_or_explicit(&s.flags, STREAM_EOF, .Release)
 			return
 		}
 		if !refill_read_buffer(s) {
-			s.eof_flag = true
+			_ = sync.atomic_or_explicit(&s.flags, STREAM_EOF, .Release)
 			return
 		}
 
@@ -689,7 +782,7 @@ read_bulk :: proc(s: ^Stream, dst: []u8, stop_at_delimiter: bool, delimiter: u8)
 			}
 			// getc consumes the delimiter itself and performs CRLF/Ctrl-Z
 			// translation when the raw byte was special only because of text mode.
-			c := getc(s)
+			c := getc_unlocked(s)
 			if c == EOF {
 				return
 			}
@@ -708,10 +801,16 @@ read_bulk :: proc(s: ^Stream, dst: []u8, stop_at_delimiter: bool, delimiter: u8)
 // raw buffer, the operation copies that whole translated run, refills, and keeps
 // going until `dst` is full or input ends.
 read_until :: proc(s: ^Stream, dst: []u8, delimiter: u8) -> (n: int, found: bool) {
+	if s == nil do return
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
 	return read_bulk(s, dst, true, delimiter)
 }
 
 read :: proc(s: ^Stream, dst: []u8) -> int {
+	if s == nil do return 0
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
 	n, _ := read_bulk(s, dst, false, 0)
 	return n
 }
@@ -732,7 +831,12 @@ logical_raw_size :: proc(s: ^Stream, data: []u8) -> i64 {
 }
 
 write :: proc(s: ^Stream, data: []u8) -> int {
-	if s == nil || !prepare_write(s) {
+	if s == nil {
+		return 0
+	}
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
+	if !prepare_write(s) {
 		return 0
 	}
 	// Unbuffered mode reaches the handle immediately. Full mode flushes only when
@@ -752,7 +856,7 @@ write :: proc(s: ^Stream, data: []u8) -> int {
 		}
 		room := s.buffer_size - s.write_count
 		if room == 0 {
-			if !flush(s) {
+			if !flush_unlocked(s) {
 				break
 			}
 			room = s.buffer_size
@@ -770,7 +874,7 @@ write :: proc(s: ^Stream, data: []u8) -> int {
 					break
 				}
 			}
-			if newline >= 0 && !flush(s) {
+			if newline >= 0 && !flush_unlocked(s) {
 				// The newline that triggered the failed flush was not accepted by
 				// fwrite; neither were bytes after it in this input chunk.
 				written = written - take + newline
@@ -782,7 +886,12 @@ write :: proc(s: ^Stream, data: []u8) -> int {
 }
 
 seek :: proc(s: ^Stream, offset: i64, from: Seek_From) -> (i64, bool) {
-	if s == nil || !flush(s) {
+	if s == nil {
+		return 0, false
+	}
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
+	if !flush_unlocked(s) {
 		return 0, false
 	}
 	if s.direction == .Read && !discard_read_ahead(s) {
@@ -810,7 +919,7 @@ seek :: proc(s: ^Stream, offset: i64, from: Seek_From) -> (i64, bool) {
 	s.raw_saved = false
 	s.pushback = false
 	s.text_eof = false
-	s.eof_flag = false
+	_ = sync.atomic_and_explicit(&s.flags, ~STREAM_EOF, .Release)
 	s.direction = .None
 	return pos, true
 }
@@ -820,6 +929,8 @@ tell :: proc(s: ^Stream) -> (i64, bool) {
 		set_error(os.Error(os.General_Error.Invalid_File))
 		return 0, false
 	}
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
 	return s.logical_pos, true
 }
 
@@ -831,14 +942,16 @@ setvbuf :: proc(s: ^Stream, mode: Buffer_Mode, size: int) -> bool {
 		set_error(os.Error(os.General_Error.Invalid_File))
 		return false
 	}
-	if !flush(s) {
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
+	if !flush_unlocked(s) {
 		return false
 	}
 	if s.direction == .Read && !discard_read_ahead(s) {
 		return false
 	}
 	if !resize_buffers(s, size) {
-		s.error_flag = true
+		_ = sync.atomic_or_explicit(&s.flags, STREAM_ERROR, .Release)
 		return false
 	}
 	s.mode = mode
@@ -847,17 +960,20 @@ setvbuf :: proc(s: ^Stream, mode: Buffer_Mode, size: int) -> bool {
 }
 
 feof :: proc(s: ^Stream) -> bool {
-	return s != nil && s.eof_flag
+	if s == nil do return false
+	return sync.atomic_load_explicit(&s.flags, .Acquire) & STREAM_EOF != 0
 }
 
 ferror :: proc(s: ^Stream) -> bool {
-	return s != nil && s.error_flag
+	if s == nil do return false
+	return sync.atomic_load_explicit(&s.flags, .Acquire) & STREAM_ERROR != 0
 }
 
 clearerr :: proc(s: ^Stream) {
 	if s != nil {
-		s.eof_flag = false
-		s.error_flag = false
+		sync.mutex_lock(s.mutex)
+		defer sync.mutex_unlock(s.mutex)
+		sync.atomic_store_explicit(&s.flags, 0, .Release)
 	}
 }
 
@@ -867,7 +983,10 @@ clearerr :: proc(s: ^Stream) {
 // ungetc byte is real input and must make the editor fall back; silently dropping
 // it on a non-seekable console would be data loss.
 prepare_direct_read :: proc(s: ^Stream) -> bool {
-	if s == nil || !prepare_read(s) || s.mode != .Unbuffered {
+	if s == nil do return false
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
+	if !prepare_read(s) || s.mode != .Unbuffered {
 		return false
 	}
 	return s.read_index == s.read_count &&
@@ -880,15 +999,22 @@ finish_direct_read :: proc(s: ^Stream) {
 	if s == nil {
 		return
 	}
+	sync.mutex_lock(s.mutex)
+	defer sync.mutex_unlock(s.mutex)
 	s.direction = .Read
-	s.eof_flag = false
+	_ = sync.atomic_and_explicit(&s.flags, ~STREAM_EOF, .Release)
 }
 
 close :: proc(s: ^Stream) -> bool {
 	if s == nil {
 		return true
 	}
-	ok := flush(s)
+	sync.mutex_lock(&stream_list_mutex)
+	unlink_stream(s)
+	for s.flush_refs > 0 do sync.cond_wait(&stream_list_cond, &stream_list_mutex)
+	sync.mutex_unlock(&stream_list_mutex)
+	sync.mutex_lock(s.mutex)
+	ok := flush_unlocked(s)
 	if s.owns_file {
 		if err := os.close(s.file); err != nil {
 			set_error(err)
@@ -897,12 +1023,14 @@ close :: proc(s: ^Stream) -> bool {
 	}
 	if s.temp_path != "" {
 		os.remove(s.temp_path)
-		delete(s.temp_path)
+		delete(s.temp_path, os.heap_allocator())
 	}
-	unlink_stream(s)
-	delete(s.read_buffer)
-	delete(s.write_buffer)
-	free(s)
+	delete(s.read_buffer, os.heap_allocator())
+	delete(s.write_buffer, os.heap_allocator())
+	mutex := s.mutex
+	sync.mutex_unlock(mutex)
+	free(mutex, os.heap_allocator())
+	free(s, os.heap_allocator())
 	return ok
 }
 
@@ -911,7 +1039,8 @@ reopen :: proc(path, mode: string, s: ^Stream) -> ^Stream {
 		return nil
 	}
 	// freopen closes the old association even when opening the replacement fails.
-	flush(s)
+	sync.mutex_lock(s.mutex)
+	flush_unlocked(s)
 	if s.owns_file {
 		os.close(s.file)
 	}
@@ -920,17 +1049,24 @@ reopen :: proc(path, mode: string, s: ^Stream) -> ^Stream {
 		s.file = nil
 		s.readable = false
 		s.writable = false
-		s.error_flag = true
+		_ = sync.atomic_or_explicit(&s.flags, STREAM_ERROR, .Release)
+		sync.mutex_unlock(s.mutex)
 		return nil
 	}
+	sync.mutex_lock(&stream_list_mutex)
 	unlink_stream(replacement)
-	next := s.next
+	for replacement.flush_refs > 0 do sync.cond_wait(&stream_list_cond, &stream_list_mutex)
+	mutex := s.mutex
+	replacement_mutex := replacement.mutex
 	read_buffer := s.read_buffer
 	write_buffer := s.write_buffer
-	s^ = replacement^
-	s.next = next
-	delete(read_buffer)
-	delete(write_buffer)
-	free(replacement)
+	s.state = replacement.state
+	sync.atomic_store_explicit(&s.flags, sync.atomic_load_explicit(&replacement.flags, .Acquire), .Release)
+	sync.mutex_unlock(&stream_list_mutex)
+	sync.mutex_unlock(mutex)
+	delete(read_buffer, os.heap_allocator())
+	delete(write_buffer, os.heap_allocator())
+	free(replacement_mutex, os.heap_allocator())
+	free(replacement, os.heap_allocator())
 	return s
 }

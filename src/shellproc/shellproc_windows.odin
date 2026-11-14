@@ -4,6 +4,7 @@
 package shellproc
 
 import "core:os"
+import "core:sync"
 import win "core:sys/windows"
 import stream "lang:stream"
 
@@ -18,6 +19,10 @@ open :: proc(command, mode: string) -> Open_Result {
 	if alloc_err != nil {
 		return {err = os.General_Error.Invalid_File}
 	}
+	// CreatePipe's handles are inheritable immediately, including before the
+	// parent end can be cleared. Cover that whole window and the child's close.
+	sync.mutex_lock(&spawn_mutex)
+	defer sync.mutex_unlock(&spawn_mutex)
 	read_end, write_end, err := os.pipe()
 	if err != nil {
 		free(h)

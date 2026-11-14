@@ -836,7 +836,7 @@ os_execute :: proc "c" (Lp: rawptr) -> i32 {
 		stdout = os.stdout,
 		stderr = os.stderr,
 	}
-	p, err := os.process_start(desc)
+	p, err := shellproc.start_process(desc)
 	if err != nil {
 		return aux_execresult(L, -1, err)
 	}
