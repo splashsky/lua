@@ -1832,7 +1832,6 @@ repeatstat :: proc(ls: ^LexState, line: int) {
 	statlist(ls)
 	check_match(ls, TK_UNTIL, TK_REPEAT, line)
 	condexit := cond(ls) // read the condition (inside the scope block)
-	leaveblock(fs) // finish the scope
 	if bl2.upval != 0 { // upvalues to close?
 		exit := code_jump(fs) // the normal exit must jump over the fix
 		code_patchtohere(fs, condexit) // repetition closes upvalues
@@ -1841,6 +1840,7 @@ repeatstat :: proc(ls: ^LexState, line: int) {
 		code_patchtohere(fs, exit)
 	}
 	code_patchlist(fs, condexit, repeat_init) // close the loop
+	leaveblock(fs) // finish the scope
 	leaveblock(fs) // finish the loop
 }
 

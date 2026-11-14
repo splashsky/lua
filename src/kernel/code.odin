@@ -1376,7 +1376,8 @@ codebinK :: proc(fs: ^FuncState, opr: BinOpr, e1, e2: ^Expdesc, flip: int, line:
 }
 
 // Try to code a binary op by negating a small integer 2nd operand (e.g. `a - 3`
-// as `a + (-3)`). Reference `finishbinexpneg`.
+// as `a + (-3)`). Exclude subtraction by zero to preserve negative zero.
+// Reference `finishbinexpneg`.
 @(private = "file")
 finishbinexpneg :: proc(fs: ^FuncState, e1, e2: ^Expdesc, op: Op_Code, line: int, event: int) -> bool {
 	if !isKint(e2) {
@@ -1385,6 +1386,9 @@ finishbinexpneg :: proc(fs: ^FuncState, e1, e2: ^Expdesc, op: Op_Code, line: int
 	i2 := e2.u.ival
 	if !(fitsC(i2) && fitsC(-i2)) {
 		return false // not in range (need both +/- to fit)
+	}
+	if event == TM_SUB && i2 == 0 {
+		return false // (-0.0 - 0) differs from (-0.0 + 0)
 	}
 	v2 := int(i2)
 	finishbinexpval(fs, e1, e2, op, int2sC(-v2), 0, line, .MMBINI, event)

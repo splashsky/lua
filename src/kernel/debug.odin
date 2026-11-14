@@ -303,7 +303,7 @@ dbg_getobjname :: proc(p: ^Proto, lastpc: int, reg: int) -> (kind: string, name:
 		case .GETTABUP:
 			_, nm := dbg_kname(p, getarg_C(i))
 			return dbg_isEnv(p, lastpc, i, true), nm
-		case .GETTABLE:
+		case .GETTABLE, .GETVARG:
 			nm := dbg_rname(p, lastpc, getarg_C(i))
 			return dbg_isEnv(p, lastpc, i, false), nm
 		case .GETI:

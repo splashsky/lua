@@ -698,11 +698,13 @@ forlimit :: proc(L: ^State, init: Integer, lim: ^TValue, step: Integer) -> (Inte
 				return 0, true
 			}
 			p = MAX_INTEGER
-		} else { // negative and out of range: clip low (or skip if ascending)
+		} else if flim < 0 { // negative and out of range: clip low (or skip if ascending)
 			if step > 0 {
 				return 0, true
 			}
 			p = MIN_INTEGER
+		} else { // NaN: neither positive nor negative
+			return 0, true
 		}
 	}
 	skip := init > p if step > 0 else init < p
@@ -756,8 +758,8 @@ forprep :: proc(L: ^State, ra: int) -> bool {
 		if step == 0 {
 			debug_runerror(L, "'for' step is zero")
 		}
-		skip := limit < init if 0 < step else init < limit
-		if skip {
+		run := init >= limit if 0 >= step else limit >= init
+		if !run {
 			return true
 		}
 		set_float(stack_value(L, ra), limit)
