@@ -4,8 +4,6 @@
 
 - **Odin compiler** on your `PATH`. Check with `odin version`.
 - A recent nightly is fine; this project tracks current Odin.
-- **Python 3** for `build/check.*` and regenerating the experimental VM handlers.
-  It is not needed by the runtime or to build an existing generated source tree.
 - **A native linker + system libraries to produce runnable binaries:**
   - **Windows:** the **Windows SDK** plus the **MSVC** toolchain (e.g. install
     *Visual Studio Build Tools* with the "Desktop development with C++" workload).
@@ -38,7 +36,9 @@ odin check src/freestanding -collection:lang=src \
 ```
 
 The convenience wrappers `build/check.ps1` (Windows) and `build/check.sh` (Unix) run
-all of these for you, including the freestanding check.
+all of these for you, including the freestanding check. They also build and run
+the threaded VM generator to check for drift, so the wrappers require a native
+linker. The individual `odin check` commands above remain linker-free.
 
 ## The `lang` collection
 
@@ -94,10 +94,11 @@ direct Odin commands use `-define:VM_THREADED=true`. The PUC wrapper gives its
 threaded binaries distinct names, including in relocation and memory-checker modes.
 
 The switch opcode bodies are the source of the threaded handlers. After changing
-them, run `python3 build/generate-threaded.py` (or `python` on Windows). The
-generator rejects changes to rewritten entry, fetch and edge-poll paths until reviewed;
-`build/check.*` verifies that the generated region is current and type-checks
-both the default and threaded interpreters, including freestanding. See Decision 2
+them, run `bash build/generate-threaded.sh` or `.\build\generate-threaded.ps1` on
+Windows. These build and run the Odin tool in `tools/generate_threaded/`; no
+Python installation is needed. The generator rejects changes to rewritten paths
+and specialized helpers until reviewed; `build/check.*` verifies the generated
+region and type-checks both interpreters, including freestanding. See Decision 2
 in `docs/ARCHITECTURE.md` for the safety rules and measured tradeoffs.
 
 Internal invariant assertions follow reference Lua's `lua_assert`: they are off

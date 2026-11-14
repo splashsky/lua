@@ -1,10 +1,10 @@
 <#
-    check.ps1 -- linker-free verification for lua-odin (Windows side).
+    check.ps1 -- type checks and threaded-source verification (Windows side).
 
-    `odin check` type-checks a package without invoking a native linker, so this
-    works even on a machine with no Windows SDK / MSVC toolchain. It's our quick
-    "does everything still compile?" gate. Library packages need -no-entry-point
-    (they have no `main`); the two executables are checked as-is.
+    `odin check` type-checks packages without linking; this wrapper also builds
+    the generator for its drift check, which requires the native toolchain.
+    Library packages need -no-entry-point (they have no `main`); the two
+    executables are checked as-is.
 
     Usage:
         .\build\check.ps1
@@ -22,8 +22,7 @@ $SrcDir   = Join-Path $RepoRoot 'src'
 $Collection = "-collection:lang=$SrcDir"
 
 # Refuse generated handlers that no longer match the switch interpreter.
-& python (Join-Path $RepoRoot 'build\generate-threaded.py') --check
-if ($LASTEXITCODE -ne 0) { throw 'Threaded VM generation check failed.' }
+& (Join-Path $RepoRoot 'build\generate-threaded.ps1') -Check
 
 # Each entry: the path to check, and whether it's a library (no `main`).
 $Targets = @(

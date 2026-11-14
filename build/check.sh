@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# check.sh -- linker-free verification for lua-odin (macOS/Linux side).
+# check.sh -- type checks and threaded-source verification (macOS/Linux side).
 #
-# `odin check` type-checks a package without invoking a native linker, so this
-# works even on a machine with no full toolchain. It's our quick "does everything
-# still compile?" gate. Library packages need -no-entry-point (they have no
-# `main`); the two executables are checked as-is.
+# `odin check` type-checks packages without linking; this wrapper also builds
+# the generator for its drift check, which requires a native linker. Library
+# packages need -no-entry-point (they have no `main`); the two executables are
+# checked as-is.
 #
 # Usage:
 #     ./build/check.sh
@@ -22,7 +22,7 @@ COLLECTION="-collection:lang=$SRC_DIR"
 
 # The switch is the source of the generated threaded handlers. Refuse stale
 # output rather than allowing changes to one interpreter to miss the other.
-python3 "$REPO_ROOT/build/generate-threaded.py" --check
+bash "$REPO_ROOT/build/generate-threaded.sh" --check
 
 # "path:is_library" pairs. Library packages have no `main`, so pass -no-entry-point.
 check_one() {

@@ -3,6 +3,19 @@
 Correctness tools that are too large or too slow to live in the unit-test suite, but
 which back specific claims made in commit messages.
 
+## `generate_threaded/`
+
+Generates the experimental threaded VM from the switch opcode bodies, and checks
+the guarded rewrites and specialized helpers for drift. Run it from the repo root:
+
+```sh
+bash build/generate-threaded.sh          # regenerate
+bash build/generate-threaded.sh --check  # verify without writing
+```
+
+On Windows use `.\build\generate-threaded.ps1` or pass `-Check`. The wrappers
+compile this Odin tool first; `build/check.*` uses its check mode.
+
 ## `strtod_verify/`
 
 Checks the Eisel–Lemire float-parsing fast path against our own big-decimal parser,

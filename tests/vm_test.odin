@@ -190,6 +190,130 @@ vm_deep_frames_hooks_and_resume :: proc(t: ^testing.T) {
 	testing.expect(t, kernel.api_toboolean(L, -1))
 }
 
+// Cover both the table-hit path and the potentially relocating, yielding miss
+// path for global and field reads. A hook checks that a hit does not lose an
+// already-armed trap, and the next read after the yield checks the resumed base.
+@(test)
+vm_field_reads_with_hooks_and_yield :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local events = 0
+		local co = coroutine.create(function()
+		  local env = setmetatable({present = 12}, {
+		    __index = function(t, key)
+		      coroutine.yield(key)
+		      collectgarbage('collect')
+		      return 30
+		    end
+		  })
+		  local _ENV = env
+		  local a = present
+		  local b = absent
+		  local c = env.present
+		  return a + b + c
+		end)
+		debug.sethook(co, function() events = events + 1 end, '', 1)
+		local ok, key = coroutine.resume(co)
+		assert(ok and key == 'absent')
+		local ok2, value = coroutine.resume(co)
+		assert(ok2 and value == 54 and events > 0)
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
+// String method hits may find __index in a table without a callout. A miss
+// can still follow that table's yielding __index, and __index itself may be a
+// function. Restore the original string metatable before leaving the chunk.
+@(test)
+vm_string_method_lookup_and_yield :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local old = debug.getmetatable('')
+		local seen, hooks = 0, 0
+		local methods = setmetatable({
+		  m = function(self, ...) return self, select('#', ...), ... end,
+		}, {__index = function(t, key)
+		  seen = seen + 1
+		  coroutine.yield(key)
+		  collectgarbage('collect')
+		  return function(self) return self .. key end
+		end})
+		debug.setmetatable('', {__index = methods})
+		local s = 'x'
+		local a, n, x, y = s:m(7, 8)
+		assert(a == 'x' and n == 2 and x == 7 and y == 8)
+		local co = coroutine.create(function() return ('y'):missing() end)
+		debug.sethook(co, function() hooks = hooks + 1 end, '', 1)
+		local ok, key = coroutine.resume(co)
+		assert(ok and key == 'missing')
+		local ok2, val = coroutine.resume(co)
+		assert(ok2 and val == 'ymissing' and seen == 1 and hooks > 0)
+		debug.setmetatable('', {__index = function(s, key)
+		  return function(self) return self .. key end
+		end})
+		assert(('z'):other() == 'zother')
+		debug.setmetatable('', old)
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
+// Integer writes can take the contextless path only when no GC barrier is
+// needed. Empty slots with __newindex, collectable values, and non-table
+// objects still have to follow the ordinary yielding/error paths.
+@(test)
+vm_variable_table_writes :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local t = setmetatable({11}, {
+		  __newindex = function(tab, key, value)
+		    coroutine.yield(key, value)
+		    collectgarbage('collect')
+		    rawset(tab, key, value)
+		  end
+		})
+		local co = coroutine.create(function()
+		  local k = 1
+		  t[k] = 12
+		  local before = t[k]
+		  k = 2
+		  t[k] = 42
+		  local child = {answer = 99}
+		  k = 1
+		  t[k] = child
+		  collectgarbage('collect')
+		  return before, t[2], t[k].answer
+		end)
+		local ok, key, value = coroutine.resume(co)
+		assert(ok and key == 2 and value == 42)
+		local ok2, a, b, c = coroutine.resume(co)
+		assert(ok2 and a == 12 and b == 42 and c == 99)
+		local ok3 = pcall(function() local x, k = false, 1; x[k] = 1 end)
+		assert(not ok3)
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
 // Debug code can mutate the loop's control-variable tag. Preserve this VM's
 // existing tag repair (unlike reference Lua, which preserves the changed tag).
 // Ordinary source code cannot assign to a numeric-for control variable.
