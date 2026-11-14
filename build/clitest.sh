@@ -144,6 +144,32 @@ EOF
     ' >/dev/null 2>&1 && \
         assert_true 'long POSIX timezone name survives cleanup' 1 || assert_true 'long POSIX timezone name survives cleanup' 0
 
+    # Pin TZ in the child rather than changing the test runner's environment.
+    env TZ='EST5EDT,M3.2.0,M11.1.0' "$LUA" -e '
+        assert(os.date("%F %T %z %Z", 1710053999) == "2024-03-10 01:59:59 -0500 EST")
+        assert(os.date("%F %T %z %Z", 1710054000) == "2024-03-10 03:00:00 -0400 EDT")
+        assert(os.date("!%Z", 0) == "GMT")
+    ' >/dev/null 2>&1 && \
+        assert_true 'os.date follows explicit TZ transitions' 1 || assert_true 'os.date follows explicit TZ transitions' 0
+    env TZ=':/definitely/no/such/zone' "$LUA" -e '
+        assert(os.date("%Z|%z", 0) == "|+0000")
+    ' >/dev/null 2>&1 && \
+        assert_true 'os.date invalid TZ abbreviation' 1 || assert_true 'os.date invalid TZ abbreviation' 0
+    env TZ='ABC25:99:99' "$LUA" -e '
+        assert(os.date("%F %T %z %Z", 0) == "1969-12-30 23:00:01 -2459 ABC")
+        assert(not pcall(os.date, "%Y", 67768036191676800))
+    ' >/dev/null 2>&1 && \
+        assert_true 'os.date glibc oversized TZ offset' 1 || assert_true 'os.date glibc oversized TZ offset' 0
+    for zone_length in 249 250; do
+        printf -v long_zone '%*s' "$zone_length" ''
+        long_zone="${long_zone// /A}"
+        env TZ="${long_zone}0" DATE_ZONE_LENGTH="$zone_length" "$LUA" -e '
+            local expected = os.getenv("DATE_ZONE_LENGTH") == "249" and string.rep("A", 249) or ""
+            assert(os.date("[%Z]", 0) == "[" .. expected .. "]")
+        ' >/dev/null 2>&1 && \
+            assert_true "os.date $zone_length-byte zone conversion" 1 || assert_true "os.date $zone_length-byte zone conversion" 0
+    done
+
     for kind in loop calls; do
         if [[ "$kind" == loop ]]; then body='while true do end'
         else body='local function f() end; while true do f() end'; fi

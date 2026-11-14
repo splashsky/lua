@@ -47,6 +47,11 @@ STRFTIME_OPTIONS :: (
 )
 
 @(private = "file")
+TM_MIN_TIMESTAMP :: -67768040609740800
+@(private = "file")
+TM_MAX_TIMESTAMP :: 67768036191676799
+
+@(private = "file")
 Civil_Time :: struct {
 	year:   i64,
 	month:  int,
@@ -465,7 +470,10 @@ option_length :: proc(conv: []u8) -> int {
 @(private = "file")
 checkoption :: proc(L: ^kernel.State, conv: []u8) -> int {
 	if n := option_length(conv); n != 0 do return n
-	aux_argerror(L, 1, kernel.api_pushfstring(L, "invalid conversion specifier '%%%s'", string(conv)))
+	// lua_pushfstring's %s sees the remaining format as a C string.
+	end := 0
+	for end < len(conv) && conv[end] != 0 do end += 1
+	aux_argerror(L, 1, kernel.api_pushfstring(L, "invalid conversion specifier '%%%s'", string(conv[:end])))
 }
 
 // Only retain a zone abbreviation if formatting can reach a real %Z. In
@@ -515,8 +523,10 @@ zone_name :: proc(c: Civil_Time, dst: bool, buf: []u8) -> string {
 			return string(buf[:n])
 		}
 	} else {
-		if c.zone != "" {
-			return c.zone
+		when ODIN_OS == .Linux {
+			return c.zone // glibc permits an empty abbreviation for an invalid TZ.
+		} else {
+			if c.zone != "" do return c.zone
 		}
 	}
 	return "UTC"
@@ -563,9 +573,55 @@ add_short_date :: proc(B: ^Buffer, c: Civil_Time) {
 	add_num(B, floor_mod(c.year, 100), 2)
 }
 
+// glibc's C locale does not pad %Y, %G, or %C; Windows and other libc
+// implementations can use different default widths. Keep their existing width.
+@(private = "file")
+add_year :: proc(B: ^Buffer, year: i64, width: int, unpadded: bool = false) {
+	when ODIN_OS == .Linux {
+		add_num(B, glibc_format_year(year), 0, true)
+	} else {
+		add_num(B, year, width, unpadded)
+	}
+}
+
+// glibc's strftime performs this particular addition as a signed 32-bit int,
+// unlike Lua's *t table, which widens tm_year before adding 1900.
+@(private = "file")
+glibc_format_year :: proc(year: i64) -> i64 {
+	when ODIN_OS == .Linux {
+		if year > i64(max(i32)) do return year - 4294967296
+		if year < i64(min(i32)) do return year + 4294967296
+	}
+	return year
+}
+
+@(private = "file")
+iso_weeks_in_year :: proc(year: i64) -> int {
+	jan1 := int(floor_mod(days_from_civil(year, 1, 1) + 4, 7))
+	return (jan1 == 4 || (jan1 == 3 && is_leap(year))) ? 53 : 52
+}
+
+@(private = "file")
+iso_week :: proc(c: Civil_Time) -> (year: i64, week: int) {
+	year = c.year
+	weekday := c.wday == 0 ? 7 : c.wday
+	week = (c.yday + 11 - weekday) / 7
+	if week == 0 {
+		year -= 1
+		week = iso_weeks_in_year(year)
+	} else if week == 53 && iso_weeks_in_year(year) == 52 {
+		year += 1
+		week = 1
+	}
+	return
+}
+
 @(private = "file")
 format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 	alternate := len(op) == 2
+	// E/O select alternate locale representations, which equal the ordinary
+	// conversions in the C locale. Only Windows '#' removes numeric padding.
+	unpadded := alternate && op[0] == '#'
 	ch := op[len(op) - 1]
 	zone_buf: [128]u8
 	switch ch {
@@ -582,7 +638,7 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 			aux_addchar(B, ' ')
 			add_num(B, i64(c.day), 2)
 			aux_addstring(B, ", ")
-			add_num(B, c.year, 4)
+			add_year(B, c.year, 4)
 			aux_addchar(B, ' ')
 			add_clock(B, c.hour, c.minute, c.second)
 		} else {
@@ -595,7 +651,7 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 			aux_addchar(B, ' ')
 			add_clock(B, c.hour, c.minute, c.second)
 			aux_addchar(B, ' ')
-			add_num(B, c.year, 4)
+			add_year(B, c.year, 4)
 		}
 	case 'x':
 		if alternate && op[0] == '#' {
@@ -610,22 +666,24 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 			add_short_date(B, c)
 		}
 	case 'X': add_clock(B, c.hour, c.minute, c.second)
-	case 'd', 'e': add_num(B, i64(c.day), ch == 'e' ? 2 : 2, alternate || ch == 'e')
-	case 'H': add_num(B, i64(c.hour), 2, alternate)
+	case 'd', 'e':
+		if ch == 'e' && c.day < 10 do aux_addchar(B, ' ')
+		add_num(B, i64(c.day), 2, unpadded || ch == 'e')
+	case 'H': add_num(B, i64(c.hour), 2, unpadded)
 	case 'I':
 		h := c.hour % 12
 		if h == 0 do h = 12
-		add_num(B, i64(h), 2, alternate)
-	case 'j': add_num(B, i64(c.yday + 1), 3, alternate)
-	case 'm': add_num(B, i64(c.month), 2, alternate)
-	case 'M': add_num(B, i64(c.minute), 2, alternate)
+		add_num(B, i64(h), 2, unpadded)
+	case 'j': add_num(B, i64(c.yday + 1), 3, unpadded)
+	case 'm': add_num(B, i64(c.month), 2, unpadded)
+	case 'M': add_num(B, i64(c.minute), 2, unpadded)
 	case 'p': aux_addstring(B, c.hour < 12 ? "AM" : "PM")
-	case 'S': add_num(B, i64(c.second), 2, alternate)
-	case 'U': add_num(B, i64((c.yday + 7 - c.wday) / 7), 2, alternate)
+	case 'S': add_num(B, i64(c.second), 2, unpadded)
+	case 'U': add_num(B, i64((c.yday + 7 - c.wday) / 7), 2, unpadded)
 	case 'w': add_num(B, i64(c.wday), 1, true)
-	case 'W': add_num(B, i64((c.yday + 7 - ((c.wday + 6) % 7)) / 7), 2, alternate)
-	case 'y': add_num(B, floor_mod(c.year, 100), 2, alternate)
-	case 'Y': add_num(B, c.year, 4, alternate)
+	case 'W': add_num(B, i64((c.yday + 7 - ((c.wday + 6) % 7)) / 7), 2, unpadded)
+	case 'y': add_num(B, floor_mod(c.year, 100), 2, unpadded)
+	case 'Y': add_year(B, c.year, 4, unpadded)
 	case 'z':
 		off := c.offset
 		if utc {
@@ -648,14 +706,21 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 		add_num(B, off / 3600, 2)
 		add_num(B, off % 3600 / 60, 2)
 	case 'Z':
-		aux_addstring(B, zone_name(c, !utc && c.isdst == 1, zone_buf[:]))
+		name := zone_name(c, !utc && c.isdst == 1, zone_buf[:])
+		// Lua supplies strftime a 250-byte buffer for each conversion; a
+		// longer zone name makes glibc return zero rather than a partial name.
+		when ODIN_OS == .Linux {
+			if len(name) < 250 do aux_addstring(B, name)
+		} else {
+			aux_addstring(B, name)
+		}
 	case:
 		// C99 aliases admitted on non-Windows hosts.
 		switch ch {
-		case 'C': add_num(B, floor_div(c.year, 100), 2)
+		case 'C': add_year(B, floor_div(glibc_format_year(c.year), 100), 2)
 		case 'D': add_short_date(B, c)
 		case 'F':
-			add_num(B, c.year, 4)
+			add_year(B, c.year, 4)
 			aux_addchar(B, '-')
 			add_num(B, i64(c.month), 2)
 			aux_addchar(B, '-')
@@ -671,7 +736,13 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 		case 't': aux_addchar(B, '\t')
 		case 'T': add_clock(B, c.hour, c.minute, c.second)
 		case 'u': add_num(B, i64(c.wday == 0 ? 7 : c.wday), 1, true)
-		case 'V': add_num(B, i64((c.yday + 10 - (c.wday == 0 ? 7 : c.wday)) / 7), 2)
+		case 'g', 'G', 'V':
+			year, week := iso_week(c)
+			switch ch {
+			case 'g': add_num(B, floor_mod(glibc_format_year(year), 100), 2)
+			case 'G': add_year(B, year, 4)
+			case 'V': add_num(B, i64(week), 2)
+			}
 		}
 	}
 }
@@ -685,10 +756,21 @@ local_date :: proc(L: ^kernel.State, t: i64, zone_buf: []u8, need_zone: bool) ->
 	temp := runtime.default_temp_allocator_temp_begin()
 	zone, loaded := load_local_zone()
 	c := civil_at_timestamp(t)
-	c.zone = "UTC"
+	// glibc uses an empty zone abbreviation when TZ names an unreadable file.
+	c.zone = "" when ODIN_OS == .Linux else "UTC"
 	status := kernel.Thread_Status.Ok
 	rooted_zone := false
 	if loaded {
+		when ODIN_OS == .Linux {
+			// glibc first converts UTC when evaluating a POSIX TZ string. A
+			// TZif file, in contrast, can represent a local year just inside the
+			// tm range even if the UTC year is just outside it.
+			if (t < TM_MIN_TIMESTAMP || t > TM_MAX_TIMESTAMP) && zone.is_posix {
+				free_local_zone(&zone)
+				aux_host_temp_end(temp)
+				aux_error(L, "date result cannot be represented in this installation")
+			}
+		}
 		kind, found := local_zone_at(zone, t)
 		if found {
 			c = civil_at_timestamp(t + kind.offset)
@@ -741,12 +823,20 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 		if utc && t < -43200 {
 			aux_error(L, "date result cannot be represented in this installation")
 		}
+	} else {
+		// POSIX struct tm stores year minus 1900 in an int. Reject values well
+		// outside its range before timezone arithmetic can overflow i64; the exact
+		// local-year check below handles offsets crossing either boundary.
+		if t < TM_MIN_TIMESTAMP - 172800 || t > TM_MAX_TIMESTAMP + 172800 {
+			aux_error(L, "date result cannot be represented in this installation")
+		}
 	}
 	c: Civil_Time
 	local_zone_buf: [128]u8
 	ok := true
 	if utc {
 		c = civil_at_timestamp(t)
+		c.zone = "GMT" when ODIN_OS == .Linux else "UTC"
 		when ODIN_OS == .Windows {
 			// UCRT accepts the final twelve hours before the epoch in gmtime,
 			// but computes tm_wday as though integer division truncated toward
@@ -762,11 +852,18 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 			c = local_date(L, t, local_zone_buf[:], needs_zone_name(s[i:]))
 		}
 	}
+	when ODIN_OS != .Windows {
+		if c.year < i64(min(i32)) + 1900 || c.year > i64(max(i32)) + 1900 {
+			ok = false
+		}
+	}
 	if !ok {
 		aux_error(L, "date result cannot be represented in this installation")
 	}
 	rest := s[i:]
-	if string(rest) == "*t" {
+	// Reference uses strcmp here even though formats may contain embedded NUL.
+	if len(rest) >= 2 && rest[0] == '*' && rest[1] == 't' &&
+	   (len(rest) == 2 || rest[2] == 0) {
 		kernel.api_createtable(L, 0, 9)
 		setallfields(L, c)
 		return 1

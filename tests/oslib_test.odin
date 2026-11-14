@@ -129,6 +129,140 @@ oslib_date_bad_specifier :: proc(t: ^testing.T) {
 	testing.expect(t, st != .Ok, "an invalid strftime specifier is rejected")
 }
 
+// Every timestamp is UTC or checked against the local table. Do not mutate
+// process-wide TZ while other Odin tests may run.
+@(test)
+oslib_date_iso_week_boundaries :: proc(t: ^testing.T) {
+	when ODIN_OS != .Windows { // Reference Windows rejects these C99 conversions.
+		L := oslib_state()
+		defer kernel.close_state(L)
+		st := oslib_run(L, `
+			local cases = {
+				{1419811200, '2014-12-29 15 2015 01 01'},
+				{1451692800, '2016-01-02 15 2015 53 53'},
+				{1451865600, '2016-01-04 16 2016 01 01'},
+				{1577750400, '2019-12-31 20 2020 01 01'},
+				{1609502400, '2021-01-01 20 2020 53 53'},
+				{1609718400, '2021-01-04 21 2021 01 01'},
+			}
+			for _, c in ipairs(cases) do
+				assert(os.date('!%F %g %G %V %OV', c[1]) == c[2])
+			end
+			-- Check local formatting without assuming the runner's TZ. Ordinary
+			-- offsets place this instant in ISO week 53 of 2020; extreme POSIX
+			-- offsets can place it outside that week.
+			local d = os.date('*t', 1609502400)
+			local day = d.day < 10 and ' '..d.day or tostring(d.day)
+			assert(os.date('%e %Oe', 1609502400) == day..' '..day)
+			if (d.year == 2020 and d.month == 12 and d.day >= 28) or
+			   (d.year == 2021 and d.month == 1 and d.day <= 3) then
+				assert(os.date('%g %G %V', 1609502400) == '20 2020 53')
+			end
+		`)
+		if st != .Ok {
+			msg, _ := kernel.api_tolstring(L, -1)
+			testing.expectf(t, false, "ISO week and local day formatting: %s", msg)
+		}
+	} else {
+		L := oslib_state()
+		defer kernel.close_state(L)
+		st := oslib_run(L, `
+			for _, fmt in ipairs({'!%e', '!%g', '!%G', '!%V', '!%F', '!%Od'}) do
+				assert(not pcall(os.date, fmt, 0))
+			end
+			assert(os.date('!%#d', 0) == '1')
+		`)
+		testing.expect(t, st == .Ok, "Windows retains its narrower conversion set")
+	}
+}
+
+@(test)
+oslib_date_glibc_year_and_modifier_formatting :: proc(t: ^testing.T) {
+	when ODIN_OS == .Linux {
+		L := oslib_state()
+		defer kernel.close_state(L)
+		st := oslib_run(L, `
+			local cases = {
+				{-62167219200, '0|0|0|0|0-01-01|99|-1|52'},
+				{-62198755200, '-1|-1|-1|-1|-1-01-01|98|-2|53'},
+				{-30641760000, '999|999|9|9|999-01-01|99|999|01'},
+				{-30610224000, '1000|1000|10|10|1000-01-01|00|1000|01'},
+				{253402300800, '10000|10000|100|100|10000-01-01|99|9999|52'},
+			}
+			for _, c in ipairs(cases) do
+				assert(os.date('!%Y|%EY|%C|%EC|%F|%g|%G|%V', c[1]) == c[2])
+			end
+			assert(os.date('!%c', -30641760000) == 'Tue Jan  1 00:00:00 999')
+			assert(os.date('!%e|%Oe|%Od|%OH|%OI|%Om|%OM|%OS|%OU|%OW|%Ey|%Oy', 0) ==
+			       ' 1| 1|01|00|12|01|00|00|00|00|70|70')
+			assert(os.date('!%Z|%z', 0) == 'GMT|+0000')
+		`)
+		if st != .Ok {
+			msg, _ := kernel.api_tolstring(L, -1)
+			testing.expectf(t, false, "glibc year and C-locale modifiers: %s", msg)
+		}
+	}
+}
+
+@(test)
+oslib_date_glibc_extreme_years :: proc(t: ^testing.T) {
+	when ODIN_OS == .Linux {
+		L := oslib_state()
+		defer kernel.close_state(L)
+		st := oslib_run(L, `
+			local low, high = -67768040609740800, 67768036191676799
+			assert(os.date('!*t', low).year == -2147481748)
+			assert(os.date('!*t', high).year == 2147485547)
+			assert(os.date('!%Y|%C|%y|%g|%G|%V', low) == '-2147481748|-21474818|52|52|-2147481748|01')
+			assert(os.date('!%Y|%C|%y|%g|%G|%V', high) == '-2147481749|-21474818|47|52|-2147481748|01')
+			for _, ts in ipairs({low-1, high+1, -0x7fffffffffffffff-1, 0x7fffffffffffffff}) do
+				local ok, err = pcall(os.date, '!%Y', ts)
+				assert(not ok and err == 'date result cannot be represented in this installation')
+			end
+		`)
+		if st != .Ok {
+			msg, _ := kernel.api_tolstring(L, -1)
+			testing.expectf(t, false, "glibc calendar range and format wrap: %s", msg)
+		}
+	}
+}
+
+@(test)
+oslib_date_glibc_posix_offset_clamping :: proc(t: ^testing.T) {
+	when ODIN_OS == .Linux {
+		// These deliberately oversized fields are accepted and clamped by glibc,
+		// but are not portable POSIX timezone strings.
+		samples := []struct{name: string, offset: i64}{
+			{"ABC167", -86400},
+			{"ABC-25", 86400},
+			{"ABC25:99:99", -89999},
+			{"ABC999999999999999999999", -86400},
+		}
+		for sample in samples {
+			rule, ok := stdlib.POSIX_TZ_Parse(sample.name)
+			testing.expectf(t, ok && rule.standard_offset == sample.offset,
+				"glibc TZ offset clamping for %s", sample.name)
+		}
+	}
+}
+
+@(test)
+oslib_date_embedded_nul :: proc(t: ^testing.T) {
+	L := oslib_state()
+	defer kernel.close_state(L)
+	st := oslib_run(L, `
+		assert(os.date('!*t\0ignored', 0).year == 1970)
+		assert(os.date('!literal\0end', 0) == 'literal\0end')
+		local ok, err = pcall(os.date, '!%\0ignored', 0)
+		local _, expected = pcall(os.date, '!%', 0)
+		assert(not ok and err == expected)
+	`)
+	if st != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "embedded NUL date formats: %s", msg)
+	}
+}
+
 // Every native callback starts with runtime.default_context(), so inspecting
 // this thread's actual default arena detects allocations that a Lua heap or RSS
 // test alone can miss. Warm it first, then demand no per-call accumulation.

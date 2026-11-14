@@ -338,6 +338,20 @@ posix_number :: proc(s: string, at: int, min_value, max_value: int) -> (int, int
 	return value, at, true
 }
 
+// glibc saturates oversized components of a TZ UTC offset instead of rejecting
+// them. Consume all digits without overflowing, even for an enormous value.
+@(private = "file")
+posix_clamped_number :: proc(s: string, at, limit: int) -> (int, int, bool) {
+	start := at
+	at := at
+	value := 0
+	for at < len(s) && posix_digit(s[at]) {
+		value = min(value * 10 + int(s[at] - '0'), limit)
+		at += 1
+	}
+	return value, at, at != start
+}
+
 // POSIX offsets have the opposite sign from TZif's gmtoff: EST5 means local
 // time is UTC-5. Transition clock values use the same number syntax but their
 // sign is ordinary, so `reverse` selects which interpretation is wanted.
@@ -350,6 +364,26 @@ posix_hms :: proc(s: string, at: int, reverse: bool, max_hour: int = 167) -> (i6
 			sign = -1
 		}
 		at += 1
+	}
+	when ODIN_OS == .Linux {
+		if reverse {
+			// Linux/glibc clamps offsets to 24:59:59; transition /times use a
+			// different range and keep the ordinary parser below. Other libcs
+			// need not accept these non-POSIX oversized offsets.
+			hour, next, ok := posix_clamped_number(s, at, 24)
+			if !ok do return 0, at, false
+			at = next
+			minute, second := 0, 0
+			if at < len(s) && s[at] == ':' {
+				minute, at, ok = posix_clamped_number(s, at + 1, 59)
+				if !ok do return 0, at, false
+				if at < len(s) && s[at] == ':' {
+					second, at, ok = posix_clamped_number(s, at + 1, 59)
+					if !ok do return 0, at, false
+				}
+			}
+			return -sign * i64(hour * 3600 + minute * 60 + second), at, true
+		}
 	}
 	hour, next, ok := posix_number(s, at, 0, max_hour)
 	if !ok {
