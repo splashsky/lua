@@ -215,8 +215,12 @@ state_checkcstack :: proc(L: ^State) {
 // Lua's `checkstackp`/`checkstackGCp` (minus the GC step, which arrives in Phase 7).
 // Because our slots are index-addressed, there is no `func` pointer to correct
 // after a growth, so this is simply `check_stack` with the error left to `throw`.
-check_stack_p :: proc(L: ^State, n: int) {
-	check_stack(L, n)
+check_stack_p :: #force_inline proc(L: ^State, n: int) {
+	// Like check_stack, including its strict headroom test. Keep the common
+	// check at the call site and the allocating/error path out of line.
+	if L.stack_size - L.top <= n {
+		#force_no_inline grow_stack(L, n, true)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +370,7 @@ genmoveresults :: proc(L: ^State, res: int, nres: int, wanted: int) {
 // result-count field plus the CIST_TBC flag; the common shapes (no results, one
 // result, all results) are special-cased, and anything with to-be-closed variables
 // or a fixed count >= 2 falls to the general path.
-moveresults :: proc(L: ^State, res: int, nres: int, fwanted: u32) {
+moveresults :: #force_inline proc(L: ^State, res: int, nres: int, fwanted: u32) {
 	switch fwanted {
 	case 0 + 1: // no values needed (a statement call)
 		L.top = res
@@ -379,6 +383,15 @@ moveresults :: proc(L: ^State, res: int, nres: int, fwanted: u32) {
 		}
 		L.top = res + 1
 		return
+	case:
+		moveresults_other(L, res, nres, fwanted)
+	}
+}
+
+// Keep uncommon result counts and the potentially yielding close path out of the
+// caller. No stack or frame pointer is kept across this call.
+moveresults_other :: #force_no_inline proc(L: ^State, res: int, nres: int, fwanted: u32) {
+	switch fwanted {
 	case u32(MULTRET + 1): // caller wants every result (encoded as 0)
 		genmoveresults(L, res, nres, nres)
 	case: // two-or-more fixed results, and/or to-be-closed variables
@@ -415,7 +428,7 @@ moveresults :: proc(L: ^State, res: int, nres: int, fwanted: u32) {
 
 // Finish a call: fire the return hook if needed, move results into place, and pop
 // back to the caller frame -- reference Lua's `luaD_poscall`.
-do_poscall :: proc(L: ^State, ci_idx: int, nres: int) {
+do_poscall :: #force_inline proc(L: ^State, ci_idx: int, nres: int) {
 	ci := &L.frames[ci_idx]
 	fwanted := ci.callstatus & (CIST_TBC | CIST_NRESULTS)
 	if L.hookmask != 0 && (fwanted & CIST_TBC) == 0 {
@@ -430,7 +443,7 @@ do_poscall :: proc(L: ^State, ci_idx: int, nres: int) {
 // Allocate and initialize the next call frame -- reference Lua's `prepCallInfo`.
 // Returns the new frame's index. Only the result-count, CIST_C, and CCMT bits are
 // valid in `status` at this point.
-prepCallInfo :: proc(L: ^State, func: int, status: u32, top: int) -> int {
+prepCallInfo :: #force_inline proc(L: ^State, func: int, status: u32, top: int) -> int {
 	idx := next_ci(L) // grows the frame array if needed; sets L.ci
 	ci := &L.frames[idx]
 	ci.func = func
@@ -446,7 +459,7 @@ prepCallInfo :: proc(L: ^State, func: int, status: u32, top: int) -> int {
 // the number of results. NOTE the re-entrancy hazard: `f(L)` can trigger arbitrary
 // nested calls and frame-array growth, so we hold the frame by *index* and
 // re-derive the pointer for `poscall`.
-precallC :: proc(L: ^State, func: int, status: u32, f: C_Function) -> int {
+precallC :: #force_inline proc(L: ^State, func: int, status: u32, f: C_Function) -> int {
 	check_stack_p(L, MINSTACK)
 	ci_idx := prepCallInfo(L, func, status | CIST_C, L.top + MINSTACK)
 	if (L.hookmask & MASKCALL) != 0 {

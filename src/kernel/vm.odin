@@ -819,11 +819,9 @@ vm_arith :: #force_inline proc(L: ^State, ra: int, v1, v2: ^TValue, op: Arith_Op
 // subtraction from the code base.
 @(private = "file")
 vm_pc_add :: #force_inline proc "contextless" (pc: [^]Instruction, offset: int) -> [^]Instruction {
-	bytes := uintptr(abs(offset)) * size_of(Instruction)
-	if offset < 0 {
-		return ([^]Instruction)(rawptr(uintptr(pc) - bytes))
-	}
-	return ([^]Instruction)(rawptr(uintptr(pc) + bytes))
+	// Unsigned arithmetic wraps, so converting a negative instruction offset
+	// gives the same address as subtraction without a sign/absolute-value path.
+	return ([^]Instruction)(rawptr(uintptr(pc) + uintptr(offset) * size_of(Instruction)))
 }
 
 @(private = "file")

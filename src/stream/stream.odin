@@ -811,6 +811,26 @@ read :: proc(s: ^Stream, dst: []u8) -> int {
 	if s == nil do return 0
 	sync.mutex_lock(s.mutex)
 	defer sync.mutex_unlock(s.mutex)
+	// The common single-byte buffered read is the one-byte case of read_bulk.
+	// Keep the lock and all of read_bulk's state/cookie updates; any pushback,
+	// translation, direction change, refill, or EOF goes through the general path.
+	if len(dst) == 1 && s.readable && s.direction == .Read &&
+	   !s.pushback && !s.raw_saved && !s.text_eof && s.read_index < s.read_count {
+		c := s.read_buffer[s.read_index]
+		ordinary := true
+		when ODIN_OS == .Windows {
+			ordinary = !s.text_mode || (c != '\r' && c != 0x1a)
+		}
+		if ordinary {
+			dst[0] = c
+			s.read_index += 1
+			s.last_before = s.raw_cursor
+			s.raw_cursor += 1
+			s.logical_pos = s.raw_cursor
+			s.last_after = s.raw_cursor
+			return 1
+		}
+	}
 	n, _ := read_bulk(s, dst, false, 0)
 	return n
 }

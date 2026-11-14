@@ -564,7 +564,9 @@ test_eof :: proc(L: ^kernel.State, f: ^stream.Stream) -> bool {
 // reference `read_line`. Always pushes a string; returns whether anything was read.
 @(private = "file")
 read_line :: proc(L: ^kernel.State, f: ^stream.Stream, chop: bool) -> bool {
-	b: Buffer
+	// aux_buffinit initializes the header; the stream fills every byte counted in
+	// the result. Zeroing the 1 KiB scratch area first only adds work per read.
+	b: Buffer = ---
 	aux_buffinit(L, &b)
 	found_newline := false
 	for {
@@ -590,7 +592,7 @@ read_line :: proc(L: ^kernel.State, f: ^stream.Stream, chop: bool) -> bool {
 // Read the entire remaining file in buffer-sized chunks -- reference `read_all`.
 @(private = "file")
 read_all :: proc(L: ^kernel.State, f: ^stream.Stream) {
-	b: Buffer
+	b: Buffer = --- // aux_buffinit initializes the header; reads fill the bytes used
 	aux_buffinit(L, &b)
 	for {
 		p := aux_prepbuffsize(&b, AUX_BUFFERSIZE)
@@ -608,7 +610,7 @@ read_all :: proc(L: ^kernel.State, f: ^stream.Stream) {
 // still succeeds.
 @(private = "file")
 read_chars :: proc(L: ^kernel.State, f: ^stream.Stream, n: uint) -> bool {
-	b: Buffer
+	b: Buffer = --- // only the bytes actually read are added to the result
 	aux_buffinit(L, &b)
 	p := aux_prepbuffsize(&b, n)
 	nr := stream.read(f, p[:n])

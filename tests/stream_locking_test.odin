@@ -55,6 +55,51 @@ stream_nested_text_translation_paths :: proc(t: ^testing.T) {
 	testing.expect(t, !stream.feof(reopened) && !stream.ferror(reopened))
 }
 
+@(test)
+stream_single_byte_read_matches_getc :: proc(t: ^testing.T) {
+	temp, err := os.create_temp_file("", "lang-byte-read-*")
+	if !testing.expect(t, err == nil) do return
+	path := strings.clone(os.name(temp))
+	os.close(temp)
+	defer delete(path)
+	defer os.remove(path)
+	w := stream.open(path, "wb")
+	if !testing.expect(t, w != nil) do return
+	testing.expect(t, stream.write(w, []u8{'a', 'b', '\r', '\n', '\r', 'x', 0x1a, 'z'}) == 8)
+	testing.expect(t, stream.close(w))
+	a := stream.open(path, "r")
+	b := stream.open(path, "r")
+	if !testing.expect(t, a != nil && b != nil) {
+		if a != nil do stream.close(a)
+		if b != nil do stream.close(b)
+		return
+	}
+	defer stream.close(a)
+	defer stream.close(b)
+	// Small buffers force refills and split CRLF on Windows text streams.
+	testing.expect(t, stream.setvbuf(a, .Full, 3))
+	testing.expect(t, stream.setvbuf(b, .Full, 3))
+	byte: [1]u8
+	for {
+		expected := stream.getc(a)
+		n := stream.read(b, byte[:])
+		if expected == stream.EOF {
+			testing.expect(t, n == 0 && stream.feof(a) && stream.feof(b))
+			break
+		}
+		if !testing.expect(t, n == 1 && i32(byte[0]) == expected) do break
+		pa, oka := stream.tell(a)
+		pb, okb := stream.tell(b)
+		testing.expect(t, oka && okb && pa == pb, "position after reading")
+		// Exercise the pushback path between successive ordinary buffered reads.
+		testing.expect(t, stream.ungetc('Q', a) == 'Q' && stream.ungetc('Q', b) == 'Q')
+		testing.expect(t, stream.getc(a) == 'Q' && stream.read(b, byte[:]) == 1 && byte[0] == 'Q')
+		pa, oka = stream.tell(a)
+		pb, okb = stream.tell(b)
+		testing.expect(t, oka && okb && pa == pb, "position after pushback")
+	}
+}
+
 Stream_Flag_Observer :: struct {
 	barrier: ^sync.Barrier,
 	stream:  ^stream.Stream,

@@ -457,30 +457,35 @@ preinit_thread :: proc(L: ^State, g: ^Global_State) {
 	L.status = .Ok
 }
 
+// The rare allocating half of next_ci. Preserve the 1.5x growth policy and
+// allocation sizes, including the error path, so memory accounting is unchanged.
+grow_ci :: #force_no_inline proc(L: ^State, next: int) {
+	// Grow exactly as before; no frame pointer survives this allocation.
+	newcap := L.frames_capacity + (L.frames_capacity >> 1)
+	if newcap < next + 1 {
+		newcap = next + 1
+	}
+	oldbytes := uint(L.frames_capacity) * size_of(Call_Info)
+	newbytes := uint(newcap) * size_of(Call_Info)
+	block := state_realloc(L, L.frames, oldbytes, newbytes)
+	if block == nil {
+		throw(L, .Err_Mem)
+	}
+	L.frames = ([^]Call_Info)(block)
+	L.frames_capacity = newcap
+}
+
 // Ensure a frame exists at index `ci + 1`, growing the frame array if the current
 // one is full, and return that index -- our analogue of reference Lua's
 // `next_ci`/`luaE_extendCI`. Reference keeps freed `CallInfo` nodes on a
 // per-thread free list and reuses them; our contiguous array simply grows its
 // capacity and hands back the next slot. Because callers address frames by index,
-// a reallocation here invalidates nothing (Decision 4). Raises `Err_Mem` through
+// a reallocation here invalidates nothing (Decision 3). Raises `Err_Mem` through
 // the active boundary on allocation failure.
-next_ci :: proc(L: ^State) -> int {
+next_ci :: #force_inline proc(L: ^State) -> int {
 	next := L.ci + 1
 	if next >= L.frames_capacity {
-		// Grow the frame array. The 1.5x policy mirrors our other growable
-		// arrays; the exact factor is not observable.
-		newcap := L.frames_capacity + (L.frames_capacity >> 1)
-		if newcap < next + 1 {
-			newcap = next + 1
-		}
-		oldbytes := uint(L.frames_capacity) * size_of(Call_Info)
-		newbytes := uint(newcap) * size_of(Call_Info)
-		block := state_realloc(L, L.frames, oldbytes, newbytes)
-		if block == nil {
-			throw(L, .Err_Mem)
-		}
-		L.frames = ([^]Call_Info)(block)
-		L.frames_capacity = newcap
+		grow_ci(L, next)
 	}
 	L.ci = next
 	L.nci = next + 1 // active frames are exactly 0..ci (invariant nci == ci+1)
