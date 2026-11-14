@@ -1492,7 +1492,7 @@ format_float_decimal :: proc "contextless" (
 	precision: int,
 ) -> int {
 	context = runtime.default_context()
-	return len(strconv.generic_ftoa(buf, f64(x), fmt, precision, 64))
+	return len(strconv.generic_ftoa(buf, f64(x), fmt, precision, 64, {.Plus}))
 }
 
 @(private = "file")

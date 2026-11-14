@@ -31,6 +31,23 @@ ok_proc :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
 	return .Ok
 }
 
+// Test the machine shim directly, including C longjmp's zero-to-one rule.
+jump_result :: #force_no_inline proc(value: i32) -> i32 {
+	buf: kernel.Jmp_Buf
+	result := (transmute(proc "c" (^kernel.Jmp_Buf) -> i32)kernel.jmp_set)(&buf)
+	if result == 0 {
+		kernel.jmp_long(&buf, value)
+	}
+	return result
+}
+
+@(test)
+longjmp_result_values :: proc(t: ^testing.T) {
+	testing.expect_value(t, jump_result(0), i32(1))
+	testing.expect_value(t, jump_result(42), i32(42))
+	testing.expect_value(t, jump_result(-17), i32(-17))
+}
+
 // `is_error_status` must draw the line exactly where reference Lua does: only
 // codes above Yield are real errors.
 @(test)

@@ -133,7 +133,10 @@ Protected_Proc :: #type proc(L: ^State, ud: rawptr) -> Thread_Status
 // slots, restoring `errfunc`/`allowhook`, installing the error object, shrinking
 // the stack) is a *separate* layer built on top of this in Phase 5; keeping it
 // out of here mirrors reference Lua's split and avoids conflating the two.
-run_protected :: proc(L: ^State, f: Protected_Proc, ud: rawptr) -> Thread_Status {
+// Keep this boundary out of its caller: Odin cannot mark jmp_set as returning
+// twice, so inlining could reuse a caller's live stack slot on the initial path
+// and then read the overwritten slot when a longjmp takes the error path.
+run_protected :: #force_no_inline proc(L: ^State, f: Protected_Proc, ud: rawptr) -> Thread_Status {
 	old_ccalls := L.n_ccalls
 	lj: Longjmp
 	lj.status = .Ok
@@ -143,7 +146,7 @@ run_protected :: proc(L: ^State, f: Protected_Proc, ud: rawptr) -> Thread_Status
 	// `longjmp` from `throw`. On the initial pass we run the computation; on
 	// the error return we skip straight past it, leaving in place the status
 	// that `throw` already stored on `lj`.
-	if jmp_set(&lj.b) == 0 {
+	if (transmute(proc "c" (^Jmp_Buf) -> i32)jmp_set)(&lj.b) == 0 {
 		st := f(L, ud)
 		assert(!is_error_status(st), "protected proc returned an error status instead of throwing it")
 		lj.status = st

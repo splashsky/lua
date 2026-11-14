@@ -40,7 +40,7 @@ arithmetic_semantics_chunk :: proc(t: ^testing.T) {
 	defer kernel.close_state(L)
 	stdlib.aux_openlibs(L)
 
-	status := stdlib.aux_loadfilex(L, "tests\\arithmetic_semantics.lua")
+	status := stdlib.aux_loadfilex(L, "tests/arithmetic_semantics.lua")
 	if status == .Ok {
 		status = kernel.api_pcall(L, 0, 0, 0)
 	}
