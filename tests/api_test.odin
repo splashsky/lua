@@ -110,6 +110,51 @@ test_api_push_and_type :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_api_numeric_and_string_conversion_paths :: proc(t: ^testing.T) {
+	L := api_new()
+	defer kernel.close_state(L)
+
+	kernel.api_pushinteger(L, min(i64))
+	kernel.api_pushnumber(L, 42.0)
+	kernel.api_pushnumber(L, 42.5)
+	kernel.api_pushstring(L, "-17")
+	kernel.api_pushstring(L, "bad")
+	kernel.api_pushboolean(L, true)
+
+	i, ok := kernel.api_tointegerx(L, 1)
+	testing.expect(t, ok && i == min(i64))
+	i, ok = kernel.api_tointegerx(L, -5)
+	testing.expect(t, ok && i == 42)
+	i, ok = kernel.api_tointegerx(L, 3)
+	testing.expect(t, !ok && i == 0)
+	i, ok = kernel.api_tointegerx(L, 4)
+	testing.expect(t, ok && i == -17)
+	i, ok = kernel.api_tointegerx(L, 5)
+	testing.expect(t, !ok && i == 0)
+	i, ok = kernel.api_tointegerx(L, 10) // acceptable, but no value
+	testing.expect(t, !ok && i == 0)
+
+	n, nok := kernel.api_tonumberx(L, 1)
+	testing.expect(t, nok && n == kernel.Number(min(i64)))
+	n, nok = kernel.api_tonumberx(L, 3)
+	testing.expect(t, nok && n == 42.5)
+	n, nok = kernel.api_tonumberx(L, 4)
+	testing.expect(t, nok && n == -17)
+	n, nok = kernel.api_tonumberx(L, 6)
+	testing.expect(t, !nok && n == 0)
+
+	s, sok := kernel.api_tolstring(L, 4)
+	testing.expect(t, sok && s == "-17")
+	s, sok = kernel.api_tolstring(L, 2)
+	testing.expect(t, sok && s == "42.0")
+	testing.expect_value(t, kernel.api_type(L, 2), kernel.TSTRING)
+	s, sok = kernel.api_tolstring(L, 6)
+	testing.expect(t, !sok && s == "")
+	s, sok = kernel.api_tolstring(L, 10)
+	testing.expect(t, !sok && s == "")
+}
+
+@(test)
 test_api_settop_and_pop :: proc(t: ^testing.T) {
 	L := api_new()
 	defer kernel.close_state(L)

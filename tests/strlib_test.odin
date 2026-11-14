@@ -64,6 +64,35 @@ str_basic_ops :: proc(t: ^testing.T) {
 }
 
 @(test)
+str_conversion_and_argument_errors :: proc(t: ^testing.T) {
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
+	stdlib.aux_openlibs(L)
+	src := `
+		assert(string.len(123) == 3)
+		assert(string.sub(12345, '2', '4') == '234')
+		assert(string.byte(123, 2.0) == 50)
+		assert(string.byte('abc', -2, -1) == 98)
+		local cases = {
+			{string.len, false, "bad argument #1 to 'string.len' (string expected, got boolean)"},
+			{string.sub, 'abc', 1.5, "bad argument #2 to 'string.sub' (number has no integer representation)"},
+			{string.sub, 'abc', 1, 'x', "bad argument #3 to 'string.sub' (number expected, got string)"},
+			{string.byte, 'abc', false, "bad argument #2 to 'string.byte' (number expected, got boolean)"},
+			{math.abs, false, "bad argument #1 to 'math.abs' (number expected, got boolean)"},
+			{math.abs, "bad argument #1 to 'math.abs' (number expected, got no value)"},
+			{math.ult, 'x', 1, "bad argument #1 to 'math.ult' (number expected, got string)"},
+		}
+		for _, case in ipairs(cases) do
+			local expected = table.remove(case)
+			local ok, err = pcall(table.unpack(case))
+			assert(not ok and err == expected, tostring(err))
+		end
+		return 'ok'
+	`
+	testing.expect(t, str_eval(t, L, src) == "ok", "numeric coercion and exact argument errors")
+}
+
+@(test)
 str_rep_empty_large_count :: proc(t: ^testing.T) {
 	// Without the empty-string fast path this loops for approximately 2^63
 	// iterations. Bound the regression so a broken implementation cannot hang

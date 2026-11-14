@@ -421,6 +421,11 @@ api_tonumber :: proc(L: ^State, idx: int) -> Number {
 // Interpret the value at `idx` as an integer -- reference `lua_tointegerx`.
 api_tointegerx :: proc(L: ^State, idx: int) -> (i: Integer, ok: bool) {
 	o := index2value(L, idx)
+	// Exact integers are the common case; floats and strings retain the
+	// existing conversion and failure rules in vm_tointeger.
+	if is_integer(o) {
+		return int_value(o), true
+	}
 	return vm_tointeger(o, .Eq)
 }
 
@@ -435,6 +440,21 @@ api_toboolean :: proc(L: ^State, idx: int) -> bool {
 	return !is_falsy(index2value(L, idx))
 }
 
+// Number-to-string conversion is deliberately kept out of the hot string path.
+@(private = "file")
+api_tolstring_slow :: #force_no_inline proc(L: ^State, idx: int, o: ^TValue) -> (string, bool) {
+	if !is_number(o) { // not convertible
+		return "", false
+	}
+	// Render the number and replace the value with the resulting string.
+	buf: [N2S_BUFF_SZ]u8
+	n := number_to_str(o, buf[:])
+	ts := string_newlstr(L, raw_data(buf[:]), uint(n))
+	set_string(o, ts)
+	converted := index2value(L, idx) // re-fetch (conversion cannot move the stack)
+	return string(str_slice(str_value(converted))), true
+}
+
 // Interpret the value at `idx` as a string, converting a number *in place* --
 // reference `lua_tolstring`. Returns the interned bytes as an Odin string plus a
 // flag; `ok == false` means the value was neither a string nor a number.
@@ -442,19 +462,12 @@ api_toboolean :: proc(L: ^State, idx: int) -> bool {
 // The in-place conversion matters: after this call the stack slot genuinely holds
 // a string object, so a subsequent GC won't reclaim the bytes we just handed back
 // and repeated calls are cheap. This is precisely reference Lua's behavior (and
-// the reason `lua_tolstring` is not `const`-correct on its argument).
-api_tolstring :: proc(L: ^State, idx: int) -> (s: string, ok: bool) {
-	o := index2value(L, idx)
+// the reason `lua_tolstring` is not `const`-correct on its argument). Inline only
+// the already-string case; coercion and allocation stay out of line.
+api_tolstring :: #force_inline proc(L: ^State, idx: int) -> (s: string, ok: bool) {
+	o := #force_inline index2value(L, idx)
 	if !is_string(o) {
-		if !is_number(o) { // not convertible
-			return "", false
-		}
-		// Render the number and replace the value with the resulting string.
-		buf: [N2S_BUFF_SZ]u8
-		n := number_to_str(o, buf[:])
-		ts := string_newlstr(L, raw_data(buf[:]), uint(n))
-		set_string(o, ts)
-		o = index2value(L, idx) // re-fetch (conversion cannot move the stack)
+		return api_tolstring_slow(L, idx, o)
 	}
 	ts := str_value(o)
 	return string(str_slice(ts)), true

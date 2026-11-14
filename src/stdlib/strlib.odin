@@ -90,7 +90,7 @@ posrelatI :: proc(pos: kernel.Integer, l: int) -> int {
 // Optional *ending* position, defaulting to `def`, clipped into [0, len]. Reference
 // `getendpos`. Note the different clipping range from `posrelatI`.
 @(private = "file")
-getendpos :: proc(L: ^kernel.State, arg: int, def: kernel.Integer, l: int) -> int {
+getendpos :: #force_inline proc(L: ^kernel.State, arg: int, def: kernel.Integer, l: int) -> int {
 	pos := aux_optinteger(L, arg, def)
 	if pos > kernel.Integer(l) {
 		return l

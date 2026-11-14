@@ -202,7 +202,7 @@ aux_checkany :: proc(L: ^kernel.State, arg: int) {
 // Check/convert a string argument, returning its bytes (length carried by the Odin
 // string) -- reference `luaL_checklstring`. A number is silently accepted and
 // stringified, matching reference Lua (the conversion happens in `lua_tolstring`).
-aux_checklstring :: proc(L: ^kernel.State, arg: int) -> string {
+aux_checklstring :: #force_inline proc(L: ^kernel.State, arg: int) -> string {
 	s, ok := kernel.api_tolstring(L, arg)
 	if !ok {
 		tag_error(L, arg, kernel.TSTRING)
