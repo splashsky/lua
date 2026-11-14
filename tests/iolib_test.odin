@@ -7,6 +7,7 @@ package tests
 // the lines iterators, io.type classification, and the documented error paths.
 // Files are removed at the end of each chunk so the tests leave no residue.
 
+import "core:os"
 import "core:testing"
 import kernel "lang:kernel"
 import stdlib "lang:stdlib"
@@ -255,6 +256,45 @@ io_error_paths :: proc(t: ^testing.T) {
 		"os.remove(tmppath('err.tmp'))\n" +
 		"return 'ok'"
 	testing.expect(t, io_eval(t, L, src) == "ok", "documented io error paths")
+}
+
+@(test)
+io_flush_device_errors :: proc(t: ^testing.T) {
+	when ODIN_OS == .Linux {
+		if !os.exists("/dev/null") || !os.exists("/dev/full") {
+			return
+		}
+		L := io_state()
+		defer kernel.close_state(L)
+		src :=
+			"local function enospc(a, msg, code)\n" +
+			"  assert(a == nil and msg == 'No space left on device' and code == 28)\n" +
+			"end\n" +
+			"local f = assert(io.output('/dev/null'))\n" +
+			"assert(f:write('abcd') == f and f:flush() == true)\n" +
+			"assert(io.write('abcd') == f and io.flush() == true)\n" +
+			"assert(f:close() == true)\n" +
+			"f = assert(io.output('/dev/full'))\n" +
+			"assert(f:write('abcd') == f); enospc(f:flush())\n" +
+			"assert(f:write('abcd') == f); enospc(io.flush())\n" +
+			"assert(io.write('abcd') == f); enospc(io.flush())\n" +
+			"assert(f:flush() == true and f:close() == true)\n" +
+			"io.output(io.stdout)\n" +
+			// These errors happen inside fwrite rather than a later fflush.
+			"f = assert(io.open('/dev/full', 'w')); assert(f:setvbuf('no'))\n" +
+			"io.output(f)\n" +
+			"local a, msg, code, count = f:write('abc')\n" +
+			"enospc(a, msg, code); assert(count == 0)\n" +
+			"a, msg, code, count = io.write('abc')\n" +
+			"enospc(a, msg, code); assert(count == 0 and f:close() == true)\n" +
+			"io.output(io.stdout)\n" +
+			"f = assert(io.open('/dev/full', 'w')); assert(f:setvbuf('line'))\n" +
+			"a, msg, code, count = f:write('abc\\ndef')\n" +
+			"enospc(a, msg, code); assert(count == 3)\n" +
+			"assert(f:flush() == true and f:close() == true)\n" +
+			"return 'ok'"
+		testing.expect(t, io_eval(t, L, src) == "ok", "device flush and write results match stdio")
+	}
 }
 
 @(test)

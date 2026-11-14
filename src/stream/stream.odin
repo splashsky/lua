@@ -313,7 +313,7 @@ tmpfile :: proc() -> ^Stream {
 }
 
 @(private = "file")
-raw_write_all :: proc(s: ^Stream, data: []u8) -> bool {
+raw_write_progress :: proc(s: ^Stream, data: []u8) -> (int, bool) {
 	done := 0
 	for done < len(data) {
 		n, err := os.write(s.file, data[done:])
@@ -321,13 +321,19 @@ raw_write_all :: proc(s: ^Stream, data: []u8) -> bool {
 			done += n
 		}
 		if err != nil {
-			return fail(s, err)
+			return done, fail(s, err)
 		}
 		if n == 0 {
-			return fail(s, os.Error(io.Error.Short_Write))
+			return done, fail(s, os.Error(io.Error.Short_Write))
 		}
 	}
-	return true
+	return done, true
+}
+
+@(private = "file")
+raw_write_all :: proc(s: ^Stream, data: []u8) -> bool {
+	_, ok := raw_write_progress(s, data)
+	return ok
 }
 
 @(private = "file")
@@ -380,10 +386,26 @@ flush :: proc(s: ^Stream) -> bool {
 		return false
 	}
 	if s.write_count > 0 {
-		if !write_translated(s, s.write_buffer[:s.write_count]) {
-			return false
+		when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD {
+			// Darwin and FreeBSD stdio retain the unwritten tail after a partial
+			// write; unlike Windows, they do not translate text on output.
+			done, ok := raw_write_progress(s, s.write_buffer[:s.write_count])
+			if !ok {
+				remaining := s.write_count - done
+				for i in 0..<remaining {
+					s.write_buffer[i] = s.write_buffer[done + i]
+				}
+				s.write_count = remaining
+				return false
+			}
+			s.write_count = 0
+		} else {
+			// glibc, MSVC, OpenBSD and NetBSD reset the whole buffer on failure,
+			// even after a partial write. ferror remains set.
+			ok := write_translated(s, s.write_buffer[:s.write_count])
+			s.write_count = 0
+			return ok
 		}
-		s.write_count = 0
 	}
 	return true
 }
@@ -741,13 +763,17 @@ write :: proc(s: ^Stream, data: []u8) -> int {
 		s.logical_pos += logical_raw_size(s, data[written:written + take])
 		written += take
 		if s.mode == .Line {
-			has_newline := false
-			for c in data[written - take:written] {
+			newline := -1
+			for c, i in data[written - take:written] {
 				if c == '\n' {
-					has_newline = true
+					newline = i
+					break
 				}
 			}
-			if has_newline && !flush(s) {
+			if newline >= 0 && !flush(s) {
+				// The newline that triggered the failed flush was not accepted by
+				// fwrite; neither were bytes after it in this input chunk.
+				written = written - take + newline
 				break
 			}
 		}
@@ -801,8 +827,11 @@ setvbuf :: proc(s: ^Stream, mode: Buffer_Mode, size: int) -> bool {
 	// Changing buffering first reconciles the old buffer with the logical file
 	// position. We allocate both sides to the requested size so later reads and
 	// writes obey the new policy without borrowing memory from the Lua state.
-	if s == nil || size < 0 || !flush(s) {
+	if s == nil || size < 0 {
 		set_error(os.Error(os.General_Error.Invalid_File))
+		return false
+	}
+	if !flush(s) {
 		return false
 	}
 	if s.direction == .Read && !discard_read_ahead(s) {
