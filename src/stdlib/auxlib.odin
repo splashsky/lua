@@ -820,7 +820,7 @@ aux_loadbufferx :: proc(
 // Load a chunk from a string, using the string itself as the chunk name --
 // reference `luaL_loadstring`.
 aux_loadstring :: proc(L: ^kernel.State, s: string) -> kernel.Thread_Status {
-	return aux_loadbufferx(L, transmute([]u8)s, s, "")
+	return aux_loadbufferx(L, transmute([]u8)s, s, "t")
 }
 
 

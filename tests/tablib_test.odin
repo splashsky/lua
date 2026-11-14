@@ -75,6 +75,80 @@ tab_pack_unpack :: proc(t: ^testing.T) {
 }
 
 @(test)
+tab_unpack_non_tables :: proc(t: ^testing.T) {
+	L := tab_state()
+	defer kernel.close_state(L)
+	kernel.api_pushcfunction(L, stdlib.open_string)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "string")
+	kernel.api_pushcfunction(L, stdlib.open_debug)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "debug")
+	st := tab_run(L, `
+		-- The non-table example from upstream sort.lua.
+		local oldmt = debug.getmetatable(0)
+		local str = 'hello'
+		debug.setmetatable(0, {
+		  __len = function() return #str end,
+		  __index = function(_, i) return string.sub(str, i, i) end
+		})
+		assert(table.concat({table.unpack(0)}) == str)
+		debug.setmetatable(0, oldmt)
+
+		-- A string needs __index, but has an intrinsic length, not __len.
+		local oldstrmt = debug.getmetatable(str)
+		debug.setmetatable(str, {__index = function(s, i) return string.sub(s, i, i) end})
+		assert(table.concat({table.unpack(str)}) == str)
+		assert(table.concat(str) == str)
+		debug.setmetatable(str, nil)
+		assert(not pcall(table.unpack, str)) -- strings still need __index
+		debug.setmetatable(str, oldstrmt)
+	`)
+	if st != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "non-table unpack: %s", msg)
+	}
+}
+
+@(test)
+tab_unpack_checks_argument :: proc(t: ^testing.T) {
+	L := tab_state()
+	defer kernel.close_state(L)
+	kernel.api_pushcfunction(L, stdlib.open_string)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "string")
+	st := tab_run(L, `
+		local ok, err = pcall(function() table.unpack(nil) end)
+		assert(not ok and err:find("bad argument #1 to 'unpack' %(table expected, got nil%)"))
+		ok, err = pcall(function() table.unpack(nil, 'bad', 0) end)
+		assert(not ok and err:find("bad argument #1 to 'unpack' %(table expected, got nil%)"))
+		ok, err = pcall(function() table.unpack(42, 2, 1) end)
+		assert(not ok and err:find("bad argument #1 to 'unpack' %(table expected, got number%)"))
+	`)
+	if st != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "unpack argument check: %s", msg)
+	}
+}
+
+@(test)
+tab_unpack_length_before_indices :: proc(t: ^testing.T) {
+	L := tab_state()
+	defer kernel.close_state(L)
+	st := tab_run(L, `
+		local calls = 0
+		local t = setmetatable({10, 20}, {__len = function() calls = calls + 1; return 2 end})
+		assert(table.unpack(t, 2, 2) == 20 and calls == 1)
+		local ok = pcall(table.unpack, t, 'bad', 1)
+		assert(not ok and calls == 2) -- __len runs before checking argument #2
+	`)
+	if st != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "unpack length ordering: %s", msg)
+	}
+}
+
+@(test)
 tab_move :: proc(t: ^testing.T) {
 	L := tab_state()
 	defer kernel.close_state(L)

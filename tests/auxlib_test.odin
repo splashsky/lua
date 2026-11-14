@@ -7,6 +7,7 @@ package tests
 
 import "base:runtime"
 import "core:testing"
+import "core:strings"
 import kernel "lang:kernel"
 import stdlib "lang:stdlib"
 
@@ -107,6 +108,33 @@ aux_loadstring_runs :: proc(t: ^testing.T) {
 	testing.expect(t, call == .Ok, "chunk must run")
 	n, ok := kernel.api_tointegerx(L, -1)
 	testing.expect(t, ok && n == 7, "3 + 4 must be 7")
+}
+
+@(test)
+aux_loadstring_rejects_binary :: proc(t: ^testing.T) {
+	L := aux_new()
+	defer kernel.close_state(L)
+	if !testing.expect(t, stdlib.aux_loadstring(L, "return 42") == .Ok) {
+		return
+	}
+	bytes := dump_top(L, false)
+	defer delete(bytes)
+	kernel.api_pop(L, 1)
+	if !testing.expect(t, len(bytes) > 0, "dump a valid binary chunk") {
+		return
+	}
+	st := stdlib.aux_loadstring(L, transmute(string)bytes[:])
+	testing.expect(t, st == .Err_Syntax, "loadstring rejects binary chunks")
+	msg, _ := kernel.api_tolstring(L, -1)
+	testing.expect(t, strings.contains(msg, "attempt to load a binary chunk"), "report the mode error")
+	kernel.api_pop(L, 1)
+	// Explicit/default buffer loading still accepts the same binary chunk.
+	if testing.expect(t, stdlib.aux_loadbufferx(L, bytes[:], "=binary") == .Ok) {
+		if testing.expect(t, kernel.api_pcall(L, 0, 1, 0) == .Ok) {
+			n, ok := kernel.api_tointegerx(L, -1)
+			testing.expect(t, ok && n == 42, "default buffer mode executes binary")
+		}
+	}
 }
 
 // A trivial registered function is callable through a table built by newlib.

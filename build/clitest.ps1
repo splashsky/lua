@@ -86,11 +86,38 @@ function Invoke-Capture {
     return @{ Out = ($out -join "`n"); Code = $LASTEXITCODE }
 }
 
+# Capture native stderr without PowerShell treating it as a terminating error.
+function Invoke-ErrorCapture {
+    param([string]$Exe, [string[]]$CliArgs, [string[]]$StdIn = $null)
+    $ErrorActionPreference = 'Continue'
+    $errFile = Join-Path $Work 'native-stderr.txt'
+    if ($null -ne $StdIn) {
+        $StdIn | & $Exe @CliArgs 2> $errFile | Out-Null
+    } else {
+        & $Exe @CliArgs 2> $errFile | Out-Null
+    }
+    $code = $LASTEXITCODE
+    return @{ Err = (Get-Content $errFile -Raw); Code = $code }
+}
+
 Write-Host "==> lua CLI"
 
 # -e executes a statement string.
 $r = Invoke-Capture $Lua @('-e', 'print(6*7)')
 Assert-Eq 'lua -e prints 42' '42' $r.Out
+
+# A binary signature distinguishes text-mode rejection from a truncated chunk.
+$binarySignature = ([char]27).ToString() + 'Lua'
+$r = Invoke-ErrorCapture $Lua @('-e', $binarySignature)
+Assert-True 'lua -e rejects binary' ($r.Code -ne 0 -and $r.Err.Contains("attempt to load a binary chunk (mode is 't')"))
+$r = Invoke-ErrorCapture $Lua @('-i') -StdIn @($binarySignature)
+Assert-True 'REPL rejects binary' ($r.Err.Contains("attempt to load a binary chunk (mode is 't')"))
+$r = Invoke-Capture $Lua @('-i') -StdIn '21*2'
+Assert-True 'REPL accepts text' ($r.Out.Contains('42'))
+$r = Invoke-ErrorCapture $Lua @('-e', 'debug.debug()') -StdIn @($binarySignature, 'cont')
+Assert-True 'debug.debug rejects binary' ($r.Err.Contains("attempt to load a binary chunk (mode is 't')"))
+$r = Invoke-Capture $Lua @('-e', 'debug.debug()') -StdIn "print('debug ok')`ncont"
+Assert-True 'debug.debug accepts text' ($r.Out.Contains('debug ok'))
 
 # -v prints the version banner.
 $r = Invoke-Capture $Lua @('-v')
@@ -127,6 +154,14 @@ $dump = Join-Path $Work 'hello.luac'
 Assert-True 'luac -o creates a dump' (Test-Path $dump)
 $dumpOut = (Invoke-Capture $Lua @($dump, 'X')).Out
 Assert-Eq 'dumped chunk runs like source' $srcOut $dumpOut
+$binarySource = Join-Path $Work 'binary.lua'
+$binaryDump = Join-Path $Work 'binary.luac'
+Set-Content $binarySource 'print("binary ok")' -NoNewline
+& $Luac -o $binaryDump $binarySource | Out-Null
+$r = Invoke-Capture $Lua @('-e', "dofile([[$binaryDump]])")
+Assert-Eq 'dofile accepts binary' 'binary ok' $r.Out
+$r = Invoke-Capture $Lua @('-e', "package.path=[[$Work/?.luac]]; require('binary')")
+Assert-Eq 'require accepts binary' 'binary ok' $r.Out
 
 # -p parses without producing output.
 $r = Invoke-Capture $Luac @('-p', $hello)

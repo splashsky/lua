@@ -530,7 +530,7 @@ db_debug :: proc "c" (Lp: rawptr) -> i32 {
 			return 0
 		}
 		bytes := transmute([]u8)line
-		if aux_loadbufferx(L, bytes, "=(debug command)", "") != .Ok ||
+		if aux_loadbufferx(L, bytes, "=(debug command)", "t") != .Ok ||
 		   kernel.api_pcall(L, 0, 0, 0) != .Ok {
 			write_stderr(aux_tolstring(L, -1))
 			write_stderr("\n")

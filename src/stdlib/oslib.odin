@@ -736,9 +736,6 @@ os_time :: proc "c" (Lp: rawptr) -> i32 {
 			aux_error(L, "time result cannot be represented in this installation")
 		}
 	}
-	if t == -1 {
-		aux_error(L, "time result cannot be represented in this installation")
-	}
 	kernel.api_pushinteger(L, kernel.Integer(t))
 	return 1
 }

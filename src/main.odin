@@ -270,11 +270,11 @@ dochunk :: proc(L: ^kernel.State, status: kernel.Thread_Status) -> kernel.Thread
 }
 
 dofile :: proc(L: ^kernel.State, name: string) -> kernel.Thread_Status {
-	return dochunk(L, stdlib.aux_loadfilex(L, name))
+	return dochunk(L, stdlib.aux_loadfilex(L, name, "bt"))
 }
 
 dostring :: proc(L: ^kernel.State, s: string, name: string) -> kernel.Thread_Status {
-	return dochunk(L, stdlib.aux_loadbufferx(L, transmute([]u8)s, name))
+	return dochunk(L, stdlib.aux_loadbufferx(L, transmute([]u8)s, name, "t"))
 }
 
 // Run `globname[=modname]` as `globname = require(modname)`. With no explicit
@@ -424,7 +424,7 @@ handle_script :: proc(L: ^kernel.State, argv: []string, script: int) -> kernel.T
 	if fname == "-" && argv[script - 1] != "--" {
 		fname = "" // stdin
 	}
-	status := stdlib.aux_loadfilex(L, fname)
+	status := stdlib.aux_loadfilex(L, fname, "bt")
 	if status == .Ok {
 		n := pushargs(L) // push arguments to script
 		status = docall(L, n, kernel.MULTRET)
@@ -515,7 +515,7 @@ pushline :: proc(L: ^kernel.State, firstline: bool) -> bool {
 addreturn :: proc(L: ^kernel.State) -> kernel.Thread_Status {
 	line, _ := kernel.api_tolstring(L, -1) // original line
 	retline := kernel.api_pushfstring(L, "return %s;", line)
-	status := stdlib.aux_loadbufferx(L, transmute([]u8)retline, "=stdin")
+	status := stdlib.aux_loadbufferx(L, transmute([]u8)retline, "=stdin", "t")
 	if status == .Ok {
 		kernel.api_remove(L, -2) // remove modified line, keep the chunk
 	} else {
@@ -549,7 +549,7 @@ multiline :: proc(L: ^kernel.State) -> kernel.Thread_Status {
 	line, _ := kernel.api_tolstring(L, 1) // get first line
 	checklocal(line)
 	for {
-		status := stdlib.aux_loadbufferx(L, transmute([]u8)line, "=stdin") // try it
+		status := stdlib.aux_loadbufferx(L, transmute([]u8)line, "=stdin", "t") // try it
 		if !incomplete(L, status) || !pushline(L, false) {
 			return status // shouldn't or can't add a continuation line
 		}

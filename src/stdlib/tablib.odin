@@ -46,7 +46,8 @@ checkfield :: proc(L: ^kernel.State, key: string, n: int) -> bool {
 // operator, so the C `++n` folded into the short-circuit chain is spelled out.)
 @(private = "file")
 checktab :: proc(L: ^kernel.State, arg: int, what: int) {
-	if kernel.api_type(L, arg) != kernel.TTABLE {
+	tp := kernel.api_type(L, arg)
+	if tp != kernel.TTABLE {
 		n := 1 // number of elements to pop
 		ok := kernel.api_getmetatable(L, arg) // must have a metatable
 		if ok && what & TAB_R != 0 {
@@ -57,7 +58,7 @@ checktab :: proc(L: ^kernel.State, arg: int, what: int) {
 			n += 1
 			ok = checkfield(L, "__newindex", n)
 		}
-		if ok && what & TAB_L != 0 {
+		if ok && what & TAB_L != 0 && tp != kernel.TSTRING {
 			n += 1
 			ok = checkfield(L, "__len", n)
 		}
@@ -233,8 +234,9 @@ table_pack :: proc "c" (Lp: rawptr) -> i32 {
 table_unpack :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
+	size := aux_getn(L, 1, TAB_R)
 	i := aux_optinteger(L, 2, 1)
-	e := kernel.api_isnoneornil(L, 3) ? aux_len(L, 1) : aux_checkinteger(L, 3)
+	e := aux_optinteger(L, 3, size)
 	if i > e {
 		return 0 // empty range
 	}

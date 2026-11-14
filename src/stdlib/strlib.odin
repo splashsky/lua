@@ -182,7 +182,7 @@ str_rep :: proc "c" (Lp: rawptr) -> i32 {
 	sep := transmute([]u8)aux_optlstring(L, 3, "")
 	length := uint(len(s))
 	lsep := uint(len(sep))
-	if n <= 0 {
+	if n <= 0 || (length | lsep) == 0 {
 		kernel.api_pushstring(L, "")
 	} else if length > kernel.MAX_SIZE - lsep || (length + lsep) > kernel.MAX_SIZE / uint(n) {
 		// The two-part test mirrors reference: first make sure `len + lsep` itself

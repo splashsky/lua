@@ -7,6 +7,7 @@ package tests
 // round-tripped back through `load`. No test inspects an incidental internal.
 
 import "core:testing"
+import "core:time"
 import kernel "lang:kernel"
 import stdlib "lang:stdlib"
 
@@ -60,6 +61,25 @@ str_basic_ops :: proc(t: ^testing.T) {
 		"assert(a == 72 and b == 105)\n" +
 		"return 'ok'"
 	testing.expect(t, str_eval(t, L, src) == "ok", "basic string operations")
+}
+
+@(test)
+str_rep_empty_large_count :: proc(t: ^testing.T) {
+	// Without the empty-string fast path this loops for approximately 2^63
+	// iterations. Bound the regression so a broken implementation cannot hang
+	// the entire test run.
+	testing.set_fail_timeout(t, 10 * time.Second)
+	L := str_state()
+	defer kernel.close_state(L)
+	src := `
+		assert(string.rep('', 0) == '')
+		assert(string.rep('', 0x7fffffffffffffff) == '')
+		assert(string.rep('', 0x7fffffffffffffff, '') == '')
+		assert(string.rep('', 3, '-') == '--')
+		assert(string.rep('x', 3, '') == 'xxx')
+		return 'ok'
+	`
+	testing.expect(t, str_eval(t, L, src) == "ok", "empty repetitions and non-empty separators")
 }
 
 @(test)

@@ -63,6 +63,21 @@ echo "==> lua CLI"
 out="$("$LUA" -e 'print(6*7)' 2>/dev/null)"
 assert_eq 'lua -e prints 42' '42' "$out"
 
+# A binary signature is enough to distinguish a text-mode rejection from the
+# old binary loader's "truncated chunk" error (argv cannot contain NUL bytes).
+err="$("$LUA" -e $'\033Lua' 2>&1)"; code=$?
+[[ $code -ne 0 && "$err" == *"attempt to load a binary chunk (mode is 't')"* ]] && assert_true 'lua -e rejects binary' 1 || assert_true 'lua -e rejects binary' 0
+
+printf '\033Lua\n' | "$LUA" -i >"$WORK/repl.out" 2>"$WORK/repl.err"
+grep -Fq "attempt to load a binary chunk (mode is 't')" "$WORK/repl.err" && assert_true 'REPL rejects binary' 1 || assert_true 'REPL rejects binary' 0
+printf '21*2\n' | "$LUA" -i >"$WORK/repl.out" 2>"$WORK/repl.err"
+grep -Fq '42' "$WORK/repl.out" && assert_true 'REPL accepts text' 1 || assert_true 'REPL accepts text' 0
+
+printf '\033Lua\ncont\n' | "$LUA" -e 'debug.debug()' >"$WORK/debug.out" 2>"$WORK/debug.err"
+grep -Fq "attempt to load a binary chunk (mode is 't')" "$WORK/debug.err" && assert_true 'debug.debug rejects binary' 1 || assert_true 'debug.debug rejects binary' 0
+printf 'print("debug ok")\ncont\n' | "$LUA" -e 'debug.debug()' >"$WORK/debug.out" 2>"$WORK/debug.err"
+grep -Fq 'debug ok' "$WORK/debug.out" && assert_true 'debug.debug accepts text' 1 || assert_true 'debug.debug accepts text' 0
+
 out="$("$LUA" -v 2>/dev/null)"
 [[ "$out" == *"Lua 5.5"* ]] && assert_true 'lua -v shows Lua 5.5 banner' 1 || assert_true 'lua -v shows Lua 5.5 banner' 0
 
@@ -89,6 +104,13 @@ DUMP="$WORK/hello.luac"
 [[ -f "$DUMP" ]] && assert_true 'luac -o creates a dump' 1 || assert_true 'luac -o creates a dump' 0
 dumpout="$("$LUA" "$DUMP" X 2>/dev/null)"
 assert_eq 'dumped chunk runs like source' "$srcout" "$dumpout"
+
+printf 'print("binary ok")' > "$WORK/binary.lua"
+"$LUAC" -o "$WORK/binary.luac" "$WORK/binary.lua" >/dev/null 2>&1
+out="$("$LUA" -e "dofile([[$WORK/binary.luac]])" 2>/dev/null)"
+assert_eq 'dofile accepts binary' 'binary ok' "$out"
+out="$("$LUA" -e "package.path=[[$WORK/?.luac]]; require('binary')" 2>/dev/null)"
+assert_eq 'require accepts binary' 'binary ok' "$out"
 
 "$LUAC" -p "$HELLO" >/dev/null 2>&1; [[ $? -eq 0 ]] && assert_true 'luac -p exits 0' 1 || assert_true 'luac -p exits 0' 0
 

@@ -64,6 +64,30 @@ oslib_time_roundtrip :: proc(t: ^testing.T) {
 }
 
 @(test)
+oslib_time_minus_one :: proc(t: ^testing.T) {
+	when ODIN_OS != .Windows { // MSVC mktime cannot represent negative timestamps.
+		L := oslib_state()
+		defer kernel.close_state(L)
+		st := oslib_run(L, `
+			local t = os.date('*t', -1)
+			t.wday, t.yday = nil, nil
+			assert(os.time(t) == -1)
+			assert(t.wday and t.yday) -- the table was normalized too
+			assert(not pcall(os.time, {year=0x7fffffffffffffff, month=1, day=1}))
+		`)
+		if st != .Ok {
+			msg, _ := kernel.api_tolstring(L, -1)
+			testing.expectf(t, false, "os.time(-1) round-trip: %s", msg)
+		}
+	} else {
+		L := oslib_state()
+		defer kernel.close_state(L)
+		st := oslib_run(L, `assert(not pcall(os.time, {year=1960, month=1, day=1}))`)
+		testing.expect(t, st == .Ok, "Windows mktime rejects negative timestamps")
+	}
+}
+
+@(test)
 oslib_difftime :: proc(t: ^testing.T) {
 	L := oslib_state()
 	defer kernel.close_state(L)
