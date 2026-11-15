@@ -112,7 +112,9 @@ emit_indented :: proc(b: ^strings.Builder, s: string) {
 
 emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	noinline := ""
-	if name == "vm_thread_enter" || name == "vm_thread_trace" || name == "vm_thread_poll" || name == "vm_thread_RETURN0_slow" || name == "vm_thread_RETURN1_slow" {
+	if name == "vm_thread_enter" || name == "vm_thread_trace" || name == "vm_thread_poll" ||
+	   name == "vm_thread_RETURN0_slow" || name == "vm_thread_RETURN1_slow" ||
+	   name == "vm_thread_gettable_miss" || name == "vm_thread_gettable_other" {
 		noinline = "#force_no_inline "
 	}
 	fmt.sbprintf(b, "\t%s :: %sproc \"preserve/none\" %s {{\n", name, noinline, SIG)
@@ -158,6 +160,7 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src: 
 	review(between(src, "vm_arith :: #force_inline proc", "// ---------------------------------------------------------------------------\n// The interpreter loop"), "8493f193af8288550b22240f2509f0cf3d7a5b866811e8cbf25ebc489a6a26b3", "vm_arith")
 	review(between(tm_src, "tm_gettmbyobj :: proc", "// The type name"), "b9d33e4481e049c8858bc8a68c5e0edf619dd19e5d4d0abc9b0fda806cfeeded", "tm_gettmbyobj")
 	review(between(table_src, "table_get ::", "// Odin does not reliably inline"), "86124ae5d3c25a8ec0c1fc4bcdfa3b576de9b8401b7597f3693f94230ddaab04", "table_get")
+	review(between(table_src, "table_fastgeti :: #force_inline proc", "table_getshortstr :: proc"), "9e2ed5c5700ae19c8185bcfb1f6f1e62ede27e1ed89e1c574532ba0eb26d448b", "table_fastgeti")
 	review(between(table_src, "table_fastget ::", "// ---------------------------------------------------------------------------\n// Insertion into the hash part"), "8490a704b65daa82efe7a00322f7c5bff9188b22a50549d5f79ac50d2ae846c0", "table_fastget")
 	review(between(table_src, "table_fastseti :: #force_inline proc", "// Reference's short-string preset"), "38b0e28d813b2d93e29b4b5c9b614b99bd77d3485f3ceec1e50af82517aec017", "table_fastseti")
 	review(between(table_src, "table_psetshortstr :: proc", "table_psetstr :: proc"), "f7f146d846e2a8f0750cfada9e307bfd00cbbfd00c9433f95e4cac703d65dafc", "table_psetshortstr")
@@ -277,6 +280,20 @@ base = L.frames[ci_idx].func + 1
 regs = ([^]StackValue)(&L.stack[base])`, dispatch))
 	emit_proc(&b, "vm_thread_trace", fmt.tprintf("%s\n%s", dedent(trace), next))
 	emit_proc(&b, "vm_thread_poll", fmt.tprintf("trap = vm_apply_async_hook(L, trap)\n%s", dispatch))
+	// The hot GETTABLE handler tail-transitions to these cold paths, so the
+	// ordinary ABI callouts cannot force it to spill the VM registers on hits.
+	emit_proc(&b, "vm_thread_gettable_miss", fmt.tprintf("%s\n%s", `ra := base + getarg_A(i)
+rb := &regs[getarg_B(i)].val
+rc := &regs[getarg_C(i)].val
+trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra, ctx)
+`, dispatch), true)
+	emit_proc(&b, "vm_thread_gettable_other", fmt.tprintf("%s\n%s", `ra := base + getarg_A(i)
+rb := &regs[getarg_B(i)].val
+rc := &regs[getarg_C(i)].val
+if !vm_thread_tryget(rb, rc, &regs[getarg_A(i)].val) {
+	trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra, ctx)
+}
+`, dispatch), true)
 	transitions, returns := 0, 0
 	for name, i in names {
 		body := bodies[i]
@@ -290,12 +307,32 @@ regs = ([^]StackValue)(&L.stack[base])`, dispatch))
 			body = replace_exact(body, "thread_ctx := context", "_ = ctx")
 			body = replace_exact(body, "ra, &thread_ctx)", "ra, ctx)")
 		}
-		// regs already points at the current base. It remains valid until a
-		// callout, and all these pointers are consumed before that callout.
+		// Only array and short-string hits stay in this handler. The array
+		// range check leaves integer hash lookups for the complete cold path.
+		// On a known empty slot, do not repeat the lookup before finishget.
 		if name == "GETTABLE" {
-			body = replace_exact(body, "stack_value(L, base + getarg_B(i))", "&regs[getarg_B(i)].val")
-			body = replace_exact(body, "stack_value(L, base + getarg_C(i))", "&regs[getarg_C(i)].val")
-			body = replace_exact(body, "vm_thread_tryget(rb, rc, stack_value(L, ra))", "vm_thread_tryget(rb, rc, &regs[getarg_A(i)].val)")
+			body = `rb := &regs[getarg_B(i)].val
+rc := &regs[getarg_C(i)].val
+if base_type(rb) != TTABLE {
+	return #must_tail vm_thread_gettable_other(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+h := (^Table)(rb.value_.gc)
+if is_integer(rc) {
+	key := int_value(rc)
+	if Unsigned(key) - 1 >= Unsigned(h.asize) {
+		return #must_tail vm_thread_gettable_other(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+	if tag_is_empty(table_fastgeti(h, key, &regs[getarg_A(i)].val)) {
+		return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+} else if type_tag(rc) == VSHRSTR {
+	if tag_is_empty(table_fastget(h, rc, &regs[getarg_A(i)].val)) {
+		return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+} else {
+	return #must_tail vm_thread_gettable_other(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`
 		}
 		if name == "SETTABLE" {
 			body = replace_exact(body, "thread_ctx := context", "_ = ctx")

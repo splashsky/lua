@@ -271,6 +271,53 @@ vm_string_method_lookup_and_yield :: proc(t: ^testing.T) {
 	testing.expect(t, kernel.api_toboolean(L, -1))
 }
 
+// Variable-key reads cover array and short-string hits, integer-hash and
+// generic keys, and misses whose __index yields and moves the stacks.
+@(test)
+vm_variable_table_reads :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local t = {11, 22}
+		local k = 1
+		local alias = t
+		alias = alias[k]
+		assert(alias == 11)
+		t[2] = nil
+		local s, big, obj = 'short-key', string.rep('x', 100), {}
+		t[s], t[big], t[obj], t[999], t[1.25] = 33, 44, 55, 66, 77
+		for key, value in pairs({[s]=33, [big]=44, [obj]=55, [999]=66, [1.25]=77}) do
+		  assert(t[key] == value)
+		end
+		setmetatable(t, {__index = function(_, key)
+		  coroutine.yield(key)
+		  collectgarbage('collect')
+		  return 90
+		end})
+		for _, key in ipairs({2, 'missing', 9999, false}) do
+		  local co = coroutine.create(function() return t[key] + 1 end)
+		  local ok, seen = coroutine.resume(co)
+		  assert(ok and seen == key)
+		  local done, value = coroutine.resume(co)
+		  assert(done and value == 91)
+		end
+		local co = coroutine.create(function() local key; return t[key] end)
+		local ok, seen = coroutine.resume(co)
+		assert(ok and seen == nil)
+		local done, value = coroutine.resume(co)
+		assert(done and value == 90)
+		local err, key = false, 'x'
+		assert(not pcall(function() return err[key] end))
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
 // Integer writes can take the contextless path only when no GC barrier is
 // needed. Empty slots with __newindex, writes needing a barrier, and non-table
 // objects still have to follow the ordinary yielding/error paths.
