@@ -278,9 +278,10 @@ Variable-key table handlers address operands directly from that base, whose
 pointers are consumed before any callout; the slow read still receives a stack
 index for its result. Global, field and variable-key reads try the shared
 contextless table lookup before entering a no-inline miss path. Variable-key
-array and short-string hits stay in their handler; known empty slots and other
-key types tail-transition to separate cold handlers. A known miss goes straight
-to the existing finish path without repeating the lookup. Method lookup
+array and short-string hits stay in their handler; integer-hash and other key
+types tail-transition to contextless lookup handlers without repeating the
+table/type dispatch. Known empty slots and non-tables go straight to the
+existing finish path without repeating the lookup. Method lookup
 also handles a string whose `__index` is a table with a matching key; it keeps
 the saved PC and stack top updates made by the original non-table path.
 
