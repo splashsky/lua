@@ -87,7 +87,7 @@ vm_concat_allocation_failure :: proc(t: ^testing.T) {
 String_Retry_Allocator :: struct {
 	count: Counting_Allocator,
 	bytes: uint,
-	remaining, attempts: int,
+	remaining, attempts, skip: int,
 	enabled: bool,
 }
 
@@ -95,7 +95,9 @@ string_retry_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize, nsize: uint) -> 
 	a := (^String_Retry_Allocator)(ud)
 	if a.enabled && ptr == nil && osize == uint(kernel.TSTRING) && nsize == a.bytes {
 		a.attempts += 1
-		if a.remaining > 0 {
+		if a.skip > 0 {
+			a.skip -= 1
+		} else if a.remaining > 0 {
 			a.remaining -= 1
 			return nil
 		}
@@ -112,12 +114,13 @@ vm_concat_survives_emergency_retry :: proc(t: ^testing.T) {
 	source := `local a, x, y = 'retry:', 918273645, 728394615; return a .. x .. ':' .. y`
 	testing.expect_value(t, api_load(L, source, &rd), kernel.Thread_Status.Ok)
 	a.bytes = kernel.sizelstring(9)
+	a.skip = 1 // anchor the rightmost number before failing the next one
 	a.remaining = 1
 	a.enabled = true
 	status := kernel.api_pcall(L, 0, 1, 0)
 	a.enabled = false
 	testing.expect_value(t, status, kernel.Thread_Status.Ok)
-	testing.expect(t, a.attempts >= 2, "numeric conversion retried after emergency collection")
+	testing.expect(t, a.attempts >= 3, "second numeric conversion retried after emergency collection")
 	if status == .Ok {
 		value, ok := kernel.api_tolstring(L, -1)
 		testing.expect(t, ok && value == "retry:918273645:728394615")
