@@ -272,14 +272,25 @@ poll, and specialized opcode bodies, as well as the ordinary table and call
 helpers those specializations mirror. This requires review when a guarded body
 changes; it is not a proof of semantic equivalence.
 
-The threaded global, field and variable-key read handlers try the shared
+The threaded upvalue handlers derive the inline vector from the carried closure,
+the same non-moving object held in the function slot below the register base.
+Variable-key table handlers address operands directly from that base, whose
+pointers are consumed before any callout; the slow read still receives a stack
+index for its result. Global, field and variable-key reads try the shared
 contextless table lookup before entering a no-inline miss path. Method lookup
 also handles a string whose `__index` is a table with a matching key; it keeps
-the saved PC and stack top updates made by the original non-table path. Successful
-variable-key integer writes of non-collectable values use the same pre-set as
-the ordinary VM; all other writes use its normal path and GC barrier. These hits
+the saved PC and stack top updates made by the original non-table path.
+
+Variable-key integer writes of non-collectable values use the ordinary pre-set
+without a context. The slow setter also tries short-string pre-sets for primitive
+values; that shared pre-set declines a new white key in a black table. It may
+finish an integer-key write of a collectable value without a context only when
+the ordinary back barrier is a no-op, with no allocation or re-entry between
+the color test and the write. A needed barrier uses the original setter. An
+unfinished pre-set passes its location to the original finish path. These hits
 cannot move the stack or change the trap. Misses receive the activation's
-original context and reload the trap after any callout.
+original context and reload the trap after any callout. The generator guards
+the shared pre-set and barrier predicates as well as the opcode bodies.
 
 String lengths use a contextless handler but retain the switch VM's saved-PC
 and stack-top updates; other lengths use the ordinary helper with the original
