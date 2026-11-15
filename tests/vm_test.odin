@@ -271,6 +271,52 @@ vm_string_method_lookup_and_yield :: proc(t: ^testing.T) {
 	testing.expect(t, kernel.api_toboolean(L, -1))
 }
 
+// Concatenation must preserve coercion order and the original operand types
+// when a yielding metamethod handles a non-string operand.
+@(test)
+vm_concat_coercion_and_yield :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local a, b, c, d = 'value:', 12, ':', 3.5
+		assert(a .. b .. c .. d == 'value:12:3.5')
+		local empty, num = '', 19
+		assert(empty .. num == '19' and num .. empty == '19')
+		local p, q = 'prefix', 'suffix'
+		assert(p .. empty .. q == 'prefixsuffix')
+		assert(empty .. num .. empty == '19')
+		local obj = setmetatable({}, {__concat = function(x, y)
+		  assert(type(x) == 'number' and type(y) == 'table')
+		  coroutine.yield('in concat')
+		  collectgarbage('collect')
+		  return 'metamethod result'
+		end})
+		local co = coroutine.create(function() local n = 14; return n .. obj end)
+		local ok, value = coroutine.resume(co)
+		assert(ok and value == 'in concat')
+		local done, result = coroutine.resume(co)
+		assert(done and result == 'metamethod result')
+		local chain = setmetatable({}, {__concat = function(x, y)
+		  assert(type(x) == 'table' and y == 'prefixsuffix')
+		  coroutine.yield('in chain')
+		  collectgarbage('collect')
+		  return 'chain result'
+		end})
+		local chainco = coroutine.create(function() return chain .. p .. q end)
+		local ok2, value2 = coroutine.resume(chainco)
+		assert(ok2 and value2 == 'in chain')
+		local done2, result2 = coroutine.resume(chainco)
+		assert(done2 and result2 == 'chain result')
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
 // Variable-key reads cover array and short-string hits, integer-hash and
 // generic keys, and misses whose __index yields and moves the stacks.
 @(test)

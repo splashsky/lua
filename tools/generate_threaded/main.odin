@@ -114,7 +114,7 @@ emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	noinline := ""
 	if name == "vm_thread_enter" || name == "vm_thread_trace" || name == "vm_thread_poll" ||
 	   name == "vm_thread_RETURN0_slow" || name == "vm_thread_RETURN1_slow" ||
-	   name == "vm_thread_gettable_miss" || name == "vm_thread_gettable_other" {
+	   name == "vm_thread_gettable_miss" || name == "vm_thread_gettable_other" || name == "vm_thread_concat_meta_op" {
 		noinline = "#force_no_inline "
 	}
 	fmt.sbprintf(b, "\t%s :: %sproc \"preserve/none\" %s {{\n", name, noinline, SIG)
@@ -152,13 +152,20 @@ rewrite_returns :: proc(s: string, count: ^int) -> string {
 	return strings.to_string(b)
 }
 
-generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src: string) -> string {
+generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src, string_src, mem_src, gc_run_src: string) -> string {
 	review(between(src, "vm_finishget :: proc", "// The VM's table read"), "cff1bbd520882786832a21ed0384f86465f24b06c3359529b1c33691aaac40cf", "vm_finishget")
 	review(between(src, "vm_gettable :: proc(", "\n// OP_GETI"), "ec9fd4cce26c455e29ebb7114d3d5d3afb0778e5210a77e0cebde1f4ac98b628", "vm_gettable")
 	review(between(src, "vm_settable :: proc(", "// OP_SETI"), "a1d4edb3b18fe00ac7cdd73b9d337146a3fd483f85f51fe791975d69cf929b77", "vm_settable")
 	review(between(src, "vm_objlen :: proc", "// Convert a number"), "6dce8953407021af089dcb4488b6b4405f3188d3adaef914be3d5623322f4a5f", "vm_objlen")
+	review(between(src, "object_tostring :: proc", "// ---------------------------------------------------------------------------\n// Closures"), "02bc30ebd9b6ec705ede7d28d63829ed0df6563821592934cb8ce452d774de3c", "concatenation helpers")
+	review(between(string_src, "growstrtab :: proc", "// Create a string from an Odin string value."), "edf12cbe60c3a58895cf9f46c0fc2cb894d1fb258a2ed1a6faa1d7201f419dc2", "string creation")
+	review(between(gc_src, "gc_newobj :: proc", "// Move a freshly created object off the sweep list"), "cb4e6f2110cbb44a5bf484c56ad602a935ad353cdfe871aaae4a05ae9273d5e1", "gc_newobj")
+	review(between(mem_src, "raw_realloc :: proc", "// Free a block of"), "b39bc47f29fefdc9a0dd6bbeef573fe153373e17c463c526111d119ecc89cc66", "raw_realloc")
+	review(between(mem_src, "state_realloc :: proc", "// Free a block of `osize`"), "c8421fdc396a77286d5d8ad2b4df710279cbf7c8daf5fef99cef13aaf6dcc6ab", "state_realloc")
+	review(between(gc_run_src, "gc_checkGC :: proc", "// ---------------------------------------------------------------------------\n// Full collections"), "23d906ad3f9ccd8c4387aa797a268eaf387c4bcd959f821bfa186cece736f2f9", "gc_checkGC")
 	review(between(src, "vm_arith :: #force_inline proc", "// ---------------------------------------------------------------------------\n// The interpreter loop"), "8493f193af8288550b22240f2509f0cf3d7a5b866811e8cbf25ebc489a6a26b3", "vm_arith")
 	review(between(tm_src, "tm_gettmbyobj :: proc", "// The type name"), "b9d33e4481e049c8858bc8a68c5e0edf619dd19e5d4d0abc9b0fda806cfeeded", "tm_gettmbyobj")
+	review(between(tm_src, "tm_tryconcatTM :: proc", "// An ordering metamethod"), "6f33172aa69a529399b2a5d529dedd32227910aa1816d559ebd6b7daed289d71", "tm_tryconcatTM")
 	review(between(table_src, "table_get ::", "// Odin does not reliably inline"), "86124ae5d3c25a8ec0c1fc4bcdfa3b576de9b8401b7597f3693f94230ddaab04", "table_get")
 	review(between(table_src, "table_fastgeti :: #force_inline proc", "table_getshortstr :: proc"), "9e2ed5c5700ae19c8185bcfb1f6f1e62ede27e1ed89e1c574532ba0eb26d448b", "table_fastgeti")
 	review(between(table_src, "table_fastget ::", "// ---------------------------------------------------------------------------\n// Insertion into the hash part"), "8490a704b65daa82efe7a00322f7c5bff9188b22a50549d5f79ac50d2ae846c0", "table_fastget")
@@ -233,6 +240,8 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src: 
 			review(dedent(bodies[i]), "39e424fc0fd75088480a9c666127dbe3c61276c95fd545dfaa3fc87ad7f390ee", name)
 		case "SETTABLE":
 			review(dedent(bodies[i]), "e0f68192d60522d4f6fec4cef9ed4ef830f01d593f34ff16e3486ea754471c4f", name)
+		case "CONCAT":
+			review(dedent(bodies[i]), "77a16174a48fbd411dcdc831220bf7e79b3c1bf6a6aa6215f52935f4d1882155", name)
 		case "SELF":
 			review(dedent(bodies[i]), "cd52f22d19525c1dac09131a29cb8f0f1af9627a36336f2fd0fe7fbc8ed61895", name)
 		case "CALL":
@@ -294,6 +303,15 @@ if !vm_thread_tryget(rb, rc, &regs[getarg_A(i)].val) {
 	trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra, ctx)
 }
 `, dispatch), true)
+	emit_proc(&b, "vm_thread_concat_meta_op", fmt.tprintf("%s\n%s", `ra := base + getarg_A(i)
+L.top = ra + 2
+L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
+tm_tryconcatTM(L)
+L.top -= 1
+L.top = ra + 1
+gc_checkGC(L)
+trap = L.frames[ci_idx].u.l.trap
+`, dispatch))
 	transitions, returns := 0, 0
 	for name, i in names {
 		body := bodies[i]
@@ -358,6 +376,19 @@ if is_string(rb) {
 }
 trap = L.frames[ci_idx].u.l.trap
 `
+		}
+		if name == "CONCAT" {
+			body = replace_exact(body, "vm_concat(L, n)", "vm_thread_concat_run(L, n, ctx)")
+			body = replace_exact(body, "gc_checkGC(L)", "if L.g.gc_debt <= 0 {vm_thread_concat_gc(L, ctx)}")
+			body = fmt.tprintf("%s%s", `if getarg_B(i) == 2 {
+	a := getarg_A(i)
+	left := &regs[a].val
+	right := &regs[a + 1].val
+	if !(is_string(left) || is_number(left)) || !(is_string(right) || is_number(right)) {
+		return #must_tail vm_thread_concat_meta_op(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+}
+`, body)
 		}
 		// Fetch the integer loop's next instruction before the register updates.
 		// The running activation's code is immutable; a poll or trace discards
@@ -458,7 +489,7 @@ return #must_tail vm_thread_enter(%s)
 `, body, ARGS)
 		}
 		if !terminal {body = fmt.tprintf("%s%s", body, dispatch)}
-		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "SETTABLE" || name == "SELF" || name == "CALL" || name == "LEN" || name == "MODK" || name == "IDIVK")
+		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "SETTABLE" || name == "SELF" || name == "CALL" || name == "LEN" || name == "CONCAT" || name == "MODK" || name == "IDIVK")
 	}
 	if transitions != 6 || returns != 4 {fail(fmt.tprintf("unexpected frame transitions: %d, returns: %d", transitions, returns))}
 	emit_proc(&b, "vm_thread_invalid", fmt.tprintf("%s\n%s", dedent(invalid), dispatch))
@@ -482,6 +513,9 @@ main :: proc() {
 		read_text(fmt.tprintf("%s/src/kernel/tm.odin", root)),
 		read_text(fmt.tprintf("%s/src/kernel/table.odin", root)),
 		read_text(fmt.tprintf("%s/src/kernel/gc.odin", root)),
+		read_text(fmt.tprintf("%s/src/kernel/string.odin", root)),
+		read_text(fmt.tprintf("%s/src/kernel/mem.odin", root)),
+		read_text(fmt.tprintf("%s/src/kernel/gc_run.odin", root)),
 	)
 	result := fmt.tprintf("%s%s", src, generated)
 	if len(os.args) == 3 {

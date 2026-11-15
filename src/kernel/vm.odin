@@ -2206,6 +2206,35 @@ when VM_THREADED {
 		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
 	}
 
+	vm_thread_concat_meta_op :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		context = ctx^
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		ra := base + getarg_A(i)
+		L.top = ra + 2
+		L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
+		tm_tryconcatTM(L)
+		L.top -= 1
+		L.top = ra + 1
+		gc_checkGC(L)
+		trap = L.frames[ci_idx].u.l.trap
+
+		if trap != 0 {
+			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		next_i := pc[0]
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}
+
 	vm_thread_MOVE :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
 		context = ctx^
 		pc := pc_arg
@@ -3641,7 +3670,6 @@ when VM_THREADED {
 	}
 
 	vm_thread_CONCAT :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
-		context = ctx^
 		pc := pc_arg
 		regs := regs_arg
 		cl := cl_arg
@@ -3652,14 +3680,22 @@ when VM_THREADED {
 		trap := trap_arg
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
-		ra := base + getarg_A(i)
-		n := getarg_B(i)
-		L.top = ra + n // mark the end of the operand run
-		L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
-		vm_concat(L, n)
-		L.top = ra + 1 // result at ra; anchor it for the GC
-		gc_checkGC(L)
-		trap = L.frames[ci_idx].u.l.trap
+		if getarg_B(i) == 2 {
+			a := getarg_A(i)
+			left := &regs[a].val
+			right := &regs[a + 1].val
+			if !(is_string(left) || is_number(left)) || !(is_string(right) || is_number(right)) {
+				return #must_tail vm_thread_concat_meta_op(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+			}
+		}
+						ra := base + getarg_A(i)
+						n := getarg_B(i)
+						L.top = ra + n // mark the end of the operand run
+						L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
+						vm_thread_concat_run(L, n, ctx)
+						L.top = ra + 1 // result at ra; anchor it for the GC
+						if L.g.gc_debt <= 0 {vm_thread_concat_gc(L, ctx)}
+						trap = L.frames[ci_idx].u.l.trap
 
 
 		if trap != 0 {
