@@ -2381,7 +2381,7 @@ when VM_THREADED {
 		trap := trap_arg
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
-		set_obj(&regs[getarg_A(i)].val, upval_value(vm_upvals(regs)[getarg_B(i)]))
+		set_obj(&regs[getarg_A(i)].val, upval_value(closure_upvals(cl)[getarg_B(i)]))
 
 
 		if trap != 0 {
@@ -2405,7 +2405,7 @@ when VM_THREADED {
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
 		ra := getarg_A(i)
-		uv := vm_upvals(regs)[getarg_B(i)]
+		uv := closure_upvals(cl)[getarg_B(i)]
 		rav := &regs[ra].val
 		set_obj(upval_value(uv), rav)
 		if is_collectable(rav) {
@@ -2433,7 +2433,7 @@ when VM_THREADED {
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
 		ra := base + getarg_A(i)
-		upval := upval_value(vm_upvals(regs)[getarg_B(i)])
+		upval := upval_value(closure_upvals(cl)[getarg_B(i)])
 		rc := &k[getarg_C(i)]
 		when VM_THREADED {
 			if !vm_thread_tryget(upval, rc, stack_value(L, ra)) {
@@ -2560,7 +2560,7 @@ when VM_THREADED {
 		trap := trap_arg
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
-		upval := upval_value(vm_upvals(regs)[getarg_A(i)])
+		upval := upval_value(closure_upvals(cl)[getarg_A(i)])
 		rb := &k[getarg_B(i)]
 		rc := vm_rkc(L, base, k, i)
 		vm_settable(L, ci_idx, vm_pc_index(pc, code), upval, rb, rc)

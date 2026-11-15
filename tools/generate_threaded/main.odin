@@ -212,8 +212,14 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src: string) 
 	}
 	for name, i in names {
 		switch name {
+		case "GETUPVAL":
+			review(dedent(bodies[i]), "1399351ca0f3cfb5944946ee808d6f46a52e6e6fa120d28c9f7986ec600c467e", name)
+		case "SETUPVAL":
+			review(dedent(bodies[i]), "d8aabd0aa23242e61c456baa9df849155350805909c659141b91f482c0d7c764", name)
 		case "GETTABUP":
 			review(dedent(bodies[i]), "f138ebbf35d575849526c5754224da633e610e4c28a60c07d87c43ecba0673de", name)
+		case "SETTABUP":
+			review(dedent(bodies[i]), "7eb8ea70cc4784d8da02246440e789cbc8583026e45ed7d6cf5fd7c58250f913", name)
 		case "GETFIELD":
 			review(dedent(bodies[i]), "cdf4b1f6108a044be29932cc666f802598309aaa05ba8ec5a4a788217309bc9c", name)
 		case "GETTABLE":
@@ -270,6 +276,12 @@ regs = ([^]StackValue)(&L.stack[base])`, dispatch))
 	transitions, returns := 0, 0
 	for name, i in names {
 		body := bodies[i]
+		// The current closure travels with the threaded activation and is the
+		// same non-moving object held in the function slot below regs. Avoid
+		// reloading that slot in upvalue handlers; switch keeps vm_upvals.
+		if name == "GETUPVAL" || name == "SETUPVAL" || name == "GETTABUP" || name == "SETTABUP" {
+			body = replace_exact(body, "vm_upvals(regs)", "closure_upvals(cl)")
+		}
 		if name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "SELF" {
 			body = replace_exact(body, "thread_ctx := context", "_ = ctx")
 			body = replace_exact(body, "ra, &thread_ctx)", "ra, ctx)")
