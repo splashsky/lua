@@ -264,30 +264,77 @@ str_format_numbers :: proc(t: ^testing.T) {
 		"assert(string.format('%c%c', 72, 105) == 'Hi')\n" +
 		"assert(string.format('%.2f', 3.14159) == '3.14')\n" +
 		"assert(string.format('%g', 0.5) == '0.5')\n" +
-		// Reference Lua's bare hexadecimal floats use the shortest exact
-		// mantissa, normalize subnormals, and uppercase the whole spelling for %A.
+		"assert(string.format('%#g', 0.1) == '0.100000')\n" +
+		"assert(string.format('%#.3g', 0.001) == '0.00100')\n" +
+		// The bare form uses the shortest exact hexadecimal mantissa.
 		"assert(string.format('%a', 1.5) == '0x1.8p+0')\n" +
 		"assert(string.format('%a', 1.0) == '0x1p+0')\n" +
 		"assert(string.format('%a', 0.0) == '0x0p+0')\n" +
 		"assert(string.format('%a', -0.0) == '-0x0p+0')\n" +
-		"assert(string.format('%a', 2^-1074) == '0x1p-1074')\n" +
 		"assert(string.format('%a', 2^1023) == '0x1p+1023')\n" +
 		"assert(string.format('%a', 0.1) == '0x1.999999999999ap-4')\n" +
 		"assert(string.format('%A', 1.5) == '0X1.8P+0')\n" +
 		"assert(string.format('%A', 1/0) == 'INF')\n" +
 		"assert(string.format('%a', -1/0) == '-inf')\n" +
 		"assert(string.format('%A', -(0/0)) == 'NAN')\n" +
-		// `%a`/`%A` modifiers are intentionally unavailable in PUC Lua.
-		"local expected = \"modifiers for format '%a'/'%A' not implemented\"\n" +
-		"for _, f in ipairs{'%5.2a', '%-10a', '%#a', '%5.2A', '%-10A', '%#A'} do\n" +
-		"  local ok, err = pcall(string.format, f, 1.5)\n" +
-		"  assert(not ok and err:sub(-#expected) == expected)\n" +
-		"end\n" +
 		"assert(string.format('%d and %s', 1, 'two') == '1 and two')\n" +
 		// %% is a literal percent
 		"assert(string.format('100%%') == '100%')\n" +
 		"return 'ok'"
 	testing.expect(t, str_eval(t, L, src) == "ok", "numeric/format specifiers")
+}
+
+@(test)
+str_format_platform_numbers :: proc(t: ^testing.T) {
+	L := str_state()
+	defer kernel.close_state(L)
+	when ODIN_OS == .Linux {
+		src := `
+			local f = string.format
+			local negnan = string.unpack('d', string.pack('I8', 0xfff8000000000000))
+			local posnan = string.unpack('d', string.pack('I8', 0x7ff8000000000000))
+			assert(tostring(negnan) == '-nan' and '' .. negnan == '-nan')
+			assert(f('%+10G', negnan) == '      -NAN')
+			assert(f('%+010g', posnan) == '      +nan')
+			assert(f('%#.0e', 1/0) == 'inf')
+			assert(f('%#.0f', -1/0) == '-inf')
+			assert(f('%#.0e', posnan) == 'nan')
+			assert(f('%a', 2^-1074) == '0x0.0000000000001p-1022')
+			assert(f('%q', 2^-1074) == '0x0.0000000000001p-1022')
+			assert(f('%.3a', 1) == '0x1.000p+0')
+			assert(f('%#a', 1) == '0x1.p+0')
+			assert(f('%+020.1A', 1.5) == '+0X000000000001.8P+0')
+			assert(f('%.0a', 1.5) == '0x2p+0')
+			assert(f('%.0a', 1.25) == '0x1p+0')
+			assert(f('%#g', 0.1) == '0.100000')
+			assert(f('%#.3g', 0.001) == '0.00100')
+			assert(f('%#.3g', 0) == '0.00')
+			return 'ok'
+		`
+		testing.expect(t, str_eval(t, L, src) == "ok", "Linux libc number formatting")
+	} else when ODIN_OS == .Windows || ODIN_OS == .Freestanding {
+		src := `
+			assert(string.format('%a', 2^-1074) == '0x1p-1074')
+			local expected = "modifiers for format '%a'/'%A' not implemented"
+			for _, f in ipairs{'%5.2a', '%-10a', '%#a', '%5.2A', '%-10A', '%#A'} do
+				local ok, err = pcall(string.format, f, 1.5)
+				assert(not ok and err:sub(-#expected) == expected)
+			end
+			return 'ok'
+		`
+		testing.expect(t, str_eval(t, L, src) == "ok", "Lua C89 hexadecimal fallback")
+	} else when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD {
+		// These expectations come from Apple/FreeBSD vfprintf and __hdtoa;
+		// they have not been checked by running a reference on those platforms.
+		src := `
+			local n = string.unpack('d', string.pack('I8', 0xfff8000000000000))
+			assert(tostring(n) == 'nan' and string.format('%+10G', n) == '       NAN')
+			assert(string.format('%a', 2^-1074) == '0x1p-1074')
+			assert(string.format('%.0a', 1.5) == '0x1p+1')
+			return 'ok'
+		`
+		testing.expect(t, str_eval(t, L, src) == "ok", "Apple/FreeBSD number formatting")
+	}
 }
 
 @(test)

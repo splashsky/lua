@@ -1359,7 +1359,12 @@ quotefloat :: proc(buff: [^]u8, n: kernel.Number) -> int {
 	} else if n != n {
 		return copy(buff[:MAX_ITEM], "(0/0)")
 	}
-	return kernel.number_to_hex_str(buff[:MAX_ITEM], n)
+	when ODIN_OS == .Windows || ODIN_OS == .Freestanding {
+		return kernel.number_to_hex_str(buff[:MAX_ITEM], n)
+	} else {
+		form := [3]u8{'%', 'a', 0}
+		return format_float(buff[:MAX_ITEM], form[:], n)
+	}
 }
 
 @(private = "file")
@@ -1479,6 +1484,26 @@ format_integer :: proc "contextless" (
 	form: []u8,
 	n: kernel.Integer,
 ) -> int {
+	// The common unmodified decimal form needs neither field assembly nor the
+	// general base/precision machinery. Keep MIN_INTEGER in unsigned space.
+	if (form[1] == 'd' || form[1] == 'i') && form[2] == 0 {
+		negative := n < 0
+		value := negative ? 0 - u64(n) : u64(n)
+		digits: [20]u8
+		pos := len(digits)
+		for {
+			pos -= 1
+			digits[pos] = '0' + u8(value % 10)
+			value /= 10
+			if value == 0 {break}
+		}
+		out := 0
+		if negative {
+			buf[0] = '-'
+			out = 1
+		}
+		return out + copy(buf[out:], digits[pos:])
+	}
 	o := parse_format_options(form)
 	base: u64 = 10
 	uppercase := false
@@ -1587,9 +1612,12 @@ alternate_g :: proc "contextless" (buf: []u8, n: int, precision: int) -> int {
 		if c == '.' {
 			dot_at = i
 		} else if is_digit_byte(c) {
-			digits += 1
+			// Leading zeroes, including the zero before the decimal point,
+			// do not count as significant digits. Zero itself counts once.
+			if digits != 0 || c != '0' {digits += 1}
 		}
 	}
+	if digits == 0 {digits = 1}
 	need := max(precision - digits, 0)
 	if dot_at < 0 {
 		copy(buf[exp_at + 1:], buf[exp_at:length])
@@ -1616,20 +1644,16 @@ uppercase_ascii :: proc "contextless" (buf: []u8) {
 	}
 }
 
-// Render the magnitude of a finite hexadecimal float in exactly the compact form
-// used by the reference's num2straux fallback. In particular, bare `%a` is not
-// the same thing as asking a C printf for thirteen hexadecimal fraction digits:
-// we deliberately remove trailing zero nibbles and omit the radix point when no
-// fraction remains. Keeping that rule here also makes `%a` agree with the exact
-// finite-number spelling already used by `%q`, without changing `%q` itself.
-//
-// Subnormals are normalized too, so the least one is `0x1p-1074`, while zero is
-// `0x0p+0`. The caller handles the sign and non-finite values.
+// Render the magnitude of a finite hexadecimal float. Bare %a removes trailing
+// zero nibbles. Linux/glibc retains the subnormal's -1022 exponent; Lua's C89
+// fallback and BSD hdtoa normalize it. Explicit precision rounds to nearest,
+// ties to even, before adding any requested zeroes. The caller handles the sign.
 @(private = "file")
 format_hex_float_magnitude :: proc "contextless" (
 	buf: []u8,
 	x: kernel.Number,
 	upper: bool,
+	o: Format_Options,
 ) -> int {
 	bits := transmute(u64)x
 	exp_field := int((bits >> 52) & 0x7ff)
@@ -1640,12 +1664,17 @@ format_hex_float_magnitude :: proc "contextless" (
 		if frac == 0 {
 			sig = 0
 		} else {
-			highest := 0
-			for v := frac; v > 1; v >>= 1 {
-				highest += 1
+			when ODIN_OS == .Linux {
+				exponent = -1022
+				sig = frac
+			} else {
+				highest := 0
+				for v := frac; v > 1; v >>= 1 {
+					highest += 1
+				}
+				exponent = highest - 1074
+				sig = frac << uint(52 - highest)
 			}
-			exponent = highest - 1074
-			sig = frac << uint(52 - highest)
 		}
 	} else {
 		exponent = exp_field - 1023
@@ -1653,10 +1682,38 @@ format_hex_float_magnitude :: proc "contextless" (
 	}
 
 	precision := 13
-	trim := sig
-	for precision > 0 && (trim & 15) == 0 {
-		trim >>= 4
-		precision -= 1
+	when ODIN_OS != .Windows && ODIN_OS != .Freestanding {
+		if o.has_precision {
+			precision = o.precision
+			if precision < 13 {
+				shift := uint(52 - 4 * precision)
+				truncated := sig >> shift
+				remainder := sig & ((u64(1) << shift) - 1)
+				half := u64(1) << (shift - 1)
+				if remainder > half || (remainder == half && truncated & 1 != 0) {
+					truncated += 1
+				}
+				sig = truncated << shift
+				when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD {
+					if sig == u64(2) << 52 {
+						sig >>= 1
+						exponent += 1
+					}
+				}
+			}
+		} else {
+			trim := sig
+			for precision > 0 && (trim & 15) == 0 {
+				trim >>= 4
+				precision -= 1
+			}
+		}
+	} else {
+		trim := sig
+		for precision > 0 && (trim & 15) == 0 {
+			trim >>= 4
+			precision -= 1
+		}
 	}
 
 	digits := upper ? "0123456789ABCDEF" : "0123456789abcdef"
@@ -1666,7 +1723,7 @@ format_hex_float_magnitude :: proc "contextless" (
 	out += 2
 	buf[out] = digits[int(sig >> 52)]
 	out += 1
-	if precision > 0 {
+	if precision > 0 || o.alternate {
 		buf[out] = '.'
 		out += 1
 	}
@@ -1711,7 +1768,8 @@ format_float :: proc "contextless" (
 	exp_field := (bits >> 52) & 0x7ff
 	frac := bits & 0x000f_ffff_ffff_ffff
 	special := exp_field == 0x7ff
-	special_radix_wart := special && o.alternate && o.has_precision &&
+	special_radix_wart := (ODIN_OS == .Windows || ODIN_OS == .Freestanding) &&
+	                     special && o.alternate && o.has_precision &&
 	                     o.precision == 0 &&
 	                     (o.spec == 'f' || o.spec == 'F' ||
 	                      o.spec == 'e' || o.spec == 'E')
@@ -1722,7 +1780,16 @@ format_float :: proc "contextless" (
 		if frac == 0 {
 			body_len = copy(body[:], "inf")
 		} else {
-			body_len = copy(body[:], negative ? "nan(ind)" : "nan")
+			when ODIN_OS == .Windows || ODIN_OS == .Freestanding {
+				body_len = copy(body[:], negative ? "nan(ind)" : "nan")
+			} else {
+				body_len = copy(body[:], "nan")
+				when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .NetBSD {
+					negative = false
+					o.plus = false
+					o.space = false
+				}
+			}
 		}
 		if o.spec == 'F' || o.spec == 'E' || o.spec == 'G' || o.spec == 'A' {
 			uppercase_ascii(body[:body_len])
@@ -1740,6 +1807,7 @@ format_float :: proc "contextless" (
 			body[:],
 			x,
 			o.spec == 'A',
+			o,
 		)
 	} else {
 		precision := o.has_precision ? o.precision : 6
@@ -1788,7 +1856,7 @@ format_float :: proc "contextless" (
 		copy(body[:], body[2:body_len])
 		body_len -= 2
 	}
-	// MSVC pads inf/nan with spaces even when the `0` flag is present.
+	// Non-finites use spaces even with `0`, except for the UCRT radix wart.
 	return assemble_field(
 		buf,
 		o,
@@ -1893,14 +1961,11 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 			nb = format_integer(buff[:maxitem], form[:], n)
 		case 'a', 'A':
 			checkformat(L, form[:], FMTFLAGS_F, true)
-			// PUC Lua's lua_number2strx accepts only the literal forms `%a` and
-			// `%A`: after validation, anything between '%' and the conversion
-			// byte raises this exact error. It may look tempting to support normal
-			// printf flags, widths, or precisions here, but reference Lua
-			// deliberately rejects every such modifier, so byte-faithful behavior
-			// requires us to reject them too.
-			if form[1] != spec {
-				aux_error(L, "modifiers for format '%%a'/'%%A' not implemented")
+			when ODIN_OS == .Windows || ODIN_OS == .Freestanding {
+				// LUA_USE_C89 selects Lua's limited hexadecimal fallback.
+				if form[1] != spec {
+					aux_error(L, "modifiers for format '%%a'/'%%A' not implemented")
+				}
 			}
 			nb = format_float(buff[:maxitem], form[:], aux_checknumber(L, arg))
 		case 'f':

@@ -260,3 +260,13 @@ REFLUAC=/path/to/luac ./build/clitest.sh
 ```
 
 Both checks are skipped cleanly when no reference binary is provided.
+
+For the numeric formatting corpus, run both interpreters on the same host and
+compare their output. The corpus includes successful bytes and error text; it
+prints its case count on standard error. Use a C locale in both processes.
+
+```bash
+LC_ALL=C /path/to/reference/lua tests/format_diff.lua > /tmp/format-reference.txt
+LC_ALL=C build/out/lua tests/format_diff.lua > /tmp/format-odin.txt
+cmp /tmp/format-reference.txt /tmp/format-odin.txt
+```

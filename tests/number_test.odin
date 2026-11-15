@@ -19,6 +19,58 @@ num_str :: proc(v: ^kernel.TValue, buf: []byte) -> string {
 	return string(buf[:n])
 }
 
+@(test)
+tostring_nan_platform :: proc(t: ^testing.T) {
+	buf: [kernel.N2S_BUFF_SZ]byte
+	v: kernel.TValue
+	kernel.set_float(&v, transmute(f64)u64(0xfff8_0000_0000_0000))
+	when ODIN_OS == .Windows || ODIN_OS == .Freestanding {
+		testing.expect_value(t, num_str(&v, buf[:]), "-nan(ind)")
+	} else when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .NetBSD {
+		testing.expect_value(t, num_str(&v, buf[:]), "nan")
+	} else {
+		testing.expect_value(t, num_str(&v, buf[:]), "-nan")
+	}
+}
+
+Format_Fail_Allocator :: struct {
+	count: Counting_Allocator,
+	fail_size: uint,
+	enabled: bool,
+	failures: int,
+}
+
+format_fail_alloc :: proc "c" (ud: rawptr, ptr: rawptr, old, size: uint) -> rawptr {
+	a := (^Format_Fail_Allocator)(ud)
+	if a.enabled && ptr == nil && size == a.fail_size {
+		a.failures += 1
+		return nil
+	}
+	return counting_alloc(&a.count, ptr, old, size)
+}
+
+@(test)
+formatted_message_final_string_oom :: proc(t: ^testing.T) {
+	a: Format_Fail_Allocator
+	L := kernel.new_state(kernel.Allocator{alloc = format_fail_alloc, ud = &a})
+	testing.expect(t, L != nil)
+	if L == nil {return}
+	data: [kernel.BUFVFS * 3]u8
+	for &c in data {c = 'z'}
+	a.fail_size = kernel.sizelstring(uint(len(data)))
+	a.enabled = true
+	status := kernel.run_protected(L, proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
+		text := (^([kernel.BUFVFS * 3]u8))(ud)
+		kernel.object_pushfstring(L, "%s", string(text^[:]))
+		return .Ok
+	}, &data)
+	testing.expect_value(t, status, kernel.Thread_Status.Err_Mem)
+	testing.expect(t, a.failures > 0, "the final string allocation must have failed")
+	a.enabled = false
+	kernel.close_state(L)
+	testing.expect_value(t, a.count.outstanding, 0)
+}
+
 // ---- string -> number -------------------------------------------------------
 
 @(test)

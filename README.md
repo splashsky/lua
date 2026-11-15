@@ -165,6 +165,18 @@ Kept deliberately small and always documented:
 - **OS error text** comes from Odin's `core:os`, so wording and capitalization
   can differ from the C runtime's `strerror` text while the Lua result shape
   remains `nil, message, code`.
+- **Number formatting uses a fixed C locale and platform rules, without libc.**
+  Linux follows glibc's signed NaNs, hexadecimal subnormals and `%a` modifiers.
+  Windows keeps the Lua C89 `%a` fallback and UCRT non-finite spellings; the
+  `%#g` leading-zero significant-digit bug is fixed on every target. Freestanding
+  uses the same fixed Windows-style rules. Apple and FreeBSD `vfprintf`/`__hdtoa`
+  source describes unsigned NaNs and normalized hexadecimal subnormals; NetBSD
+  suppresses NaN signs too, while OpenBSD retains them. Those BSD/macOS paths are
+  based on source reading, not runtime validation, and other libc details may
+  differ. Linux builds against a non-glibc libc still use the glibc rules. The
+  relevant source paths are [UCRT `cvt.cpp`](https://github.com/huangqinjin/ucrt/blob/master/convert/cvt.cpp),
+  [FreeBSD `vfprintf.c`](https://github.com/freebsd/freebsd-src/blob/main/lib/libc/stdio/vfprintf.c)
+  and [Apple `vfprintf.c`](https://github.com/apple-oss-distributions/Libc/blob/main/stdio/FreeBSD/vfprintf.c).
 - **Local time:** Windows uses the configured OS time zone and its DST
   transition rules. Hosted POSIX targets read `TZ` (an absolute or
   `:`-prefixed TZif path, a zone name under `TZDIR` or the usual zoneinfo
@@ -186,7 +198,7 @@ Kept deliberately small and always documented:
   worst case of 1 ulp. Platform libm implementations differ from each other by
   about as much, and the PUC-Rio `math.lua` suite passes either way; the numbers
   that Lua programs actually round-trip -- `tostring`, `%q`, `string.format` --
-  are byte-identical to reference.
+  follow the platform formatting rules described above.
 - **`io.popen` is available on Windows and Linux without a C runtime.** Windows
   uses anonymous KERNEL32 pipes and `cmd.exe /c`; Linux uses syscall-backed
   pipes and `/bin/sh -c`. Other hosted targets retain Lua's explicit

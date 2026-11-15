@@ -1523,9 +1523,15 @@ float_to_str :: proc "contextless" (buf: []byte, x: Number) -> int {
 		if frac == 0 {
 			return copy(buf, bits >> 63 != 0 ? "-inf" : "inf")
 		}
-		// MSVC's `%g`, used by the Windows reference build, marks a negative
-		// indefinite NaN this way. Positive NaNs are simply "nan".
-		return copy(buf, bits >> 63 != 0 ? "-nan(ind)" : "nan")
+		when ODIN_OS == .Windows || ODIN_OS == .Freestanding {
+			// The Windows reference uses UCRT's negative indefinite spelling.
+			return copy(buf, bits >> 63 != 0 ? "-nan(ind)" : "nan")
+		} else when ODIN_OS == .Darwin || ODIN_OS == .FreeBSD || ODIN_OS == .NetBSD {
+			// Apple, FreeBSD and NetBSD vfprintf suppress the sign for NaNs.
+			return copy(buf, "nan")
+		} else {
+			return copy(buf, bits >> 63 != 0 ? "-nan" : "nan")
+		}
 	}
 
 	length := format_g(buf, x, 15)
@@ -3055,6 +3061,9 @@ buff_push :: proc(L: ^State, ud: rawptr) -> Thread_Status {
 		buff_add(buff, ([^]u8)(raw_data(dots)), 3)
 	}
 	ts := string_newlstr(L, buff.b, buff.blen)
+	if ts == nil {
+		return throw(L, .Err_Mem)
+	}
 	set_string(stack_value(L, L.top), ts)
 	L.top += 1
 	return .Ok
