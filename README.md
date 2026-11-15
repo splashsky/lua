@@ -53,7 +53,9 @@ docs/       Architecture and design notes.
 ```
 
 For *why* the kernel is a single package and how error handling / coroutines work
-without `longjmp`, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+without `longjmp`, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Planned
+work, mostly performance, and the measurements behind it are in
+[docs/FUTURE_WORK.md](docs/FUTURE_WORK.md).
 
 ## Building & testing
 

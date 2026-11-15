@@ -1,5 +1,13 @@
 # Threaded VM measurements
 
+> **Status (November 2026):** the threaded interpreter is merged into `master`,
+> still off by default. The tables and conclusions below predate the allocation
+> pass (1055a5c, 2dc564b) and the call pass (68f45c9, 3e82229). The allocation
+> pass removed most of the closure and string-building cost from both
+> interpreters, and the call pass has not yet been ported to the threaded call
+> path. The current blockers and the remaining work are in
+> [docs/FUTURE_WORK.md](../docs/FUTURE_WORK.md).
+
 The experimental interpreter is broadly faster, but **is not ready to be the
 default**. The general integer-loop back edge improved, including on an empty
 loop, without an empty-body specialization. String construction remains slower;

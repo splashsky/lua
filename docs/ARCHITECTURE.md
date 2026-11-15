@@ -305,7 +305,8 @@ of `vm.odin` also avoids a measured switch-VM code-placement regression. These
 specializations duplicate parts of the shared helpers and must be reviewed when
 those helpers change. Both modes use the same tests, including forced stack and
 frame relocation. Results and limitations are recorded in
-[bench/THREADED_VM.md](../bench/THREADED_VM.md).
+[bench/THREADED_VM.md](../bench/THREADED_VM.md); what remains before it can become
+the default is listed in [FUTURE_WORK.md](FUTURE_WORK.md).
 
 ## Decision 3 — persistent indices, temporary VM pointers
 
