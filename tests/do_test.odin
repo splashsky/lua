@@ -673,3 +673,45 @@ assert(coroutine.status(co) == 'dead')
 		testing.expectf(t, false, "VM precall: %s", msg)
 	}
 }
+
+// RETURN0 and RETURN1 must trim or pad results identically with and without
+// return hooks. The hook can grow the frame stack, exercising re-entry after
+// relocation in stress mode.
+@(test)
+vm_return_fast_and_hook_paths :: proc(t: ^testing.T) {
+	L := dbg_state()
+	defer kernel.close_state(L)
+	src := `
+local function zero() end
+local function one() return 7 end
+local function check()
+  zero(); one()
+  local a,b,c = zero()
+  assert(a == nil and b == nil and c == nil)
+  a,b,c = one()
+  assert(a == 7 and b == nil and c == nil)
+  assert(select('#', zero()) == 0)
+  assert(select('#', one()) == 1)
+end
+check()
+local counts = { [zero] = 0, [one] = 0 }
+local function deep(n) if n > 0 then return 1 + deep(n-1) end return 0 end
+debug.sethook(function(event)
+  if event == 'return' then
+    local f = debug.getinfo(2, 'f').func
+    if counts[f] then
+      counts[f] = counts[f] + 1
+      assert(deep(30) == 30)
+    end
+  end
+end, 'r')
+check()
+debug.sethook()
+assert(counts[zero] == 3 and counts[one] == 3)
+`
+	status := dbg_run(L, src)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "VM return paths: %s", msg)
+	}
+}

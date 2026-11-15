@@ -4220,7 +4220,7 @@ when VM_THREADED {
 		return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 	}
 
-	vm_thread_RETURN0 :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+	vm_thread_RETURN0_slow :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
 		pc := pc_arg
 		regs := regs_arg
 		cl := cl_arg
@@ -4263,7 +4263,42 @@ when VM_THREADED {
 						return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 	}
 
-	vm_thread_RETURN1 :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+	vm_thread_RETURN0 :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		when ODIN_OS != .Freestanding {
+			if intrinsics.atomic_load(&async_hook_pending) != 0 {
+				return #must_tail vm_thread_RETURN0_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+			}
+		}
+		if L.hookmask != 0 {
+			return #must_tail vm_thread_RETURN0_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		callstatus := L.frames[ci_idx].callstatus
+		nres := get_nresults(callstatus)
+		L.ci = ci_idx - 1
+		L.top = base - 1
+		for nres > 0 {
+			set_nil(stack_value(L, L.top))
+			L.top += 1
+			nres -= 1
+		}
+		if (callstatus & CIST_FRESH) != 0 {
+			return 0
+		}
+		ci_idx -= 1
+		return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+
+	vm_thread_RETURN1_slow :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
 		pc := pc_arg
 		regs := regs_arg
 		cl := cl_arg
@@ -4309,6 +4344,46 @@ when VM_THREADED {
 						}
 						ci_idx -= 1
 						return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+
+	vm_thread_RETURN1 :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		when ODIN_OS != .Freestanding {
+			if intrinsics.atomic_load(&async_hook_pending) != 0 {
+				return #must_tail vm_thread_RETURN1_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+			}
+		}
+		if L.hookmask != 0 {
+			return #must_tail vm_thread_RETURN1_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		callstatus := L.frames[ci_idx].callstatus
+		nres := get_nresults(callstatus)
+		L.ci = ci_idx - 1
+		if nres == 0 {
+			L.top = base - 1
+		} else {
+			set_obj(&regs[-1].val, &regs[getarg_A(i)].val)
+			L.top = base
+			for nres > 1 {
+				set_nil(stack_value(L, L.top))
+				L.top += 1
+				nres -= 1
+			}
+		}
+		if (callstatus & CIST_FRESH) != 0 {
+			return 0
+		}
+		ci_idx -= 1
+		return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 	}
 
 	vm_thread_FORLOOP :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {

@@ -112,7 +112,7 @@ emit_indented :: proc(b: ^strings.Builder, s: string) {
 
 emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	noinline := ""
-	if name == "vm_thread_enter" || name == "vm_thread_trace" || name == "vm_thread_poll" {
+	if name == "vm_thread_enter" || name == "vm_thread_trace" || name == "vm_thread_poll" || name == "vm_thread_RETURN0_slow" || name == "vm_thread_RETURN1_slow" {
 		noinline = "#force_no_inline "
 	}
 	fmt.sbprintf(b, "\t%s :: %sproc \"preserve/none\" %s {{\n", name, noinline, SIG)
@@ -374,6 +374,52 @@ trap = L.frames[ci_idx].u.l.trap
 		}
 		terminal := strings.has_suffix(strings.trim_right_space(body), "return #must_tail vm_thread_enter(" + ARGS + ")")
 		body = fmt.tprintf("%s\n", dedent(body))
+		// Keep the hook and async-poll callouts out of the ordinary return
+		// handlers. Their complete switch-derived bodies remain on the slow
+		// path; the no-hook arms below must mirror those bodies exactly.
+		if name == "RETURN0" || name == "RETURN1" {
+			emit_proc(&b, fmt.tprintf("vm_thread_%s_slow", name), body, true)
+			prefix := fmt.tprintf(`when ODIN_OS != .Freestanding {{
+	if intrinsics.atomic_load(&async_hook_pending) != 0 {{
+		return #must_tail vm_thread_%s_slow(%s)
+	}}
+}}
+if L.hookmask != 0 {{
+	return #must_tail vm_thread_%s_slow(%s)
+}}
+callstatus := L.frames[ci_idx].callstatus
+nres := get_nresults(callstatus)
+L.ci = ci_idx - 1
+`, name, ARGS, name, ARGS)
+			if name == "RETURN0" {
+				body = fmt.tprintf("%s%s", prefix, `L.top = base - 1
+for nres > 0 {
+	set_nil(stack_value(L, L.top))
+	L.top += 1
+	nres -= 1
+}
+`)
+			} else {
+				body = fmt.tprintf("%s%s", prefix, `if nres == 0 {
+	L.top = base - 1
+} else {
+	set_obj(&regs[-1].val, &regs[getarg_A(i)].val)
+	L.top = base
+	for nres > 1 {
+		set_nil(stack_value(L, L.top))
+		L.top += 1
+		nres -= 1
+	}
+}
+`)
+			}
+			body = fmt.tprintf(`%sif (callstatus & CIST_FRESH) != 0 {{
+	return 0
+}}
+ci_idx -= 1
+return #must_tail vm_thread_enter(%s)
+`, body, ARGS)
+		}
 		if !terminal {body = fmt.tprintf("%s%s", body, dispatch)}
 		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "SETTABLE" || name == "SELF" || name == "CALL" || name == "LEN" || name == "MODK" || name == "IDIVK")
 	}
