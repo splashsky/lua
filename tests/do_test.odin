@@ -625,6 +625,17 @@ local d,e,f = native_closure(35)
 debug.sethook()
 assert(a == 31 and b == 32 and c == 33 and d == 36 and e == 37 and f == 38)
 assert(events == 'crcr')
+-- A return-only hook does not require the native call-hook fallback, but
+-- still has to observe the completed call before its results are moved.
+local returned = 0
+debug.sethook(function(event)
+  if event == 'return' and debug.getinfo(2, 'f').func == native_results then
+    returned = returned + 1
+  end
+end, 'r')
+a,b,c = native_results(37)
+debug.sethook()
+assert(returned == 1 and a == 38 and b == 39 and c == 40)
 local called = setmetatable({}, {__call = function(_, x) return native_results(x) end})
 a,b,c = called(40)
 assert(a == 41 and b == 42 and c == 43)

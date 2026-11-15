@@ -118,19 +118,19 @@ when VM_THREADED {
 	}
 
 	// The native frame and the zero/one-result return are the same as
-	// precallC/poscall. Hooks, growth, other result counts and to-be-closed
-	// values use the original helpers. Re-resolve the frame after the callback:
+	// precallC/poscall. Call hooks and growth use the original precall; return
+	// hooks, other result counts and to-be-closed values use do_poscall. Re-resolve
+	// the frame after the callback:
 	// it may have re-entered Lua and moved both the frame and value stacks.
 	vm_thread_native_try :: #force_inline proc "contextless" (L: ^State, func, nresults: int, f: C_Function, ctx: ^runtime.Context) -> int {
 		when !HARDSTACKTESTS {
 			next := L.ci + 1
-			if L.hookmask == 0 && L.stack_size - L.top > MINSTACK && next < L.frames_capacity {
+			if (L.hookmask & MASKCALL) == 0 && L.stack_size - L.top > MINSTACK && next < L.frames_capacity {
 				L.ci = next
 				ci := &L.frames[next]
 				ci.func = func
 				ci.callstatus = u32(nresults + 1) | CIST_C
 				ci.top = L.top + MINSTACK
-				ci.u2 = 0
 				n := int(f(L))
 				ci = &L.frames[next]
 				fwanted := ci.callstatus & (CIST_TBC | CIST_NRESULTS)
@@ -154,7 +154,7 @@ when VM_THREADED {
 		return vm_thread_precall_native(L, func, nresults, f, ctx)
 	}
 
-	// This is the non-allocating Lua-closure arm of do_precall. Growth,
+	// This is the non-allocating Lua-closure arm of do_precall_vm. Growth,
 	// __call, and all relocation-test calls use the original implementation.
 	vm_thread_precall :: #force_inline proc "contextless" (
 		L: ^State, func, nresults: int, ctx: ^runtime.Context,
@@ -167,20 +167,22 @@ when VM_THREADED {
 				fsize := int(p.maxstacksize)
 				next := L.ci + 1
 				if L.stack_size - L.top > fsize && next < L.frames_capacity {
-					narg := L.top - func - 1
 					L.ci = next
 					ci := &L.frames[next]
 					ci.func = func
 					ci.callstatus = u32(nresults + 1)
 					ci.top = func + 1 + fsize
-					ci.u2 = 0
 					ci.u.l.savedpc = 0
 					ci.u.l.nextraargs = 0
 					ci.u.l.trap = 0
-					for narg < int(p.numparams) {
-						set_nil(stack_value(L, L.top))
-						L.top += 1
-						narg += 1
+					top := L.top
+					end := func + 1 + int(p.numparams)
+					if top < end {
+						for top < end {
+							set_nil(stack_value(L, top))
+							top += 1
+						}
+						L.top = top
 					}
 					return next
 				}
