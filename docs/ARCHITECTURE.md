@@ -57,7 +57,7 @@ is base, coroutine, math, string, table, and utf8. Base omits its three hosted
 entries (`print`, `loadfile`, and `dofile`) while retaining in-memory `load`.
 
 The kernel itself never owns a heap. Hosted builds add `default_allocator` in a
-host-only source file backed by `core:os`; freestanding builds expose only the
+host-only source file; freestanding builds expose only the
 allocator-taking `new_state`. Firmware must provide that callback, its arena or
 heap policy, and any panic/reset behavior. The build also passes
 `-default-to-nil-allocator`, so an unintended Odin allocation cannot silently
@@ -281,6 +281,18 @@ abstraction** through which all kernel allocation flows. The kernel avoids stand
 containers that panic or allocate implicitly, so an allocation failure is always a
 value we can handle (`Out_Of_Memory`) rather than a crash. OOM is tested at allocation
 points, not hand-waved.
+
+On Linux, macOS and the BSDs the hosted default allocator goes directly through
+Odin's contextless C-heap `realloc`/`free` wrappers; Windows uses its process
+heap. These blocks are returned only through the same callback, not an Odin
+allocator. A failed resize leaves the old block intact for `state_realloc`'s
+emergency collection and retry; signed-size guards reject unrepresentable
+requests before reaching the heap. The 64-bit glibc, musl and macOS C heaps give
+16-byte alignment. BSD heaps need not do so for tiny allocations: FreeBSD's
+jemalloc may give an 8-aligned block for requests of at most 8 bytes. Kernel
+allocation types need at most 8-byte alignment. Typical 32-bit heaps provide at
+least 8 bytes, but the kernel's layout assertions currently require 64-bit
+targets. Freestanding builds use only the embedder's allocator.
 
 Native library callbacks retain their C ABI. A hot callback may omit its usual
 `runtime.default_context()` only when its fast path calls exclusively

@@ -10,12 +10,6 @@ package kernel
 // Because our value and frame stacks are growable arrays, this is also where the
 // grow/shrink helpers live -- and why persistent state stores indices, not
 // pointers, into anything that can move (see docs/ARCHITECTURE.md, Decision 3).
-//
-// Phase 1 scope: the fallible allocator abstraction plus the pure size/growth
-// arithmetic (all testable without a live `State`). The two pieces that *need* a
-// running interpreter -- triggering an emergency GC on failure and raising the
-// ERRMEM error -- are deliberately left as TODOs for later phases; see the notes
-// on `handle_alloc_failure` below.
 
 import "core:mem"
 
@@ -52,9 +46,8 @@ Allocator :: struct {
 // ---------------------------------------------------------------------------
 
 // Every kernel allocation ultimately lands in one of these three helpers. They
-// return a raw pointer (nil on failure) rather than raising an error, because in
-// Phase 1 there is no `State` to raise *through* yet. Once the interpreter and GC
-// exist, the fail path routes through `handle_alloc_failure` below.
+// return a raw pointer (nil on failure) rather than raising an error. State-aware
+// callers can retry with an emergency collection as described below.
 
 // Allocate `size` bytes for a new object of the given type `tag`. Following the
 // review guidance, a zero-byte request short-circuits to nil without bothering
@@ -163,10 +156,8 @@ grow_size :: proc "contextless" (size: uint, needed: uint, limit: uint) -> (new_
 // `nsize - osize` delta on every successful (re)allocation and credited back on
 // every free. `gettotalbytes` then reports the real live-byte count.
 //
-// The one piece still deferred is the emergency-collect-then-retry dance on
-// failure: that needs a running collector, which is Phase 7. Until then a failed
-// allocation simply returns nil (and, per reference Lua, leaves the debt
-// untouched so accounting stays exact).
+// A failed allocation can trigger an emergency collection and retry. A final
+// failure leaves the debt untouched so accounting stays exact.
 
 // Reference Lua's `gettotalbytes`: bytes actually live right now. `GCtotalbytes`
 // carries "allocated + debt", so subtracting the debt yields the true figure.

@@ -13,8 +13,7 @@ package kernel
 //
 // This file is Windows-only on purpose. Freestanding builds never see core:os
 // or core:sys/windows and continue to use only the allocator supplied by their
-// embedder. Other hosted systems retain the portable implementation in
-// mem_hosted.odin.
+// embedder. Linux, macOS and the BSDs use the C heap in mem_hosted.odin.
 
 import win32 "core:sys/windows"
 
@@ -55,7 +54,7 @@ default_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize: uint, nsize: uint) ->
 }
 
 // A ready-made allocator for hosted programs. Freestanding embedders must pass
-// their own callback and userdata directly to lua.new_state instead.
+// their own callback and userdata directly to new_state instead.
 default_allocator :: proc "contextless" () -> Allocator {
 	return Allocator{alloc = default_alloc, ud = nil}
 }
