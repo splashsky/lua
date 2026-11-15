@@ -277,7 +277,10 @@ the same non-moving object held in the function slot below the register base.
 Variable-key table handlers address operands directly from that base, whose
 pointers are consumed before any callout; the slow read still receives a stack
 index for its result. Global, field and variable-key reads try the shared
-contextless table lookup before entering a no-inline miss path. Method lookup
+contextless table lookup before entering a no-inline miss path. Variable-key
+array and short-string hits stay in their handler; known empty slots and other
+key types tail-transition to separate cold handlers. A known miss goes straight
+to the existing finish path without repeating the lookup. Method lookup
 also handles a string whose `__index` is a table with a matching key; it keeps
 the saved PC and stack top updates made by the original non-table path.
 
@@ -291,6 +294,17 @@ unfinished pre-set passes its location to the original finish path. These hits
 cannot move the stack or change the trap. Misses receive the activation's
 original context and reload the trap after any callout. The generator guards
 the shared pre-set and barrier predicates as well as the opcode bodies.
+
+Threaded concatenation follows the same right-to-left folding, coercion and
+top/saved-PC protocol as the switch VM. Its contextless common path mirrors
+short-string interning and fresh string-object allocation: it calls the same
+C-ABI allocator, links the same GC object and updates debt by the same amount.
+It re-resolves stack slots after a numeric conversion that may have triggered
+an emergency collection. Allocation retries, intern-table growth, GC steps,
+errors and metamethod calls use the activation's original context. A
+two-operand non-coercible pair tail-transitions to a cold metamethod handler;
+the other cases use the contextless fold and its original-context callouts.
+The generator guards the mirrored concat, string, allocation and GC helpers.
 
 String lengths use a contextless handler but retain the switch VM's saved-PC
 and stack-top updates; other lengths use the ordinary helper with the original
