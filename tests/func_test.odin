@@ -25,6 +25,7 @@ api_closure_allocation :: proc(t: ^testing.T) {
 	base := count_allgc(L)
 	cl := kernel.func_newLclosure(L, 3)
 	testing.expect(t, cl != nil)
+	testing.expect_value(t, uintptr(kernel.closure_upvals(cl)), uintptr(cl) + size_of(kernel.LClosure))
 	testing.expect_value(t, cl.nupvalues, u8(3))
 	testing.expect(t, cl.tt == kernel.VLCL, "Lua closures carry the VLCL tag")
 	testing.expect_value(t, count_allgc(L), base + 1)
@@ -33,9 +34,22 @@ api_closure_allocation :: proc(t: ^testing.T) {
 	st := kernel.func_initupvals(L, cl)
 	testing.expect(t, st == .Ok)
 	for i in 0 ..< 3 {
-		testing.expect(t, cl.upvals[i] != nil, "every upvalue slot must be filled")
-		testing.expect(t, !cl.upvals[i].open, "initupvals creates closed upvalues")
+		testing.expect(t, kernel.closure_upvals(cl)[i] != nil, "every upvalue slot must be filled")
+		testing.expect(t, !kernel.closure_upvals(cl)[i].open, "initupvals creates closed upvalues")
 	}
+}
+
+@(test)
+closure_and_upvalue_layout :: proc(t: ^testing.T) {
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
+	testing.expect_value(t, size_of(kernel.UpVal), 48)
+	testing.expect_value(t, size_of(kernel.LClosure), 32)
+	before := kernel.gettotalbytes(L.g)
+	cl := kernel.func_newLclosure(L, 0)
+	testing.expect(t, cl != nil)
+	testing.expect_value(t, kernel.gettotalbytes(L.g) - before, kernel.L_Mem(kernel.size_lclosure(0)))
+	testing.expect_value(t, uintptr(kernel.closure_upvals(cl)), uintptr(cl) + size_of(kernel.LClosure))
 }
 
 // A C (native) closure captures values inline and reports its count. The captured
@@ -116,4 +130,27 @@ open_upvalues_share_and_close :: proc(t: ^testing.T) {
 
 	// The thread's open-upvalue list is now empty (both were at/above `slot`).
 	testing.expect(t, L.openupval == nil, "no open upvalues remain after closing")
+}
+
+// Open upvalues must resolve their saved index against the current stack, even
+// when stress mode forces the old backing block to be freed and poisoned.
+@(test)
+open_upvalue_survives_stack_relocation :: proc(t: ^testing.T) {
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
+	slot := L.top
+	kernel.set_int(kernel.stack_value(L, slot), 11)
+	L.top += 1
+	uv := kernel.func_findupval(L, slot)
+	old_stack := uintptr(L.stack)
+	testing.expect_value(t, kernel.realloc_stack(L, L.stack_size * 2, false), kernel.Thread_Status.Ok)
+	when kernel.HARDSTACKTESTS {
+		testing.expect(t, uintptr(L.stack) != old_stack)
+	}
+	testing.expect(t, kernel.upval_value(uv) == kernel.stack_value(L, slot))
+	kernel.set_int(kernel.stack_value(L, slot), 42)
+	testing.expect_value(t, kernel.int_value(kernel.upval_value(uv)), 42)
+	kernel.func_closeupval(L, slot)
+	testing.expect(t, !uv.open)
+	testing.expect_value(t, kernel.int_value(kernel.upval_value(uv)), 42)
 }

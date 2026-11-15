@@ -269,6 +269,30 @@ stack_move_probe :: proc "c" (Lp: rawptr) -> i32 {
 	return 1
 }
 
+// The VM resolves closure upvalues from its current register base. Exercise
+// both open and closed upvalues before and after a forced stack relocation.
+@(test)
+upvalue_access_survives_vm_stack_move :: proc(t: ^testing.T) {
+	sources := [2]string {
+		"local function outer(x) local function inner() x=x+1; " +
+		"if not probe() then return -1 end; x=x+1; return x end; " +
+		"local r=inner(); return r end; return outer(40)",
+		"local function make() local x=40; return function() x=x+1; " +
+		"if not probe() then return -1 end; x=x+1; return x end end; " +
+		"local f=make(); local r=f(); return r",
+	}
+	for src in sources {
+		L := api_new()
+		kernel.api_pushcfunction(L, stack_move_probe)
+		kernel.api_setglobal(L, "probe")
+		rd: Src_Reader
+		testing.expect_value(t, api_load(L, src, &rd), kernel.Thread_Status.Ok)
+		testing.expect_value(t, kernel.api_pcall(L, 0, 1, 0), kernel.Thread_Status.Ok)
+		testing.expect_value(t, kernel.api_tointeger(L, -1), 42)
+		kernel.close_state(L)
+	}
+}
+
 @(test)
 stack_move_arms_suspended_lua_frames :: proc(t: ^testing.T) {
 	L := api_new()

@@ -178,6 +178,19 @@ state_setdebt :: proc "contextless" (g: ^Global_State, debt: L_Mem) {
 	g.gc_debt = d
 }
 
+// Keep the emergency collection and retry out of the normal allocation path.
+// Reference `cantryagain` permits it only after state construction and outside
+// a collector step or other region that temporarily forbids emergency GC.
+@(private)
+state_tryagain :: #force_no_inline proc(L: ^State, block: rawptr, osize, nsize: uint) -> rawptr {
+	g := L.g
+	if completestate(g) && g.gcstopem == 0 {
+		gc_fullgc(L, true)
+		return raw_realloc(g.alloc, block, osize, nsize)
+	}
+	return nil
+}
+
 // Resize (or allocate, or free) a block on behalf of state `L`, keeping the GC
 // byte accounting exact -- reference Lua's `luaM_realloc_`. Passing `block == nil`
 // with `osize == 0` allocates; passing `nsize == 0` frees. On a first failure we
@@ -188,14 +201,7 @@ state_realloc :: proc(L: ^State, block: rawptr, osize: uint, nsize: uint) -> raw
 	g := L.g
 	newblock := raw_realloc(g.alloc, block, osize, nsize)
 	if newblock == nil && nsize > 0 {
-		// Emergency collection is only safe once the state is fully built and the
-		// collector isn't temporarily forbidding it (during a finalizer, or while
-		// already inside an emergency step). Reference Lua's `cantryagain`:
-		// `completestate(g) && !g->gcstopem`.
-		if completestate(g) && g.gcstopem == 0 {
-			gc_fullgc(L, true) // emergency: reclaim unreachable objects
-			newblock = raw_realloc(g.alloc, block, osize, nsize)
-		}
+		newblock = state_tryagain(L, block, osize, nsize)
 		if newblock == nil {
 			return nil // still no luck: do not update the debt on failure
 		}

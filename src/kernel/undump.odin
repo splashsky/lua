@@ -251,6 +251,9 @@ load_protos :: proc(S: ^LoadState, f: ^Proto) {
 	}
 	for i in 0 ..< n {
 		f.p[i] = func_newproto(S.L)
+		if f.p[i] == nil {
+			throw(S.L, .Err_Mem)
+		}
 		gc_barrier(S.L, obj2gco(f), obj2gco(f.p[i]))
 		load_function(S, f.p[i])
 	}
@@ -416,6 +419,9 @@ undump_chunk :: proc(L: ^State, z: ^Zio, name: string, fixed: bool) -> ^LClosure
 	S.offset = 1 // the first byte was already read by the parser
 	check_header(&S)
 	cl := func_newLclosure(L, int(load_byte(&S)))
+	if cl == nil {
+		throw(L, .Err_Mem)
+	}
 	set_gc(stack_value(L, L.top), obj2gco(cl)) // anchor the closure
 	inc_top(L)
 	S.h = table_new(L) // create the saved-string list
@@ -423,6 +429,9 @@ undump_chunk :: proc(L: ^State, z: ^Zio, name: string, fixed: bool) -> ^LClosure
 	set_gc(stack_value(L, L.top), obj2gco(S.h)) // anchor it too
 	inc_top(L)
 	cl.p = func_newproto(L)
+	if cl.p == nil {
+		throw(L, .Err_Mem)
+	}
 	gc_barrier(L, obj2gco(cl), obj2gco(cl.p))
 	load_function(&S, cl.p)
 	if int(cl.nupvalues) != cl.p.sizeupvalues {

@@ -137,6 +137,43 @@ gc_never_collects_fixed_strings :: proc(t: ^testing.T) {
 	testing.expect(t, again == fixed, "fixed metamethod name stays interned")
 }
 
+// Strings in weak tables are retained, but a string already marked this cycle
+// must not contribute its size to the collector's live-byte estimate again.
+@(test)
+gc_weak_string_marked_only_once :: proc(t: ^testing.T) {
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
+	s := kernel.string_new(L, "weak string accounting probe")
+	o := kernel.obj2gco(s)
+	L.g.gc_marked = 0
+	kernel.set2black(o)
+	testing.expect(t, !kernel.iscleared(L.g, o))
+	testing.expect_value(t, L.g.gc_marked, kernel.L_Mem(0))
+	kernel.makewhite(L.g, o)
+	testing.expect(t, !kernel.iscleared(L.g, o))
+	testing.expect_value(t, L.g.gc_marked, kernel.L_Mem(kernel.string_alloc_size(s)))
+	testing.expect(t, !kernel.iscleared(L.g, o))
+	testing.expect_value(t, L.g.gc_marked, kernel.L_Mem(kernel.string_alloc_size(s)))
+}
+
+// The collector's traversal budget counts live stack slots, not the backing
+// array's capacity. A thread without a stack has no traversal work.
+@(test)
+gc_thread_traversal_work_uses_live_top :: proc(t: ^testing.T) {
+	L := kernel.new_state(kernel.default_allocator())
+	defer kernel.close_state(L)
+	old_state := L.g.gcstate
+	L.g.gcstate = kernel.GCSpause
+	th: kernel.State
+	testing.expect_value(t, kernel.traverse_thread(L.g, &th), kernel.L_Mem(0))
+	stack: [8 + kernel.EXTRA_STACK]kernel.StackValue
+	th.stack = ([^]kernel.StackValue)(&stack[0])
+	th.stack_size = 8
+	th.top = 3
+	testing.expect_value(t, kernel.traverse_thread(L.g, &th), kernel.L_Mem(4))
+	L.g.gcstate = old_state
+}
+
 // An already negative debt plus the largest step must not wrap positive and
 // silently skip the collection. Inspect actual collector progress, not the
 // GCSTEP result alone (which only signals a completed cycle).

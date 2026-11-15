@@ -128,29 +128,29 @@ MAXUPVAL :: 255
 // the state explicitly instead: `open` says which case we're in, and an open
 // upvalue names its slot by `(thread, stk_index)`, resolved against the live
 // backing array only at the moment of access.
-// These three header fields stay inline so `open` can pack into the same tail
-// padding, just as it does after CommonHeader in reference C. Replacing them with
-// a tidier nested `GCObject` would silently make every upvalue 8 bytes larger.
+// The closed value and the open-list links are never live at the same time.
+// Keep the GC fields inline, and retain a full-width stack index for every
+// configured stack limit. Closing must unlink before overwriting the links.
 UpVal :: struct {
 	next:      ^GCObject,
 	tt:        u8,
 	marked:    u8,
 	open:      bool, // true while the captured slot is still on a stack
-	thread:    ^State, // (open only) the thread whose stack holds the slot
 	stk_index: int, // (open only) index of that slot
-	value:     TValue, // (closed only) the upvalue's own storage
-	// Open upvalues are threaded on their thread's `openupval` list, kept sorted
-	// by descending stack index. `open_prev` points at whatever link refers to us
-	// (either the previous node's `open_next` or the thread's list head) so we can
-	// splice ourselves out in O(1). Reference Lua's `u.open.next` / `previous`.
-	open_next: ^UpVal,
-	open_prev: ^^UpVal,
+	thread:    ^State, // (open only) the thread whose stack holds the slot
+	u:         struct #raw_union {
+		value: TValue, // closed upvalue's own storage
+		links: struct {
+			next: ^UpVal,
+			prev: ^^UpVal, // link that points to this upvalue
+		},
+	},
 }
 
 #assert(offset_of(UpVal, next) == 0)
 #assert(offset_of(UpVal, tt) == 8)
 #assert(offset_of(UpVal, marked) == 9)
-#assert(size_of(UpVal) == 64)
+#assert(size_of(UpVal) == 48)
 
 // Resolve an upvalue to the `TValue` it currently stands for -- reference Lua's
 // `uplevel`/`upisopen` pair collapsed into one accessor. Open upvalues forward to
@@ -161,7 +161,7 @@ upval_value :: #force_inline proc "contextless" (uv: ^UpVal) -> ^TValue {
 	if uv.open {
 		return &uv.thread.stack[uv.stk_index].val
 	}
-	return &uv.value
+	return &uv.u.value
 }
 
 // ---------------------------------------------------------------------------
@@ -205,14 +205,18 @@ LClosure :: struct {
 	nupvalues: u8, // number of upvalues (must equal p.sizeupvalues)
 	gclist:    ^GCObject, // GC gray-list thread
 	p:         ^Proto, // the shared prototype
-	upvals:    [^]^UpVal, // inline vector of shared upvalues
 }
 
 #assert(offset_of(LClosure, next) == 0)
 #assert(offset_of(LClosure, tt) == 8)
 #assert(offset_of(LClosure, marked) == 9)
-#assert(size_of(LClosure) == 40)
+#assert(size_of(LClosure) == 32)
 #assert(size_of(LClosure) % align_of(^UpVal) == 0)
+
+// The vector is part of the closure allocation, not a separately stored pointer.
+closure_upvals :: #force_inline proc "contextless" (cl: ^LClosure) -> [^]^UpVal {
+	return ([^]^UpVal)(uintptr(cl) + size_of(LClosure))
+}
 
 // Byte size of a C closure carrying `n` captured values -- reference Lua's
 // `sizeCclosure`. The struct header plus the inline value vector.
@@ -274,9 +278,9 @@ func_newLclosure :: proc(L: ^State, nupvals: int) -> ^LClosure {
 	c.p = nil
 	c.nupvalues = u8(nupvals)
 	c.gclist = nil
-	c.upvals = ([^]^UpVal)(uintptr(c) + size_of(LClosure))
+	upvals := closure_upvals(c)
 	for i in 0 ..< nupvals {
-		c.upvals[i] = nil
+		upvals[i] = nil
 	}
 	return c
 }
@@ -296,10 +300,8 @@ func_initupvals :: proc(L: ^State, cl: ^LClosure) -> Thread_Status {
 		uv.open = false // born closed...
 		uv.thread = nil
 		uv.stk_index = 0
-		uv.open_next = nil
-		uv.open_prev = nil
-		set_nil(&uv.value) // ...holding nil
-		cl.upvals[i] = uv
+		set_nil(&uv.u.value) // ...holding nil
+		closure_upvals(cl)[i] = uv
 		gc_barrier(L, obj2gco(cl), obj2gco(uv))
 	}
 	return .Ok
@@ -322,12 +324,11 @@ newupval :: proc(L: ^State, level: int, prev: ^^UpVal) -> ^UpVal {
 	next := prev^
 	uv.open = true
 	uv.thread = L
-	uv.stk_index = level // the live value lives in the stack for now
-	set_nil(&uv.value)
-	uv.open_next = next
-	uv.open_prev = prev
+	uv.stk_index = level // the value lives in the stack for now
+	uv.u.links.next = next
+	uv.u.links.prev = prev
 	if next != nil {
-		next.open_prev = &uv.open_next
+		next.u.links.prev = &uv.u.links.next
 	}
 	prev^ = uv
 	// Link this thread onto the global `twups` list so the incremental collector
@@ -355,7 +356,7 @@ func_findupval :: proc(L: ^State, level: int) -> ^UpVal {
 		if p.stk_index == level {
 			return p // already have one for this slot
 		}
-		pp = &p.open_next
+		pp = &p.u.links.next
 	}
 	return newupval(L, level, pp)
 }
@@ -365,9 +366,9 @@ func_findupval :: proc(L: ^State, level: int) -> ^UpVal {
 // successor, and (if we have one) our successor back at our predecessor's link.
 unlink_upval :: proc(uv: ^UpVal) {
 	when INTERNAL_ASSERTS {assert(uv.open, "unlink_upval: upvalue must be open")}
-	uv.open_prev^ = uv.open_next
-	if uv.open_next != nil {
-		uv.open_next.open_prev = uv.open_prev
+	uv.u.links.prev^ = uv.u.links.next
+	if uv.u.links.next != nil {
+		uv.u.links.next.u.links.prev = uv.u.links.prev
 	}
 }
 
@@ -383,15 +384,15 @@ func_closeupval :: proc(L: ^State, level: int) {
 			break
 		}
 		unlink_upval(uv) // remove from the open list (updates L.openupval)
-		uv.value = L.stack[uv.stk_index].val // move the value into the upvalue
+		uv.u.value = L.stack[uv.stk_index].val // move the value into the upvalue
 		uv.open = false
 		uv.thread = nil
 		// Preserve the GC invariant: a closed upvalue can never be gray, and if
 		// it was already black we must barrier the value it now owns.
 		if !is_white(obj2gco(uv)) {
 			set2black(obj2gco(uv))
-			if is_collectable(&uv.value) {
-				gc_barrier(L, obj2gco(uv), uv.value.value_.gc)
+			if is_collectable(&uv.u.value) {
+				gc_barrier(L, obj2gco(uv), uv.u.value.value_.gc)
 			}
 		}
 	}

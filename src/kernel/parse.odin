@@ -1014,6 +1014,9 @@ addprototype :: proc(ls: ^LexState) -> ^Proto {
 		}
 	}
 	clp := func_newproto(L)
+	if clp == nil {
+		throw(L, .Err_Mem)
+	}
 	f.p[fs.np] = clp
 	fs.np += 1
 	gc_barrier(L, obj2gco(f), obj2gco(clp))
@@ -2370,12 +2373,18 @@ parse_parser :: proc(
 	lexstate: LexState
 	funcstate: FuncState
 	cl := func_newLclosure(L, 1) // the main closure (one upvalue: _ENV)
+	if cl == nil {
+		throw(L, .Err_Mem)
+	}
 	set_lua_closure(stack_value(L, L.top), cl) // anchor it against collection
 	inc_top(L)
 	lexstate.h = table_new(L) // scanner's string-anchoring table
 	set_gc(stack_value(L, L.top), obj2gco(lexstate.h)) // anchor it
 	inc_top(L)
 	funcstate.f = func_newproto(L)
+	if funcstate.f == nil {
+		throw(L, .Err_Mem)
+	}
 	cl.p = funcstate.f
 	gc_barrier(L, obj2gco(cl), obj2gco(cl.p))
 	funcstate.f.source = string_new(L, name) // create and anchor the source name

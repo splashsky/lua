@@ -52,7 +52,7 @@ vm_run_job :: proc(L: ^kernel.State, ud: rawptr) -> kernel.Thread_Status {
 	regt := (^kernel.Table)(kernel.gc_value(&L.g.registry))
 	gtv: kernel.TValue
 	kernel.table_getint(regt, kernel.RIDX_GLOBALS, &gtv)
-	kernel.upval_value(cl.upvals[0])^ = gtv
+	kernel.upval_value(kernel.closure_upvals(cl)[0])^ = gtv
 	funcidx := L.top - 1 // the closure sits on top of the stack
 	fx.base = funcidx
 	kernel.do_call(L, funcidx, kernel.MULTRET)

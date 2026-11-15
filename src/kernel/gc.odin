@@ -467,7 +467,7 @@ iscleared :: proc(g: ^Global_State, o: ^GCObject) -> bool {
 	if o == nil {
 		return false // a non-collectable value never clears an entry
 	} else if no_variant(o.tt) == TSTRING {
-		reallymarkobject(g, o) // strings are values: keep them alive
+		mark_object(g, o) // strings are values: keep white ones alive
 		return false
 	} else {
 		return is_white(o)
@@ -668,7 +668,7 @@ traverse_lclosure :: proc(g: ^Global_State, cl: ^LClosure) -> L_Mem {
 		mark_object_n(g, obj2gco(cl.p))
 	}
 	for i in 0 ..< int(cl.nupvalues) {
-		uv := cl.upvals[i]
+		uv := closure_upvals(cl)[i]
 		if uv != nil {
 			mark_object_n(g, obj2gco(uv))
 		}
@@ -722,12 +722,12 @@ traverse_thread :: proc(g: ^Global_State, th: ^State) -> L_Mem {
 		linkobjgclist(obj2gco(th), &g.grayagain)
 	}
 	if th.stack == nil {
-		return 1 // a thread that never got its stack (mid-construction)
+		return 0 // a thread that never got its stack (mid-construction)
 	}
 	for i in 0 ..< th.top {
 		mark_value(g, &th.stack[i].val)
 	}
-	for uv := th.openupval; uv != nil; uv = uv.open_next {
+	for uv := th.openupval; uv != nil; uv = uv.u.links.next {
 		mark_object_n(g, obj2gco(uv))
 	}
 	if g.gcstate == GCSatomic { // final traversal?
@@ -746,7 +746,7 @@ traverse_thread :: proc(g: ^Global_State, th: ^State) -> L_Mem {
 			g.twups = th
 		}
 	}
-	return 1 + L_Mem(th.stack_size)
+	return 1 + L_Mem(th.top) // only the live stack slots were traversed
 }
 
 // A generationally-old, barrier-touched object needs one more visit. TOUCHED1
@@ -891,7 +891,7 @@ remarkupvals :: proc(g: ^Global_State) {
 		} else {
 			p^ = thread.twups // unlink...
 			thread.twups = thread // ...and mark it out of the list
-			for uv := thread.openupval; uv != nil; uv = uv.open_next {
+			for uv := thread.openupval; uv != nil; uv = uv.u.links.next {
 				if !is_white(obj2gco(uv)) { // already visited?
 					mark_value(g, upval_value(uv))
 				}

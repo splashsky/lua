@@ -1233,8 +1233,8 @@ api_load :: proc(
 		if f.nupvalues >= 1 {
 			gt: TValue
 			getGtable(L, &gt)
-			set_obj(upval_value(f.upvals[0]), &gt)
-			gc_barrier(L, obj2gco(f.upvals[0]), gc_value(&gt))
+			set_obj(upval_value(closure_upvals(f)[0]), &gt)
+			gc_barrier(L, obj2gco(closure_upvals(f)[0]), gc_value(&gt))
 		}
 	}
 	return status
@@ -1405,7 +1405,7 @@ aux_upvalue :: proc(fi: ^TValue, n: int) -> (name: string, val: ^TValue, owner: 
 		// placeholder "(no name)" rather than an empty string.
 		nm := p.upvalues[n - 1].name
 		name = nm == nil ? "(no name)" : string(str_slice(nm))
-		return name, upval_value(f.upvals[n - 1]), obj2gco(f)
+		return name, upval_value(closure_upvals(f)[n - 1]), obj2gco(f)
 	case:
 		return "", nil, nil
 	}

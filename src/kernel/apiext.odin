@@ -60,7 +60,7 @@ getupvalref :: proc(L: ^State, fidx: int, n: int) -> (slot: ^^UpVal, f: ^LClosur
 	// that with an `ok` flag (nil slot when false); `debug.upvalueid(f, 99)` must
 	// yield nil rather than crash.
 	if 1 <= n && n <= int(cl.p.sizeupvalues) {
-		return &cl.upvals[n - 1], cl, true
+		return &closure_upvals(cl)[n - 1], cl, true
 	}
 	return nil, cl, false
 }

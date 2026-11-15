@@ -675,23 +675,42 @@ copy_concat_buff :: proc(L: ^State, top: int, n: int, buff: []u8) {
 // Closures and the numerical for-loop
 // ---------------------------------------------------------------------------
 
-// Create a Lua closure for `p`, anchor it at `ra`, and wire its upvalues --
-// reference Lua's `pushclosure`. In-stack upvalues share the open upvalue for the
-// captured slot; the rest are inherited from the enclosing closure.
+// The function slot belongs to the current register base. Resolve the
+// non-moving closure's inline vector at the instruction that needs it; `regs`
+// is refreshed after any stack move by the VM trap.
 @(private = "file")
-pushclosure :: proc(L: ^State, p: ^Proto, encup: [^]^UpVal, base: int, ra: int) {
+vm_upvals :: #force_inline proc "contextless" (regs: [^]StackValue) -> [^]^UpVal {
+	return closure_upvals((^LClosure)(regs[-1].val.value_.gc))
+}
+
+// Create a Lua closure for `p`, anchor it at `ra`, and wire its upvalues --
+// reference Lua's `pushclosure`. Keep allocation and error paths out of the
+// dispatch loop; the enclosing closure and prototype are non-moving GC objects.
+@(private = "file")
+pushclosure :: #force_no_inline proc(L: ^State, p: ^Proto, enclosing: ^LClosure, base: int, ra: int) {
+	// An emergency collection must see the whole frame while its new closure
+	// and upvalues are being constructed.
+	L.top = L.frames[L.ci].top
+	encup := closure_upvals(enclosing)
 	nup := int(p.sizeupvalues)
 	uv := p.upvalues
 	ncl := func_newLclosure(L, nup)
+	if ncl == nil {
+		throw(L, .Err_Mem)
+	}
 	ncl.p = p
-	set_lua_closure(stack_value(L, ra), ncl) // anchor before allocating upvalues
+	set_lua_closure(stack_value(L, ra), ncl)
+	nupvals := closure_upvals(ncl)
 	for i in 0 ..< nup {
 		if uv[i].instack != 0 {
-			ncl.upvals[i] = func_findupval(L, base + int(uv[i].idx))
+			nupvals[i] = func_findupval(L, base + int(uv[i].idx))
+			if nupvals[i] == nil {
+				throw(L, .Err_Mem)
+			}
 		} else {
-			ncl.upvals[i] = encup[uv[i].idx]
+			nupvals[i] = encup[uv[i].idx]
 		}
-		gc_barrier(L, obj2gco(ncl), obj2gco(ncl.upvals[i]))
+		gc_barrier(L, obj2gco(ncl), obj2gco(nupvals[i]))
 	}
 }
 
@@ -961,11 +980,11 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				}
 
 			case .GETUPVAL:
-				set_obj(&regs[getarg_A(i)].val, upval_value(cl.upvals[getarg_B(i)]))
+				set_obj(&regs[getarg_A(i)].val, upval_value(vm_upvals(regs)[getarg_B(i)]))
 
 			case .SETUPVAL:
 				ra := getarg_A(i)
-				uv := cl.upvals[getarg_B(i)]
+				uv := vm_upvals(regs)[getarg_B(i)]
 				rav := &regs[ra].val
 				set_obj(upval_value(uv), rav)
 				if is_collectable(rav) {
@@ -974,7 +993,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 
 			case .GETTABUP:
 				ra := base + getarg_A(i)
-				upval := upval_value(cl.upvals[getarg_B(i)])
+				upval := upval_value(vm_upvals(regs)[getarg_B(i)])
 				rc := &k[getarg_C(i)]
 				vm_gettable(L, ci_idx, vm_pc_index(pc, code), upval, rc, ra)
 				trap = L.frames[ci_idx].u.l.trap
@@ -1006,7 +1025,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				trap = L.frames[ci_idx].u.l.trap
 
 			case .SETTABUP:
-				upval := upval_value(cl.upvals[getarg_A(i)])
+				upval := upval_value(vm_upvals(regs)[getarg_A(i)])
 				rb := &k[getarg_B(i)]
 				rc := vm_rkc(L, base, k, i)
 				vm_settable(L, ci_idx, vm_pc_index(pc, code), upval, rb, rc)
@@ -1644,7 +1663,8 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				ra := base + getarg_A(i)
 				p := cl.p.p[getarg_Bx(i)]
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
-				pushclosure(L, p, cl.upvals, base, ra)
+				when INTERNAL_ASSERTS {assert(ci_idx == L.ci)}
+				pushclosure(L, p, cl, base, ra)
 				L.top = ra + 1 // closure at ra; anchor it for the GC
 				gc_checkGC(L)
 				trap = L.frames[ci_idx].u.l.trap

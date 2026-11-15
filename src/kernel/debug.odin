@@ -400,7 +400,7 @@ dbg_getfuncname :: proc(L: ^State, ci_idx: int) -> (kind: string, name: string) 
 dbg_getupvalname :: proc(L: ^State, ci_idx: int, o: ^TValue) -> (kind: string, name: string) {
 	c := ci_func(L, &L.frames[ci_idx])
 	for k in 0 ..< int(c.nupvalues) {
-		if upval_value(c.upvals[k]) == o {
+		if upval_value(closure_upvals(c)[k]) == o {
 			return "upvalue", dbg_upvalname(c.p, k)
 		}
 	}

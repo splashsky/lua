@@ -294,6 +294,13 @@ allocation types need at most 8-byte alignment. Typical 32-bit heaps provide at
 least 8 bytes, but the kernel's layout assertions currently require 64-bit
 targets. Freestanding builds use only the embedder's allocator.
 
+On 64-bit targets an `UpVal` is 48 bytes. Its body overlays the open-list links
+with the closed `TValue`; open upvalues retain a thread and full-width index,
+not a movable stack pointer. An `LClosure` has a 32-byte header followed by
+its inline vector of 8-byte upvalue pointers; the vector address is derived
+from the closure. GC debt, marking and frees use the actual allocation sizes,
+just as in reference.
+
 Native library callbacks retain their C ABI. A hot callback may omit its usual
 `runtime.default_context()` only when its fast path calls exclusively
 `"contextless"` helpers. Coercion, allocation, formatting, error reporting, OS
