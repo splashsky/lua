@@ -305,17 +305,23 @@ floating-point loops use the ordinary path. The call-hook work at frame entry
 is separated from the no-hook path, with the same base refresh after the hook.
 These rewrites are guarded by the generator.
 
-The threaded CALL handler specializes non-allocating Lua-closure setup and
-native calls without hooks whose callers want zero or one result. A native
+The threaded CALL handler specializes non-allocating Lua-closure and native
+frame setup. Native call hooks, growth and `__call` remain out of line. A native
 callback can relocate both stacks or install hooks, so its frame is re-derived
-after the call; hooks, to-be-closed values and other result counts use the
-ordinary post-call path. Growth and `__call` remain out of line. Relocation test
-mode routes all calls through the ordinary helper so its forced moves still
-happen. The specialized helpers are in `vm_threaded_fast.odin`: keeping them out
-of `vm.odin` also avoids a measured switch-VM code-placement regression. These
-specializations duplicate parts of the shared helpers and must be reviewed when
-those helpers change. Both modes use the same tests, including forced stack and
-frame relocation. Results and limitations are recorded in
+after the call; return hooks, to-be-closed values and result counts other than
+zero or one use the ordinary post-call path. Relocation test mode routes all
+calls through the ordinary helper so its forced moves still happen. The
+specialized helpers are in `vm_threaded_fast.odin`: keeping them out of
+`vm.odin` also avoids a measured switch-VM code-placement regression.
+
+Threaded `RETURN0` and `RETURN1` keep their no-hook result movement in the hot
+handler. A pending interrupt or active hook tail-transitions to a separate copy
+of the switch-derived body, which polls, saves the PC and resolves the frame
+after hooks just as the switch does. The generator guards the original bodies
+and emits both paths. These specializations duplicate parts of the shared
+helpers and must be reviewed when those helpers change. Both modes use the same
+tests, including forced stack and frame relocation. Results and limitations are
+recorded in
 [bench/THREADED_VM.md](../bench/THREADED_VM.md); what remains before it can become
 the default is listed in [FUTURE_WORK.md](FUTURE_WORK.md).
 
