@@ -272,7 +272,7 @@ vm_string_method_lookup_and_yield :: proc(t: ^testing.T) {
 }
 
 // Integer writes can take the contextless path only when no GC barrier is
-// needed. Empty slots with __newindex, collectable values, and non-table
+// needed. Empty slots with __newindex, writes needing a barrier, and non-table
 // objects still have to follow the ordinary yielding/error paths.
 @(test)
 vm_variable_table_writes :: proc(t: ^testing.T) {
