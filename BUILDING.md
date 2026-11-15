@@ -88,10 +88,13 @@ VM_THREADED=1 bash build/rebrand-smoke.sh
 VM_THREADED=1 bash build/build.sh freestanding
 ```
 
-On Windows set `$env:VM_THREADED = '1'` before using the corresponding `.ps1`
-wrappers. Unset the variable (or set it to `0`) for the switch interpreter. For
-direct Odin commands use `-define:VM_THREADED=true`. The PUC wrapper gives its
-threaded binaries distinct names, including in relocation and memory-checker modes.
+All wrappers accept `VM_THREADED=1` for threaded and `VM_THREADED=0` for switch;
+unset it to use the build default (currently switch). Any other value, including
+an empty value, is rejected. On Windows set `$env:VM_THREADED = '1'` or `'0'`,
+or remove it with `Remove-Item Env:VM_THREADED`. For direct Odin commands use
+`-define:VM_THREADED=true` or `-define:VM_THREADED=false`. The PUC wrapper gives
+explicitly selected binaries distinct `-threaded` or `-switch` names, including
+in relocation and memory-checker modes; an unset variable uses the unsuffixed name.
 
 The switch opcode bodies are the source of the threaded handlers. After changing
 them, run `bash build/generate-threaded.sh` or `.\build\generate-threaded.ps1` on

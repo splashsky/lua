@@ -14,7 +14,8 @@ param([string]$Brand = 'lua', [string]$FreestandingTarget = 'freestanding_amd64_
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'brand.ps1')
-$BrandDefines = @(Get-BrandDefines -Brand $Brand | Where-Object { $_ -ne '-define:VM_THREADED=true' })
+$BrandDefines = @(Get-BrandDefines -Brand $Brand | Where-Object { $_ -notlike '-define:VM_THREADED=*' })
+$SwitchDefines = @($BrandDefines) + @('-define:VM_THREADED=false')
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $SrcDir   = Join-Path $RepoRoot 'src'
@@ -35,9 +36,9 @@ foreach ($t in $Targets) {
     $full = Join-Path $RepoRoot $t.Path
     Write-Host "==> check $($t.Path)"
     if ($t.Lib) {
-        & odin check $full $Collection @BrandDefines -no-entry-point
+        & odin check $full $Collection @SwitchDefines -no-entry-point
     } else {
-        & odin check $full $Collection @BrandDefines
+        & odin check $full $Collection @SwitchDefines
     }
     if ($LASTEXITCODE -ne 0) { $failed = $true }
 }
@@ -49,7 +50,7 @@ if ($failed) { throw "One or more packages failed to check." }
 # platform split rots silently. Linker/codegen flags (-no-crt, -build-mode:obj) are
 # not accepted by `odin check` and are not needed to type-check.
 Write-Host "==> check src\freestanding ($FreestandingTarget)"
-& odin check (Join-Path $SrcDir 'freestanding') $Collection @BrandDefines `
+& odin check (Join-Path $SrcDir 'freestanding') $Collection @SwitchDefines `
     "-target:$FreestandingTarget" -default-to-nil-allocator -no-entry-point
 if ($LASTEXITCODE -ne 0) { throw "Freestanding package failed to check." }
 

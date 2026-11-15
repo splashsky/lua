@@ -19,6 +19,9 @@
         .\build\build.ps1 all -Brand moon     # moon.exe / moonc.exe
 
     Output lands in build\out\.
+
+    Set $env:VM_THREADED to '1' for the threaded VM or '0' for the switch VM.
+    Remove it to use the build default. Other values are rejected.
 #>
 [CmdletBinding()]
 param(

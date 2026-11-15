@@ -54,7 +54,10 @@ for arg in "$@"; do
     esac
 done
 
-if [[ "${VM_THREADED:-0}" == "1" ]]; then LUA_EXE+="-threaded"; fi
+case "${VM_THREADED-unset}" in
+    1) LUA_EXE+="-threaded" ;;
+    0) LUA_EXE+="-switch" ;;
+esac
 if [[ "$STRESS" == "1" ]]; then LUA_EXE+="-stress"; fi
 if [[ "$ASAN" == "1" ]]; then LUA_EXE+="-asan"; fi
 

@@ -19,10 +19,10 @@ source "$SCRIPT_DIR/brand.sh"
 SRC_DIR="$REPO_ROOT/src"
 COLLECTION="-collection:lang=$SRC_DIR"
 
-# Check the switch first even when VM_THREADED=1 was passed to the wrapper.
+# Check both modes explicitly regardless of the wrapper's selection or default.
 CHECK_DEFINES=()
 for define in "${BRAND_DEFINES[@]+"${BRAND_DEFINES[@]}"}"; do
-    if [[ "$define" != "-define:VM_THREADED=true" ]]; then CHECK_DEFINES+=("$define"); fi
+    if [[ "$define" != -define:VM_THREADED=* ]]; then CHECK_DEFINES+=("$define"); fi
 done
 
 # "path:is_library" pairs. Library packages have no `main`, so pass -no-entry-point.
@@ -31,10 +31,10 @@ check_one() {
     echo "==> check $path"
     if [[ "$is_lib" == "1" ]]; then
         odin check "$REPO_ROOT/$path" "$COLLECTION" \
-            "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}" -no-entry-point
+            "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}" -define:VM_THREADED=false -no-entry-point
     else
         odin check "$REPO_ROOT/$path" "$COLLECTION" \
-            "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}"
+            "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}" -define:VM_THREADED=false
     fi
 }
 
@@ -52,7 +52,7 @@ check_one tools/generate_threaded 0
 FREESTANDING_TARGET="${FREESTANDING_TARGET:-freestanding_amd64_sysv}"
 echo "==> check src/freestanding ($FREESTANDING_TARGET)"
 odin check "$REPO_ROOT/src/freestanding" "$COLLECTION" \
-    "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}" \
+    "${CHECK_DEFINES[@]+"${CHECK_DEFINES[@]}"}" -define:VM_THREADED=false \
     "-target:$FREESTANDING_TARGET" -default-to-nil-allocator -no-entry-point
 
 echo "==> check threaded interpreter"

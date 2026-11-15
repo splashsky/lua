@@ -60,9 +60,10 @@ $Collection = "-collection:lang=$SrcDir"
 $OutDir  = Join-Path $env:TEMP "lang-puc-$Brand"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $LuaExe  = Join-Path $OutDir (Get-BrandExe $Brand)
-if ($Stress -or $Asan -or $env:VM_THREADED -eq '1') {
+if ($Stress -or $Asan -or $env:VM_THREADED -eq '1' -or $env:VM_THREADED -eq '0') {
     $Suffix = ''
     if ($env:VM_THREADED -eq '1') { $Suffix += '-threaded' }
+    if ($env:VM_THREADED -eq '0') { $Suffix += '-switch' }
     if ($Stress) { $Suffix += '-stress' }
     if ($Asan) { $Suffix += '-asan' }
     $LuaExe = Join-Path $OutDir "$Brand$Suffix.exe"

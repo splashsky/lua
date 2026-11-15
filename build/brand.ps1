@@ -13,8 +13,9 @@
     default build is byte-for-byte the one the PUC-Rio suite validates.
 
     Individual knobs can still be overridden for full control, e.g.
-    `-Brand moon -SourceExt .mn`. VM_THREADED=1 is also forwarded by every
-    wrapper through the environment.
+    `-Brand moon -SourceExt .mn`. Every wrapper also reads $env:VM_THREADED:
+    '1' selects threaded, '0' selects switch, and unset uses the build default.
+    Other values are rejected.
 #>
 
 # The -define: flags for a brand, or an empty array for the default profile.
@@ -30,7 +31,13 @@ function Get-BrandDefines {
     $isDefault = ($Brand -ceq 'lua') -and ($Display -eq '') -and
                  ($SourceExt -eq '') -and ($EnvPrefix -eq '')
     $vmDefines = @()
-    if ($env:VM_THREADED -eq '1') { $vmDefines += '-define:VM_THREADED=true' }
+    if (Test-Path Env:VM_THREADED) {
+        switch -CaseSensitive ($env:VM_THREADED) {
+            '1' { $vmDefines += '-define:VM_THREADED=true' }
+            '0' { $vmDefines += '-define:VM_THREADED=false' }
+            default { throw "VM_THREADED must be 0, 1, or unset (got '$env:VM_THREADED')." }
+        }
+    }
     if ($isDefault) { return $vmDefines }
 
     if ($Display -eq '') {
