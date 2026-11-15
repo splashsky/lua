@@ -61,6 +61,35 @@ REFLUA=/path/to/lua ./build/bench.sh
 The runners build lua-odin with `-o:speed`. The Windows runner also reserves the
 larger native stack used by the project's other CLI scripts.
 
+### Comparing VM instruction counts on Linux
+
+`build/vm-compare.sh` builds explicitly selected switch and threaded interpreters
+side by side under `TMPDIR`, and optionally compares reference Lua:
+
+```sh
+REFLUA=/path/to/lua CPU=12 ./build/vm-compare.sh 5 > comparison.md
+```
+
+It requires Linux `perf` with access to user-space `instructions:u` and
+`cycles:u`; `CPU` optionally pins every run with `taskset`. The positional run
+count defaults to 3. Each named harness workload (including scaling) and every
+file in `bench/probes/` runs in a fresh process, with interpreter order rotated
+between repetitions. The Markdown table reports **minimum/median instructions;
+minimum/median cycles**, in millions, for switch / threaded / reference. A
+missing `REFLUA` leaves the reference column empty. Counts include startup and
+harness setup. Cycles are **approximate** under load; hash-sensitive workloads
+vary by around ±20M instructions with the randomized string-hash seed. Use more
+runs and a quiet, pinned core for small differences.
+
+The probe files include the historical microprobes as well as the two-million
+iteration global-read, one-argument-call, empty-loop, local `os.date` and
+`os.getenv("HOME")` probes cited in `docs/FUTURE_WORK.md`. The local date probe
+uses the process timezone; record or set `TZ` consistently across comparisons.
+Benchmark builds inherit the brand settings, but not `VM_THREADED`: the runner
+always explicitly builds both modes. Its temporary files are removed on exit.
+For a source snapshot in another directory, `VM_COMPARE_SRC=/path/to/src`
+selects its source tree while retaining this checkout's harness and probes.
+
 Every benchmark file also has a small direct-invocation interface:
 
 ```text
