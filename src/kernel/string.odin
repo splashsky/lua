@@ -16,6 +16,7 @@ package kernel
 // design requires so a string is *never* half-constructed across a second
 // allocation that could trigger an emergency collection.
 
+import "base:intrinsics"
 import "core:mem"
 
 // ---------------------------------------------------------------------------
@@ -27,7 +28,7 @@ import "core:mem"
 // Reference Lua's `LUAI_MAXSHORTLEN`.
 MAXSHORTLEN :: 40
 
-// The intern table never shrinks below this many buckets, and starts here.
+// The intern table starts with this many buckets.
 // Reference Lua's `MINSTRTABSIZE`.
 MINSTRTABSIZE :: 128
 
@@ -150,15 +151,25 @@ string_hashlongstr :: proc "contextless" (ts: ^TString) -> u32 {
 
 // Are two byte ranges equal? A tiny helper so equality reads clearly.
 mem_eq :: #force_inline proc "contextless" (a: [^]u8, b: [^]u8, n: uint) -> bool {
-	// Long cached host strings otherwise compare one byte at a time on every
-	// lookup. Keep the small-string fast path and use the bounded SIMD-aware
-	// standard comparison for longer byte ranges.
+	// Use bounded unaligned word loads for short ranges, and the standard block
+	// comparison for longer ones. Neither path reads past the supplied bytes.
 	if n >= 64 do return mem.compare_ptrs(rawptr(a), rawptr(b), int(n)) == 0
-	for i in 0 ..< n {
-		if a[i] != b[i] {
+	i: uint = 0
+	for n - i >= 8 {
+		if intrinsics.unaligned_load((^u64)(&a[i])) != intrinsics.unaligned_load((^u64)(&b[i])) {
 			return false
 		}
+		i += 8
 	}
+	if n - i >= 4 {
+		if intrinsics.unaligned_load((^u32)(&a[i])) != intrinsics.unaligned_load((^u32)(&b[i])) do return false
+		i += 4
+	}
+	if n - i >= 2 {
+		if intrinsics.unaligned_load((^u16)(&a[i])) != intrinsics.unaligned_load((^u16)(&b[i])) do return false
+		i += 2
+	}
+	if n - i != 0 && a[i] != b[i] do return false
 	return true
 }
 

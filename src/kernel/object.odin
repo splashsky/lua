@@ -1342,28 +1342,31 @@ integer_to_str :: proc "contextless" (buf: []byte, x: Integer) -> int {
 	// Negate in unsigned space: 0 - (unsigned)x is the magnitude even for min.
 	mag := neg ? (0 - s2u(x)) : s2u(x)
 
+	digits := "00010203040506070809101112131415161718192021222324252627282930313233343536373839" +
+	          "40414243444546474849505152535455565758596061626364656667686970717273747576777879" +
+	          "8081828384858687888990919293949596979899"
 	pos := len(tmp)
-	if mag == 0 {
+	for mag >= 100 {
+		d := int(mag % 100) * 2
+		mag /= 100
+		pos -= 2
+		tmp[pos] = digits[d]
+		tmp[pos + 1] = digits[d + 1]
+	}
+	if mag < 10 {
 		pos -= 1
-		tmp[pos] = '0'
+		tmp[pos] = byte('0' + mag)
 	} else {
-		for mag != 0 {
-			pos -= 1
-			tmp[pos] = byte('0' + (mag % 10))
-			mag /= 10
-		}
+		d := int(mag) * 2
+		pos -= 2
+		tmp[pos] = digits[d]
+		tmp[pos + 1] = digits[d + 1]
 	}
-
-	out := 0
 	if neg {
-		buf[out] = '-'
-		out += 1
+		pos -= 1
+		tmp[pos] = '-'
 	}
-	for j := pos; j < len(tmp); j += 1 {
-		buf[out] = tmp[j]
-		out += 1
-	}
-	return out
+	return copy(buf, tmp[pos:])
 }
 
 // Render an unsigned integer in hexadecimal. This small helper replaces the
@@ -3027,8 +3030,7 @@ buff_add :: proc(buff: ^Buff_FS, src: [^]u8, length: uint) {
 	buff.blen += length
 }
 
-// Append the decimal/float rendering of a single TValue via `number_to_str`,
-// which routes through the platform C library for byte-identical output.
+// Append the decimal/float rendering of a single TValue via `number_to_str`.
 @(private = "file")
 buff_add_num :: proc(buff: ^Buff_FS, o: ^TValue) {
 	tmp: [N2S_BUFF_SZ]u8

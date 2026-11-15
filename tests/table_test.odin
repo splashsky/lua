@@ -99,6 +99,56 @@ table_string_key_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, kernel.int_value(&res), kernel.Integer(42))
 }
 
+@(test)
+table_short_string_preset_respects_barriers_and_newindex :: proc(t: ^testing.T) {
+	L := kernel.new_state(kernel.default_allocator())
+	if !testing.expect(t, L != nil) do return
+	defer kernel.close_state(L)
+	tbl := kernel.table_new(L)
+	testing.expect_value(t, kernel.table_resize(L, tbl, 0, 8), kernel.Thread_Status.Ok)
+	key := kernel.string_new(L, "preset-one")
+	value: kernel.TValue
+	kernel.set_int(&value, 42)
+	testing.expect_value(t, kernel.table_psetshortstr(tbl, key, &value), kernel.HOK)
+	res: kernel.TValue
+	testing.expect(t, !kernel.tag_is_empty(kernel.table_getshortstr(tbl, key, &res)))
+	testing.expect_value(t, kernel.int_value(&res), kernel.Integer(42))
+
+	// An existing slot can be deleted in place. Reinserting it returns its
+	// location to the caller rather than creating a duplicate key.
+	kernel.set_nil(&value)
+	testing.expect_value(t, kernel.table_psetshortstr(tbl, key, &value), kernel.HOK)
+	kernel.set_int(&value, 43)
+	deleted := kernel.table_psetshortstr(tbl, key, &value)
+	testing.expect(t, deleted >= kernel.HFIRSTNODE)
+	k: kernel.TValue
+	kernel.set_string(&k, key)
+	testing.expect_value(t, kernel.table_finishset(L, tbl, &k, &value, deleted), kernel.Thread_Status.Ok)
+	testing.expect(t, !kernel.tag_is_empty(kernel.table_getshortstr(tbl, key, &res)))
+	testing.expect_value(t, kernel.int_value(&res), kernel.Integer(43))
+
+	// Unknown __newindex must reach the slow path, even for nil writes.
+	mt := kernel.table_new(L)
+	mt.flags &= ~kernel.Byte(u32(1) << u32(kernel.TM_NEWINDEX))
+	tbl.metatable = mt
+	other := kernel.string_new(L, "preset-two")
+	kernel.set_nil(&value)
+	testing.expect_value(t, kernel.table_psetshortstr(tbl, other, &value), kernel.HNOTFOUND)
+	mt.flags |= kernel.Byte(u32(1) << u32(kernel.TM_NEWINDEX))
+	testing.expect_value(t, kernel.table_psetshortstr(tbl, other, &value), kernel.HOK)
+	testing.expect(t, kernel.tag_is_empty(kernel.table_getshortstr(tbl, other, &res)))
+
+	// A black table must not directly acquire a white key: the slow insertion
+	// applies the collector's back barrier before returning.
+	kernel.set2black(kernel.obj2gco(tbl))
+	kernel.set_int(&value, 44)
+	testing.expect_value(t, kernel.table_psetshortstr(tbl, other, &value), kernel.HNOTFOUND)
+	kernel.set_string(&k, other)
+	testing.expect_value(t, kernel.table_set(L, tbl, &k, &value), kernel.Thread_Status.Ok)
+	testing.expect(t, !kernel.tag_is_empty(kernel.table_getshortstr(tbl, other, &res)))
+	testing.expect_value(t, kernel.int_value(&res), kernel.Integer(44))
+}
+
 // The length operator's contract is a "border": an index n where t[n] is non-nil
 // and t[n+1] is nil. For a contiguous sequence 1..N the border is exactly N.
 @(test)

@@ -168,11 +168,17 @@ load_string :: proc(S: ^LoadState, p: ^Proto, sl: ^^TString) {
 		buff: [MAXSHORTLEN + 1]Byte // extra byte for the trailing NUL
 		load_block(S, &buff[0], real + 1)
 		ts = string_newlstr(L, &buff[0], real)
+		if ts == nil {
+			throw(L, .Err_Mem)
+		}
 		sl^ = ts
 		gc_barrier(L, obj2gco(p), obj2gco(ts))
 	} else { // long string: allocate then read directly into its buffer
 		real := size - 1
 		ts = string_createlngstrobj(L, real)
+		if ts == nil {
+			throw(L, .Err_Mem)
+		}
 		sl^ = ts // anchor before the read (which can GC)
 		gc_barrier(L, obj2gco(p), obj2gco(ts))
 		load_block(S, str_bytes(ts), real + 1) // content plus NUL, in place

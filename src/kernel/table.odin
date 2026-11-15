@@ -845,11 +845,32 @@ table_fastseti :: #force_inline proc "contextless" (
 	return table_psetint(t, key, value)
 }
 
+// Reference's short-string preset can insert without a slow-path call when
+// __newindex is known absent, space exists, and the key needs no GC barrier.
 table_psetshortstr :: proc "contextless" (t: ^Table, key: ^TString, value: ^TValue) -> int {
-	return finishnodeset(t, table_Hgetshortstr(t, key), value)
+	slot := table_Hgetshortstr(t, key)
+	if !is_empty(slot) {
+		set_obj(slot, value)
+		return HOK
+	}
+	no_tm := t.metatable == nil ||
+	         (t.metatable.flags & Byte(u32(1) << u32(TM_NEWINDEX))) != 0
+	if no_tm {
+		if is_nil(value) do return HOK
+		if is_absent(slot) && !(is_black(obj2gco(t)) && is_white(obj2gco(key))) {
+			k: TValue
+			set_string(&k, key)
+			if insertkey(t, &k, value) {
+				invalidateTMcache(t)
+				return HOK
+			}
+		}
+	}
+	return retpsetcode(t, slot)
 }
 
 table_psetstr :: proc "contextless" (t: ^Table, key: ^TString, value: ^TValue) -> int {
+	if key.tt == VSHRSTR do return table_psetshortstr(t, key, value)
 	return finishnodeset(t, Hgetstr(t, key), value)
 }
 
@@ -883,7 +904,7 @@ table_fastpset :: #force_inline proc "contextless" (
 	case VNUMINT:
 		return table_fastseti(t, int_value(key), value)
 	case VSHRSTR:
-		return finishnodeset(t, table_Hgetshortstr(t, str_value(key)), value)
+		return table_psetshortstr(t, str_value(key), value)
 	case:
 		return table_pset(t, key, value)
 	}

@@ -561,6 +561,9 @@ object_tostring :: proc(L: ^State, o: ^TValue) {
 	buf: [N2S_BUFF_SZ]u8
 	n := number_to_str(o, buf[:])
 	ts := string_newlstr(L, raw_data(buf[:]), uint(n))
+	if ts == nil {
+		throw(L, .Err_Mem)
+	}
 	set_string(o, ts)
 }
 
@@ -635,8 +638,14 @@ vm_concat :: proc(L: ^State, total_in: int) {
 				ts = string_newlstr(L, raw_data(buff[:]), tl)
 			} else { // long string: copy directly into the final object
 				ts = string_createlngstrobj(L, tl)
+				if ts == nil {
+					throw(L, .Err_Mem)
+				}
 				dst := str_bytes(ts)
 				copy_concat_buff(L, top, n, dst[:tl])
+			}
+			if ts == nil {
+				throw(L, .Err_Mem)
 			}
 			set_string(stack_value(L, top - n), ts)
 		}

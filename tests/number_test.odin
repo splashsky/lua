@@ -187,6 +187,18 @@ tostring_curated_reference_outputs :: proc(t: ^testing.T) {
 	testing.expect_value(t, num_str(&v, buf[:]), "9223372036854775807")
 	kernel.set_int(&v, kernel.MIN_INTEGER)
 	testing.expect_value(t, num_str(&v, buf[:]), "-9223372036854775808")
+
+	// Pairwise digit generation must preserve leading zeroes inside the number
+	// while suppressing them in its most significant pair.
+	ints := []struct { n: kernel.Integer, text: string }{
+		{9, "9"}, {10, "10"}, {99, "99"}, {100, "100"},
+		{101, "101"}, {1000, "1000"}, {10001, "10001"},
+		{1000000001, "1000000001"}, {-10001, "-10001"},
+	}
+	for c in ints {
+		kernel.set_int(&v, c.n)
+		testing.expect_value(t, num_str(&v, buf[:]), c.text)
+	}
 }
 
 @(test)

@@ -26,7 +26,7 @@ string_byte_comparison_handles_long_unaligned_ranges :: proc(t: ^testing.T) {
 		a[i] = u8(i % 251)
 		b[i] = a[i]
 	}
-	lengths := [13]int{0, 1, 39, 40, 63, 64, 65, 79, 80, 95, 96, 1000, 1024}
+	lengths := [29]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 39, 40, 63, 64, 65, 79, 80, 95, 96, 1000, 1024}
 	for offset in 0 ..< 8 {
 		for n in lengths {
 			testing.expect(t, kernel.mem_eq(([^]u8)(&a[offset]), ([^]u8)(&b[offset]), uint(n)))
@@ -39,6 +39,44 @@ string_byte_comparison_handles_long_unaligned_ranges :: proc(t: ^testing.T) {
 			}
 		}
 	}
+	// Exercise every byte of the short-range word and tail paths, not just
+	// the first, middle, and last bytes of a few representative lengths.
+	for offset in 0 ..< 8 {
+		for n in 1 ..< 64 {
+			for pos in 0 ..< n {
+				b[offset + pos] ~= 0xff
+				equal := kernel.mem_eq(([^]u8)(&a[offset]), ([^]u8)(&b[offset]), uint(n))
+				b[offset + pos] ~= 0xff
+				if equal {
+					testing.expectf(t, false, "comparison missed byte %d at offset %d, length %d", pos, offset, n)
+					return
+				}
+			}
+		}
+	}
+}
+
+@(test)
+string_short_and_long_boundary_storage :: proc(t: ^testing.T) {
+	c: Counting_Allocator
+	L := kernel.new_state(kernel.Allocator{alloc = counting_alloc, ud = &c})
+	if !testing.expect(t, L != nil) do return
+	data: [kernel.MAXSHORTLEN + 1]u8
+	for i in 0 ..< len(data) do data[i] = u8(i)
+	short := kernel.string_newlstr(L, &data[0], kernel.MAXSHORTLEN)
+	long := kernel.string_newlstr(L, &data[0], kernel.MAXSHORTLEN + 1)
+	testing.expect_value(t, short.tt, kernel.Byte(kernel.VSHRSTR))
+	testing.expect_value(t, long.tt, kernel.Byte(kernel.VLNGSTR))
+	testing.expect_value(t, short.len, uint(kernel.MAXSHORTLEN))
+	testing.expect_value(t, long.len, uint(kernel.MAXSHORTLEN + 1))
+	testing.expect(t, kernel.mem_eq(kernel.str_bytes(short), &data[0], kernel.MAXSHORTLEN))
+	testing.expect(t, kernel.mem_eq(kernel.str_bytes(long), &data[0], kernel.MAXSHORTLEN + 1))
+	testing.expect_value(t, kernel.str_bytes(short)[kernel.MAXSHORTLEN], u8(0))
+	testing.expect_value(t, kernel.str_bytes(long)[kernel.MAXSHORTLEN + 1], u8(0))
+	testing.expect_value(t, kernel.string_alloc_size(short), kernel.sizelstring(kernel.MAXSHORTLEN))
+	testing.expect_value(t, kernel.string_alloc_size(long), kernel.sizelstring(kernel.MAXSHORTLEN + 1))
+	kernel.close_state(L)
+	testing.expect_value(t, c.outstanding, 0)
 }
 
 // Two short strings with identical contents, built from two distinct buffers, must
