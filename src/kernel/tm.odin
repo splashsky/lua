@@ -395,7 +395,7 @@ createvarargtab :: proc(L: ^State, f: int, n: int) {
 @(private = "file")
 buildhiddenargs :: proc(L: ^State, ci_idx: int, p: ^Proto, totalargs: int, nfixparams: int, nextra: int) {
 	ci := &L.frames[ci_idx]
-	ci.u.l.nextraargs = nextra
+	ci.u.l.nextraargs = Vararg_Count(nextra)
 	check_stack_p(L, int(p.maxstacksize) + 1)
 	ci = &L.frames[ci_idx]
 	oldfunc := ci.func
@@ -438,7 +438,7 @@ tm_adjustvarargs :: proc(L: ^State, ci_idx: int, p: ^Proto) {
 // the count; anything else yields nil. Only reachable in the PF_VAHID model.
 tm_getvararg :: proc(L: ^State, ci_idx: int, ra: int, rc: ^TValue) {
 	ci := &L.frames[ci_idx]
-	nextra := ci.u.l.nextraargs
+	nextra := int(ci.u.l.nextraargs)
 	if n, ok := to_integer_no_string(rc, .Eq); ok { // integral index?
 		if u64(n) - 1 < u64(nextra) {
 			slot := ci.func - nextra + int(n) - 1
@@ -461,7 +461,7 @@ tm_getvararg :: proc(L: ^State, ci_idx: int, ra: int, rc: ^TValue) {
 @(private = "file")
 getnumargs :: proc(L: ^State, ci_idx: int, h: ^Table) -> int {
 	if h == nil {
-		return L.frames[ci_idx].u.l.nextraargs
+		return int(L.frames[ci_idx].u.l.nextraargs)
 	}
 	res := table_Hgetshortstr(h, string_new(L, "n"))
 	if type_tag(res) != VNUMINT || u64(int_value(res)) > u64(MAX_INT / 2) {

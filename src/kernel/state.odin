@@ -39,6 +39,15 @@ K_Context :: distinct int
 // the pointer is opaque here so the frame struct doesn't depend on it.
 Hook_Proc :: #type proc "c" (L: rawptr, ar: rawptr)
 
+// Vararg counts cannot exceed the value-stack capacity, including the error
+// reserve. Keep the compact representation only when the configured ceiling
+// fits; an embedder can choose a larger MAXSTACK_LIMIT.
+when MAXSTACK <= 2_147_483_647 - STACKERRSPACE - EXTRA_STACK {
+	Vararg_Count :: i32
+} else {
+	Vararg_Count :: int
+}
+
 // `Call_Info` is one activation record on a thread's explicit call-frame stack --
 // reference Lua's `CallInfo`. The reference struct is a doubly linked list node
 // holding raw stack *pointers*; ours lives in a growable array and stores stack
@@ -66,7 +75,7 @@ Call_Info :: struct {
 			// only for Lua frames
 			savedpc:    int, // index of the NEXT instruction in Proto.code
 			trap:       i32, // tracing or stack/frame relocation requires VM attention
-			nextraargs: int, // # extra args a vararg call received
+			nextraargs: Vararg_Count, // # extra args a vararg call received
 		},
 		c: struct {
 			// only for C frames

@@ -240,12 +240,15 @@ to a pointer only for an operation on the current backing array. Frame pointers
 are never retained across re-entrant calls. Active frames are exactly `0..L.ci`;
 there is no separate live-frame count to reconcile after an error unwind.
 
-The exception is `vm_execute`'s local register-base pointer. Stack reallocation
+The VM also keeps a local register-base pointer. Stack reallocation
 arms the trap on every Lua frame; after a potentially moving call, the VM reloads
 the trap and re-derives the base at the next fetch, before dereferencing it. Such
 calls include metamethods, GC, hooks, native calls, iterators and varargs. A handler
 that needs a register pointer again within the same instruction must re-derive it
 immediately after the call instead of waiting for the next fetch.
+Tail-call argument sliding similarly derives a temporary stack pointer only after
+its growth check; the following copies and nil writes cannot allocate or re-enter
+Lua, and no such pointer survives that operation.
 
 The saved program counter remains an instruction index. Completed prototypes have
 immutable code rooted by the closure in the live frame's function slot; undumping
@@ -265,6 +268,14 @@ per-frame traps, before publishing the new slot. As in reference's `ltests` buil
 stress defaults to a 68,000-slot stack limit so stack-overflow tests finish despite
 quadratic copying; ordinary builds retain the 1,000,000-slot limit. Extra allocations
 can change GC timing and Lua-visible memory measurements in this test mode.
+
+Frame setup leaves `u2` untouched: each of its yield, protected-call, and close
+uses writes the field before the matching continuation can read it. Missing fixed
+arguments are nil-filled after both growth checks, and the final top is published
+before the callee runs. The hidden-vararg count is 32 bits when the configured
+stack ceiling and its reserves fit; larger custom ceilings use the full-width
+count. This does not narrow saved PCs or stack/frame indices and leaves the frame
+allocation size unchanged.
 
 Internal invariant assertions follow reference `lua_assert`: release builds omit
 them; debug, Odin test and stress builds enable them. Embedding API precondition

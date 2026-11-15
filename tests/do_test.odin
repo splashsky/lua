@@ -9,6 +9,7 @@ package tests
 import "core:testing"
 import "base:runtime"
 import kernel "lang:kernel"
+import stdlib "lang:stdlib"
 
 // Growing the stack must preserve every existing slot's value at its index and
 // nil-fill the new region. Shrinking must preserve the low slots it keeps.
@@ -363,4 +364,131 @@ pcall_unwind_discards_frame_extents :: proc(t: ^testing.T) {
 	testing.expect_value(t, L.ci, 0)
 	inuse := kernel.stack_in_use(L)
 	testing.expect(t, L.stack_size <= inuse * 2, "unwound frames must not prevent stack shrinking")
+}
+
+// Reuse frames with different argument/result counts, including from hooks and
+// resumable closes. In stress mode every stack and frame check relocates.
+@(test)
+call_frame_missing_arguments_and_continuations :: proc(t: ^testing.T) {
+	L := dbg_state()
+	defer kernel.close_state(L)
+	kernel.api_pushcfunction(L, stdlib.open_coroutine)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "coroutine")
+	src := `
+local function fixed(a, b, c, d, e, f)
+  collectgarbage('collect')
+  return a, b, c, d, e, f
+end
+for i = 1, 25 do
+  local a,b,c,d,e,f = fixed('alive')
+  assert(a == 'alive' and b == nil and c == nil and d == nil and e == nil and f == nil)
+  a,b,c,d,e,f = fixed(1,2,3,4,5,6,7,8)
+  assert(a == 1 and b == 2 and c == 3 and d == 4 and e == 5 and f == 6)
+end
+local function var(a,b,...)
+  collectgarbage('collect')
+  return a,b,select('#',...),...
+end
+local a,b,c,n,x,y,z
+a,b,n,x,y,z = var('ok')
+assert(a == 'ok' and b == nil and n == 0 and x == nil)
+a,b,n,x,y,z = var('ok',nil,2,nil,4)
+assert(a == 'ok' and b == nil and n == 3 and x == 2 and y == nil and z == 4)
+local obj = setmetatable({}, {__call = function(self, a, b, c)
+  assert(self ~= nil and a == 8 and b == nil and c == nil)
+  return a,b,c
+end})
+a,b,c = obj(8)
+assert(a == 8 and b == nil and c == nil)
+
+local function target(a,b,c) return a,b,c end
+local calls, returns, lines, counts = 0,0,0,0
+local function deep(n) if n > 0 then return 1 + deep(n-1) end return 0 end
+debug.sethook(function(event)
+  if event == 'line' then lines = lines + 1 end
+  if event == 'count' then counts = counts + 1 end
+  local info = debug.getinfo(2, 'fl')
+  if info.func == target then
+    assert(info.currentline > 0)
+    if event == 'call' then
+      assert(calls == 0 and returns == 0)
+      calls = calls + 1
+      local _, x = debug.getlocal(2, 1)
+      local _, y = debug.getlocal(2, 2)
+      local _, z = debug.getlocal(2, 3)
+      assert(x == 17 and y == nil and z == nil)
+      assert(deep(30) == 30)
+    elseif event == 'return' then
+      assert(calls == 1 and returns == 0)
+      returns = returns + 1
+    end
+  end
+end, 'crl', 2)
+a,b,c = target(17)
+debug.sethook()
+assert(a == 17 and b == nil and c == nil)
+assert(calls == 1 and returns == 1 and lines > 0 and counts > 0)
+
+local co = coroutine.create(function()
+  return pcall(function()
+    local v <close> = setmetatable({}, {__close = function() coroutine.yield('close') end})
+    coroutine.yield('body')
+    return 'done', 9
+  end)
+end)
+local ok, v, w = coroutine.resume(co)
+assert(ok and v == 'body')
+collectgarbage('collect')
+ok, v, w = coroutine.resume(co)
+assert(ok and v == 'close')
+collectgarbage('collect')
+local s
+ok, s, v, w = coroutine.resume(co)
+assert(ok and s and v == 'done' and w == 9)
+assert(coroutine.status(co) == 'dead')
+`
+	status := dbg_run(L, src)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "call protocol failed: %s", msg)
+	}
+}
+
+// Tail calls reuse the current frame and slide overlapping function/argument
+// slots after a stack check. Cover fewer and extra arguments, hidden varargs,
+// and a __call retry while forced relocation is enabled by the stress build.
+@(test)
+tail_call_argument_slide_survives_relocation :: proc(t: ^testing.T) {
+	L := corolib_state()
+	defer kernel.close_state(L)
+	src := `
+local function sink(a,b,c,d,e)
+  collectgarbage('collect')
+  return a,b,c,d,e
+end
+local function pass(a,...) return sink(a,...) end
+local a,b,c,d,e = pass('keep')
+assert(a == 'keep' and b == nil and c == nil and d == nil and e == nil)
+a,b,c,d,e = pass('keep',nil,3,4,5,6)
+assert(a == 'keep' and b == nil and c == 3 and d == 4 and e == 5)
+local callable = setmetatable({}, {__call = function(self,a,b,c)
+  assert(self ~= nil and a == 7 and b == nil and c == nil)
+  return a,b,c
+end})
+local function via(...) return callable(...) end
+a,b,c = via(7)
+assert(a == 7 and b == nil and c == nil)
+local function again(n,a,...)
+  if n == 0 then return a,... end
+  return again(n-1,a,...)
+end
+a,b,c,d = again(40,1,nil,3,4)
+assert(a == 1 and b == nil and c == 3 and d == 4)
+`
+	status := corolib_run(L, src)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "tail-call argument slide failed: %s", msg)
+	}
 }

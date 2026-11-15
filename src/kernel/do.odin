@@ -330,7 +330,7 @@ rethook :: proc(L: ^State, ci_idx: int, nres: int) {
 		if is_lua_frame(ci) {
 			p := ci_func(L, ci).p
 			if (p.flag & PF_VAHID) != 0 {
-				delta = ci.u.l.nextraargs + int(p.numparams) + 1
+				delta = int(ci.u.l.nextraargs) + int(p.numparams) + 1
 			}
 		}
 		ci.func += delta
@@ -479,10 +479,8 @@ prepCallInfo :: #force_inline proc(L: ^State, func: int, status: u32, top: int) 
 	ci.func = func
 	ci.callstatus = status
 	ci.top = top
-	// Each u2 reader is preceded by its corresponding yield, pcallk, or close
-	// write, but removing this initialization slowed unrelated empty VM loops
-	// with the current compiler, so keep the store.
-	ci.u2 = 0
+	// u2 is written when a yield, yieldable pcall, or close starts; its readers
+	// are reached only through that operation's status or continuation.
 	return idx, ci
 }
 
@@ -528,13 +526,15 @@ do_pretailcall :: proc(L: ^State, ci_idx: int, func_in: int, narg1_in: int, delt
 			nfixparams := int(p.numparams)
 			check_stack_p(L, fsize - delta)
 			ci = &L.frames[ci_idx]
-			ci.func -= delta // restore the real frame base (if vararg)
+			dst := ci.func - delta // restore the real frame base (if vararg)
+			ci.func = dst
+			stack := L.stack // no operation below can relocate it
 			for i in 0 ..< narg1 { // slide function + args down over the old frame
-				set_obj(stack_value(L, ci.func + i), stack_value(L, func + i))
+				set_obj(&stack[dst + i].val, &stack[func + i].val)
 			}
-			func = ci.func
+			func = dst
 			for narg1 <= nfixparams { // nil-fill any missing fixed parameters
-				set_nil(stack_value(L, func + narg1))
+				set_nil(&stack[func + narg1].val)
 				narg1 += 1
 			}
 			ci.top = func + 1 + fsize
@@ -571,7 +571,6 @@ do_precall :: proc(L: ^State, func_in: int, nresults: int) -> int {
 			return -1
 		case VLCL:
 			p := (^LClosure)(stack_value(L, func).value_.gc).p
-			narg := L.top - func - 1
 			nfixparams := int(p.numparams)
 			fsize := int(p.maxstacksize)
 			check_stack_p(L, fsize)
@@ -579,10 +578,17 @@ do_precall :: proc(L: ^State, func_in: int, nresults: int) -> int {
 			ci.u.l.savedpc = 0 // starting instruction
 			ci.u.l.nextraargs = 0
 			ci.u.l.trap = 0
-			for narg < nfixparams { // nil-fill missing fixed parameters
-				set_nil(stack_value(L, L.top))
-				L.top += 1
-				narg += 1
+			// Neither stack nor frame growth changes top. Work from the current
+			// stack after both checks, then publish the final top before executing
+			// the callee; nil writes themselves cannot allocate or run Lua.
+			top := L.top
+			end := func + 1 + nfixparams
+			if top < end { // nil-fill missing fixed parameters
+				for top < end {
+					set_nil(stack_value(L, top))
+					top += 1
+				}
+				L.top = top
 			}
 			return ci_idx
 		case:

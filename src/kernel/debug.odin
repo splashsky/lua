@@ -1055,7 +1055,7 @@ findlocal :: proc(L: ^State, ci_idx: int, n: int) -> (name: string, pos: int, ok
 			// when the frame was set up (see luaT_adjustvarargs, PF_VAHID model).
 			p := api_closure_value(stack_value(L, ci.func)).p
 			if (p.flag & PF_VAHID) != 0 {
-				nextra := ci.u.l.nextraargs
+				nextra := int(ci.u.l.nextraargs)
 				if n >= -nextra {
 					return "(vararg)", ci.func - nextra - (n + 1), true
 				}

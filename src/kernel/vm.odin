@@ -1467,7 +1467,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 				nparams1 := getarg_C(i)
 				delta := 0
 				if nparams1 != 0 {
-					delta = L.frames[ci_idx].u.l.nextraargs + nparams1
+					delta = int(L.frames[ci_idx].u.l.nextraargs) + nparams1
 				}
 				if b != 0 {
 					L.top = ra + b
@@ -1508,7 +1508,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 					func_close(L, base, CLOSEKTOP, true)
 				}
 				if nparams1 != 0 { // vararg function: restore real func slot
-					L.frames[ci_idx].func -= L.frames[ci_idx].u.l.nextraargs + nparams1
+					L.frames[ci_idx].func -= int(L.frames[ci_idx].u.l.nextraargs) + nparams1
 				}
 				L.top = ra + n
 				do_poscall(L, ci_idx, n)
