@@ -46,6 +46,20 @@ when VM_THREADED {
 	vm_thread_setslow :: #force_no_inline proc "contextless" (
 		L: ^State, ci_idx, pc: int, t, key, val: ^TValue, ctx: ^runtime.Context,
 	) -> i32 {
+		// Short-string pre-set can finish without context for primitive values.
+		// It already declines a new white key in a black table. If it cannot
+		// finish, retain its result rather than doing the same pre-set twice.
+		if base_type(t) == TTABLE && !is_collectable(val) && type_tag(key) == VSHRSTR {
+			hres := table_psetshortstr((^Table)(t.value_.gc), str_value(key), val)
+			if hres == HOK {
+				return L.frames[ci_idx].u.l.trap
+			}
+			context = ctx^
+			L.frames[ci_idx].u.l.savedpc = pc
+			L.top = L.frames[ci_idx].top
+			vm_finishset(L, t, key, val, hres)
+			return L.frames[ci_idx].u.l.trap
+		}
 		context = ctx^
 		#force_inline vm_settable(L, ci_idx, pc, t, key, val)
 		return L.frames[ci_idx].u.l.trap

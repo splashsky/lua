@@ -314,6 +314,50 @@ vm_variable_table_writes :: proc(t: ^testing.T) {
 	testing.expect(t, kernel.api_toboolean(L, -1))
 }
 
+// Short-string writes exercise successful pre-sets, rehashes, deletion,
+// collectable values and a yielding __newindex miss using variable keys.
+@(test)
+vm_short_string_table_writes :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		for _, mode in ipairs({'incremental', 'generational'}) do
+		  collectgarbage(mode)
+		  local t = {}
+		  for i = 1, 200 do local k = 'key' .. i; t[k] = i end
+		  collectgarbage('collect')
+		  for i = 1, 200 do local k = 'key' .. i; assert(t[k] == i) end
+		  local k = 'key1'
+		  t[k] = nil
+		  t[k] = 123
+		  local child = {answer = 99}
+		  t[k] = child
+		  collectgarbage('collect')
+		  assert(t[k].answer == 99)
+		  local mt = {__newindex = function(tab, key, value)
+		    coroutine.yield(key, value)
+		    collectgarbage('collect')
+		    rawset(tab, key, value)
+		  end}
+		  local dst = setmetatable({}, mt)
+		  local co = coroutine.create(function()
+		    local key = 'missing'; dst[key] = 42; return dst[key]
+		  end)
+		  local ok, key, value = coroutine.resume(co)
+		  assert(ok and key == 'missing' and value == 42)
+		  local resumed, result = coroutine.resume(co)
+		  assert(resumed and result == 42)
+		end
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
 // Debug code can mutate the loop's control-variable tag. Preserve this VM's
 // existing tag repair (unlike reference Lua, which preserves the changed tag).
 // Ordinary source code cannot assign to a numeric-for control variable.
