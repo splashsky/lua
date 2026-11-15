@@ -2180,7 +2180,7 @@ when VM_THREADED {
 		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
 	}
 
-	vm_thread_gettable_other :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+	vm_thread_gettable_int :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
 		pc := pc_arg
 		regs := regs_arg
 		cl := cl_arg
@@ -2191,11 +2191,35 @@ when VM_THREADED {
 		trap := trap_arg
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
-		ra := base + getarg_A(i)
 		rb := &regs[getarg_B(i)].val
 		rc := &regs[getarg_C(i)].val
-		if !vm_thread_tryget(rb, rc, &regs[getarg_A(i)].val) {
-			trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra, ctx)
+		if tag_is_empty(table_fastgeti((^Table)(rb.value_.gc), int_value(rc), &regs[getarg_A(i)].val)) {
+			return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+
+		if trap != 0 {
+			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		next_i := pc[0]
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}
+
+	vm_thread_gettable_generic :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		rb := &regs[getarg_B(i)].val
+		rc := &regs[getarg_C(i)].val
+		if tag_is_empty(table_get((^Table)(rb.value_.gc), rc, &regs[getarg_A(i)].val)) {
+			return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 		}
 
 		if trap != 0 {
@@ -2547,13 +2571,13 @@ when VM_THREADED {
 		rb := &regs[getarg_B(i)].val
 		rc := &regs[getarg_C(i)].val
 		if base_type(rb) != TTABLE {
-			return #must_tail vm_thread_gettable_other(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+			return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 		}
 		h := (^Table)(rb.value_.gc)
 		if is_integer(rc) {
 			key := int_value(rc)
 			if Unsigned(key) - 1 >= Unsigned(h.asize) {
-				return #must_tail vm_thread_gettable_other(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+				return #must_tail vm_thread_gettable_int(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 			}
 			if tag_is_empty(table_fastgeti(h, key, &regs[getarg_A(i)].val)) {
 				return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
@@ -2563,7 +2587,7 @@ when VM_THREADED {
 				return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 			}
 		} else {
-			return #must_tail vm_thread_gettable_other(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+			return #must_tail vm_thread_gettable_generic(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 		}
 
 		if trap != 0 {

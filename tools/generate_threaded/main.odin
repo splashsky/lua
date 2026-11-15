@@ -114,7 +114,8 @@ emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	noinline := ""
 	if name == "vm_thread_enter" || name == "vm_thread_trace" || name == "vm_thread_poll" ||
 	   name == "vm_thread_RETURN0_slow" || name == "vm_thread_RETURN1_slow" ||
-	   name == "vm_thread_gettable_miss" || name == "vm_thread_gettable_other" || name == "vm_thread_concat_meta_op" {
+	   name == "vm_thread_gettable_miss" || name == "vm_thread_gettable_int" ||
+	   name == "vm_thread_gettable_generic" || name == "vm_thread_concat_meta_op" {
 		noinline = "#force_no_inline "
 	}
 	fmt.sbprintf(b, "\t%s :: %sproc \"preserve/none\" %s {{\n", name, noinline, SIG)
@@ -167,6 +168,7 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src, 
 	review(between(tm_src, "tm_gettmbyobj :: proc", "// The type name"), "b9d33e4481e049c8858bc8a68c5e0edf619dd19e5d4d0abc9b0fda806cfeeded", "tm_gettmbyobj")
 	review(between(tm_src, "tm_tryconcatTM :: proc", "// An ordering metamethod"), "6f33172aa69a529399b2a5d529dedd32227910aa1816d559ebd6b7daed289d71", "tm_tryconcatTM")
 	review(between(table_src, "table_get ::", "// Odin does not reliably inline"), "86124ae5d3c25a8ec0c1fc4bcdfa3b576de9b8401b7597f3693f94230ddaab04", "table_get")
+	review(between(table_src, "table_getint :: proc", "// This is the Odin equivalent"), "3f43ee7bb008ff2e3bf42367fa07e3a3f84eb5a75484f68a0d0d76408d0cbf20", "table_getint")
 	review(between(table_src, "table_fastgeti :: #force_inline proc", "table_getshortstr :: proc"), "9e2ed5c5700ae19c8185bcfb1f6f1e62ede27e1ed89e1c574532ba0eb26d448b", "table_fastgeti")
 	review(between(table_src, "table_fastget ::", "// ---------------------------------------------------------------------------\n// Insertion into the hash part"), "8490a704b65daa82efe7a00322f7c5bff9188b22a50549d5f79ac50d2ae846c0", "table_fastget")
 	review(between(table_src, "table_fastseti :: #force_inline proc", "// Reference's short-string preset"), "38b0e28d813b2d93e29b4b5c9b614b99bd77d3485f3ceec1e50af82517aec017", "table_fastseti")
@@ -296,11 +298,16 @@ rb := &regs[getarg_B(i)].val
 rc := &regs[getarg_C(i)].val
 trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra, ctx)
 `, dispatch), true)
-	emit_proc(&b, "vm_thread_gettable_other", fmt.tprintf("%s\n%s", `ra := base + getarg_A(i)
-rb := &regs[getarg_B(i)].val
+	emit_proc(&b, "vm_thread_gettable_int", fmt.tprintf("%s\n%s", `rb := &regs[getarg_B(i)].val
 rc := &regs[getarg_C(i)].val
-if !vm_thread_tryget(rb, rc, &regs[getarg_A(i)].val) {
-	trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra, ctx)
+if tag_is_empty(table_fastgeti((^Table)(rb.value_.gc), int_value(rc), &regs[getarg_A(i)].val)) {
+	return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`, dispatch), true)
+	emit_proc(&b, "vm_thread_gettable_generic", fmt.tprintf("%s\n%s", `rb := &regs[getarg_B(i)].val
+rc := &regs[getarg_C(i)].val
+if tag_is_empty(table_get((^Table)(rb.value_.gc), rc, &regs[getarg_A(i)].val)) {
+	return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 }
 `, dispatch), true)
 	emit_proc(&b, "vm_thread_concat_meta_op", fmt.tprintf("%s\n%s", `ra := base + getarg_A(i)
@@ -332,13 +339,13 @@ trap = L.frames[ci_idx].u.l.trap
 			body = `rb := &regs[getarg_B(i)].val
 rc := &regs[getarg_C(i)].val
 if base_type(rb) != TTABLE {
-	return #must_tail vm_thread_gettable_other(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 }
 h := (^Table)(rb.value_.gc)
 if is_integer(rc) {
 	key := int_value(rc)
 	if Unsigned(key) - 1 >= Unsigned(h.asize) {
-		return #must_tail vm_thread_gettable_other(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		return #must_tail vm_thread_gettable_int(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 	}
 	if tag_is_empty(table_fastgeti(h, key, &regs[getarg_A(i)].val)) {
 		return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
@@ -348,7 +355,7 @@ if is_integer(rc) {
 		return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 	}
 } else {
-	return #must_tail vm_thread_gettable_other(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	return #must_tail vm_thread_gettable_generic(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 }
 `
 		}

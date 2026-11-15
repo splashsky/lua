@@ -331,10 +331,12 @@ vm_variable_table_reads :: proc(t: ^testing.T) {
 		assert(alias == 11)
 		t[2] = nil
 		local s, big, obj = 'short-key', string.rep('x', 100), {}
-		t[s], t[big], t[obj], t[999], t[1.25] = 33, 44, 55, 66, 77
-		for key, value in pairs({[s]=33, [big]=44, [obj]=55, [999]=66, [1.25]=77}) do
+		t[s], t[big], t[obj], t[999], t[1.25], t[-7] = 33, 44, 55, 66, 77, 88
+		for key, value in pairs({[s]=33, [big]=44, [obj]=55, [999]=66, [1.25]=77, [-7]=88}) do
 		  assert(t[key] == value)
 		end
+		local integral_float = 1.0
+		assert(t[integral_float] == 11)
 		setmetatable(t, {__index = function(_, key)
 		  coroutine.yield(key)
 		  collectgarbage('collect')
