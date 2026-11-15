@@ -18,8 +18,11 @@ INTERNAL_ASSERTS :: #config(INTERNAL_ASSERTS, ODIN_DEBUG || ODIN_TEST || HARDSTA
 // internal invariants; embedders may explicitly opt out.
 API_CHECKS :: #config(API_CHECKS, true)
 
+// The threaded handlers need preserve/none tail calls and the supported jump shim.
+VM_THREADED_SUPPORTED :: ODIN_ARCH == .amd64 || ODIN_ARCH == .arm64
 // Experimental tail-call-threaded dispatch; the switch VM remains the default.
 VM_THREADED :: #config(VM_THREADED, false)
+#assert(!VM_THREADED || VM_THREADED_SUPPORTED, "VM_THREADED requires amd64 or arm64")
 
 // Test-only analogue of reference HARDSTACKTESTS; see realloc_stack and realloc_ci.
 HARDSTACKTESTS :: #config(HARDSTACKTESTS, false)
