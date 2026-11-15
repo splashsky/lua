@@ -599,6 +599,75 @@ do_precall :: proc(L: ^State, func_in: int, nresults: int) -> int {
 	}
 }
 
+// The VM's native-call fast path. Do not retain a frame pointer across f: it
+// can grow either array, install hooks, yield, or raise. do_poscall re-derives
+// the frame from next after f returns.
+@(private)
+do_precall_native_vm :: #force_no_inline proc(L: ^State, func, nresults: int, f: C_Function) -> int {
+	top := L.top
+	next := L.ci + 1
+	if L.stack_size - top <= MINSTACK || next >= L.frames_capacity || (L.hookmask & MASKCALL) != 0 {
+		return do_precall(L, func, nresults)
+	}
+	L.ci = next
+	ci := &L.frames[next]
+	ci.func = func
+	ci.callstatus = u32(nresults + 1) | CIST_C
+	ci.top = top + MINSTACK
+	n := int(f(L))
+	do_poscall(L, next, n)
+	// The VM distinguishes a finished native call by sign; do_precall itself
+	// retains its public -1 result. Preserve that distinction for every i32 n.
+	return n | min(int)
+}
+
+// Fast CALL entry when the required stack and frame slots already exist. The
+// generic path handles __call, native call hooks, growth, errors, and all forced
+// moves in HARDSTACKTESTS. Lua hooks still run at frame entry, and do_poscall
+// handles native return hooks. Nothing on the Lua fast path can allocate or
+// re-enter Lua.
+@(private)
+do_precall_vm :: #force_no_inline proc(L: ^State, func: int, nresults: int) -> int {
+	when HARDSTACKTESTS {
+		return do_precall(L, func, nresults)
+	} else {
+		v := stack_value(L, func)
+		switch type_tag(v) {
+		case VLCF:
+			return do_precall_native_vm(L, func, nresults, v.value_.f)
+		case VCCL:
+			return do_precall_native_vm(L, func, nresults, (^CClosure)(v.value_.gc).f)
+		case VLCL:
+		case:
+			return do_precall(L, func, nresults)
+		}
+		p := (^LClosure)(v.value_.gc).p
+		fsize := int(p.maxstacksize)
+		next := L.ci + 1
+		if L.stack_size - L.top <= fsize || next >= L.frames_capacity {
+			return do_precall(L, func, nresults)
+		}
+		L.ci = next
+		ci := &L.frames[next]
+		ci.func = func
+		ci.callstatus = u32(nresults + 1)
+		ci.top = func + 1 + fsize
+		ci.u.l.savedpc = 0
+		ci.u.l.nextraargs = 0
+		ci.u.l.trap = 0
+		top := L.top
+		end := func + 1 + int(p.numparams)
+		if top < end {
+			for top < end {
+				set_nil(stack_value(L, top))
+				top += 1
+			}
+			L.top = top
+		}
+		return next
+	}
+}
+
 // Call a function through C -- reference Lua's static `ccall`. `inc` bumps the
 // C-call counters (1 for an ordinary call, `nyci` when yields are disallowed).
 // If the callee is a Lua function, we mark its frame FRESH and hand it to the VM;

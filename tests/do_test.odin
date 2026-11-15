@@ -492,3 +492,109 @@ assert(a == 1 and b == nil and c == 3 and d == 4)
 		testing.expectf(t, false, "tail-call argument slide failed: %s", msg)
 	}
 }
+
+// These callbacks are entered through the VM's native CALL path, not through
+// an embedding API call. The close callback leaves a marked slot for poscall.
+precall_vm_results :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := (^kernel.State)(Lp)
+	n := kernel.api_tointeger(L, 1)
+	kernel.api_pushinteger(L, n + 1)
+	kernel.api_pushinteger(L, n + 2)
+	kernel.api_pushinteger(L, n + 3)
+	return 3
+}
+
+precall_vm_close :: proc "c" (Lp: rawptr) -> i32 {
+	context = runtime.default_context()
+	L := (^kernel.State)(Lp)
+	kernel.api_toclose(L, 1)
+	kernel.api_pushinteger(L, 123)
+	return 1
+}
+
+@(test)
+vm_precall_fast_and_fallback_paths :: proc(t: ^testing.T) {
+	L := dbg_state()
+	defer kernel.close_state(L)
+	kernel.api_pushcfunction(L, stdlib.open_coroutine)
+	kernel.api_call(L, 0, 1)
+	kernel.api_setglobal(L, "coroutine")
+	kernel.api_pushcfunction(L, precall_vm_results)
+	kernel.api_setglobal(L, "native_results")
+	kernel.api_pushinteger(L, 99)
+	kernel.api_pushcclosure(L, precall_vm_results, 1)
+	kernel.api_setglobal(L, "native_closure")
+	kernel.api_pushcfunction(L, precall_vm_close)
+	kernel.api_setglobal(L, "native_close")
+	kernel.api_pushcfunction(L, frame_move_probe)
+	kernel.api_setglobal(L, "framemove")
+	kernel.api_pushcfunction(L, stack_move_probe)
+	kernel.api_setglobal(L, "stackmove")
+	src := `
+local function exercise(n)
+  native_results(n)
+  local x = native_results(n)
+  local a,b,c = native_results(n)
+  assert(x == n+1 and a == n+1 and b == n+2 and c == n+3)
+  return select('#', native_results(n))
+end
+assert(exercise(10) == 3)
+local a,b,c = native_closure(11)
+assert(a == 12 and b == 13 and c == 14)
+local function moved()
+  assert(stackmove())
+  assert(framemove())
+  return exercise(20)
+end
+assert(moved() == 3)
+local events = ''
+debug.sethook(function(event)
+  local f = debug.getinfo(2, 'f').func
+  if f == native_results or f == native_closure then
+    if event == 'call' then events = events .. 'c'
+    elseif event == 'return' then events = events .. 'r' end
+  end
+end, 'cr')
+a,b,c = native_results(30)
+local d,e,f = native_closure(35)
+debug.sethook()
+assert(a == 31 and b == 32 and c == 33 and d == 36 and e == 37 and f == 38)
+assert(events == 'crcr')
+local called = setmetatable({}, {__call = function(_, x) return native_results(x) end})
+a,b,c = called(40)
+assert(a == 41 and b == 42 and c == 43)
+local closed = 0
+local resource = setmetatable({}, {__close = function() closed = closed + 1 end})
+local sawreturn = false
+debug.sethook(function(event)
+  if event == 'return' and debug.getinfo(2, 'f').func == native_close then
+    assert(closed == 1)
+    sawreturn = true
+  end
+end, 'r')
+local result = native_close(resource)
+debug.sethook()
+assert(result == 123 and closed == 1 and sawreturn)
+local co = coroutine.create(function()
+  local value = coroutine.yield('body')
+  local x,y,z = native_results(value)
+  local r = setmetatable({}, {__close = function() coroutine.yield('close') end})
+  local last = native_close(r)
+  return x,y,z,last
+end)
+local ok, x = coroutine.resume(co)
+assert(ok and x == 'body')
+ok, x = coroutine.resume(co, 50)
+assert(ok and x == 'close')
+local y,z,last
+ok,x,y,z,last = coroutine.resume(co)
+assert(ok and x == 51 and y == 52 and z == 53 and last == 123)
+assert(coroutine.status(co) == 'dead')
+`
+	status := dbg_run(L, src)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "VM precall: %s", msg)
+	}
+}

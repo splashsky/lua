@@ -1450,7 +1450,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 					L.top = ra + b // fixed arg count
 				}
 				L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
-				newci := do_precall(L, ra, nresults)
+				newci := do_precall_vm(L, ra, nresults)
 				if newci >= 0 { // Lua callee: run it in this same trampoline
 					ci_idx = newci
 					continue newframe

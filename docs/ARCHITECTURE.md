@@ -277,6 +277,14 @@ stack ceiling and its reserves fit; larger custom ceilings use the full-width
 count. This does not narrow saved PCs or stack/frame indices and leaves the frame
 allocation size unchanged.
 
+For `CALL`, the VM can set up Lua and native frames without allocating when
+stack headroom and a frame slot are already available. Non-functions and growth
+go through the full precall protocol; native calls also use that path when a
+call hook is enabled. Lua hooks still run at frame entry, and native return hooks
+run in `do_poscall`. A native callback can allocate and move either array, so its
+frame is retained by index and resolved again after the callback. `HARDSTACKTESTS`
+always uses the full protocol so its forced moves still exercise every call.
+
 Internal invariant assertions follow reference `lua_assert`: release builds omit
 them; debug, Odin test and stress builds enable them. Embedding API precondition
 checks have their own `API_CHECKS` switch and remain enabled by default to preserve
