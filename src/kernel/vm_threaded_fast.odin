@@ -60,6 +60,23 @@ when VM_THREADED {
 			vm_finishset(L, t, key, val, hres)
 			return L.frames[ci_idx].u.l.trap
 		}
+		// Integer keys need no key barrier. A collectable value is safe here
+		// only when the ordinary back barrier would do nothing. No allocation
+		// or re-entry occurs between this test and a completed pre-set.
+		if base_type(t) == TTABLE && is_collectable(val) && is_integer(key) {
+			h := (^Table)(t.value_.gc)
+			if !is_black(obj2gco(h)) || !keepinvariant(L.g) {
+				hres := table_fastseti(h, int_value(key), val)
+				if hres == HOK {
+					return L.frames[ci_idx].u.l.trap
+				}
+				context = ctx^
+				L.frames[ci_idx].u.l.savedpc = pc
+				L.top = L.frames[ci_idx].top
+				vm_finishset(L, t, key, val, hres)
+				return L.frames[ci_idx].u.l.trap
+			}
+		}
 		context = ctx^
 		#force_inline vm_settable(L, ci_idx, pc, t, key, val)
 		return L.frames[ci_idx].u.l.trap

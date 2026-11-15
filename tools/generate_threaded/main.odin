@@ -150,7 +150,7 @@ rewrite_returns :: proc(s: string, count: ^int) -> string {
 	return strings.to_string(b)
 }
 
-generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src: string) -> string {
+generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src: string) -> string {
 	review(between(src, "vm_finishget :: proc", "// The VM's table read"), "cff1bbd520882786832a21ed0384f86465f24b06c3359529b1c33691aaac40cf", "vm_finishget")
 	review(between(src, "vm_gettable :: proc(", "\n// OP_GETI"), "ec9fd4cce26c455e29ebb7114d3d5d3afb0778e5210a77e0cebde1f4ac98b628", "vm_gettable")
 	review(between(src, "vm_settable :: proc(", "// OP_SETI"), "a1d4edb3b18fe00ac7cdd73b9d337146a3fd483f85f51fe791975d69cf929b77", "vm_settable")
@@ -159,6 +159,10 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src: string) 
 	review(between(tm_src, "tm_gettmbyobj :: proc", "// The type name"), "b9d33e4481e049c8858bc8a68c5e0edf619dd19e5d4d0abc9b0fda806cfeeded", "tm_gettmbyobj")
 	review(between(table_src, "table_get ::", "// Odin does not reliably inline"), "86124ae5d3c25a8ec0c1fc4bcdfa3b576de9b8401b7597f3693f94230ddaab04", "table_get")
 	review(between(table_src, "table_fastget ::", "// ---------------------------------------------------------------------------\n// Insertion into the hash part"), "8490a704b65daa82efe7a00322f7c5bff9188b22a50549d5f79ac50d2ae846c0", "table_fastget")
+	review(between(table_src, "table_fastseti :: #force_inline proc", "// Reference's short-string preset"), "38b0e28d813b2d93e29b4b5c9b614b99bd77d3485f3ceec1e50af82517aec017", "table_fastseti")
+	review(between(table_src, "table_psetshortstr :: proc", "table_psetstr :: proc"), "f7f146d846e2a8f0750cfada9e307bfd00cbbfd00c9433f95e4cac703d65dafc", "table_psetshortstr")
+	review(between(gc_src, "gc_barrierback :: #force_inline proc", "// ---------------------------------------------------------------------------\n// Marking"), "e0cd00545b842118e7412e431990db1781e48a19244480187c41aa845b44dff4", "gc_barrierback")
+	review(between(state_src, "keepinvariant :: #force_inline proc", "// True while sweeping"), "cbe4aecaa9c5ae71e9693c95e1f7f99cb10f88c938fb75c046cffd9ba3847a23", "keepinvariant")
 	review(between(do_src, "do_precall :: proc(", "\n// Call a function through C"), "3dd0c962e31dea3def02de9441fe585adfa855a6c50b82c0d1fffb393f01fb7c", "do_precall")
 	review(between(do_src, "precallC ::", "// Prepare a tail call"), "640f1ca44253255dd033a31cb42d5188a3c0ab420ccde017a234ab7b89aa74e0", "precallC")
 	review(between(do_src, "do_poscall ::", "// Allocate and initialize the next call frame"), "8371b825b64d90b22c7a983c4bfd5a74a05f336ed19770ee23cf25622d9f4096", "do_poscall")
@@ -394,6 +398,7 @@ main :: proc() {
 		read_text(fmt.tprintf("%s/src/kernel/state.odin", root)),
 		read_text(fmt.tprintf("%s/src/kernel/tm.odin", root)),
 		read_text(fmt.tprintf("%s/src/kernel/table.odin", root)),
+		read_text(fmt.tprintf("%s/src/kernel/gc.odin", root)),
 	)
 	result := fmt.tprintf("%s%s", src, generated)
 	if len(os.args) == 3 {

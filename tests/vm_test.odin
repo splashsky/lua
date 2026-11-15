@@ -304,6 +304,17 @@ vm_variable_table_writes :: proc(t: ^testing.T) {
 		assert(ok2 and a == 12 and b == 42 and c == 99)
 		local ok3 = pcall(function() local x, k = false, 1; x[k] = 1 end)
 		assert(not ok3)
+		for _, mode in ipairs({'incremental', 'generational'}) do
+		  collectgarbage(mode)
+		  local holder = {false}
+		  collectgarbage('collect')
+		  for i = 1, 200 do
+		    local k = 1
+		    holder[k] = {i}
+		    collectgarbage('step')
+		    assert(holder[k][1] == i)
+		  end
+		end
 		return true
 	`)
 	if status != .Ok {
