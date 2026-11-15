@@ -382,6 +382,38 @@ return a + b + x
 	testing.expect_value(t, kernel.api_tointeger(L, -1), 134)
 }
 
+// Trace every instruction through integer and float loop back edges. Moving the
+// stack from the hook makes the resumed fetch refresh its register base.
+@(test)
+numeric_loop_trace_and_relocation :: proc(t: ^testing.T) {
+	L := corolib_state()
+	defer kernel.close_state(L)
+	stdlib.aux_openlibs(L)
+	kernel.api_pushcfunction(L, stack_move_probe)
+	kernel.api_setglobal(L, "probe")
+	src := `
+local seen = 0
+local function hook()
+  seen = seen + 1
+  if seen == 20 then assert(probe()) end
+end
+local function run()
+  local sum = 0
+  for i = 1, 20 do sum = sum + i end
+  for i = 20, 1, -1 do sum = sum + i end
+  for i = 1.0, 3.0, 0.5 do sum = sum + i end
+  return sum
+end
+debug.sethook(hook, '', 1)
+local result = run()
+debug.sethook()
+assert(seen > 20)
+return result
+`
+	testing.expect_value(t, corolib_run(L, src), kernel.Thread_Status.Ok)
+	testing.expect_value(t, kernel.api_tointeger(L, -1), 430)
+}
+
 // An error longjmps past Lua frames; their old tops must not keep the enlarged
 // stack alive or make a later overflow look like an error in error handling.
 @(test)

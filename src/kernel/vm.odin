@@ -4323,29 +4323,36 @@ when VM_THREADED {
 		trap := trap_arg
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
-						ra := getarg_A(i)
-						if is_integer(&regs[ra + 1].val) { // integer loop
-							count := s2u(int_value(&regs[ra].val))
-							if count > 0 {
-								step := int_value(&regs[ra + 1].val)
-								idx := int_value(&regs[ra + 2].val)
-								set_int(&regs[ra].val, u2s(count - 1)) // decrement counter
-								set_int(&regs[ra + 2].val, int_add(idx, step)) // advance control
-								pc = vm_pc_add(pc, -(getarg_Bx(i))) // jump back
-								when ODIN_OS != .Freestanding {
+		ra := getarg_A(i)
+		if is_integer(&regs[ra + 1].val) { // integer loop
+			count := s2u(int_value(&regs[ra].val))
+			if count > 0 {
+				target := vm_pc_add(pc, -(getarg_Bx(i)))
+				next_i := target[0]
+				step := int_value(&regs[ra + 1].val)
+				idx := int_value(&regs[ra + 2].val)
+				set_int(&regs[ra].val, u2s(count - 1))
+				set_int(&regs[ra + 2].val, int_add(idx, step))
+				pc = target
+				when ODIN_OS != .Freestanding {
+					if intrinsics.atomic_load(&async_hook_pending) != 0 {
+						return #must_tail vm_thread_poll(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+					}
+				}
+				if trap != 0 {
+					return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+				}
+				pc = vm_pc_add(pc, 1)
+				return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+			}
+		} else if floatforloop(L, base + ra) { // float loop
+			pc = vm_pc_add(pc, -(getarg_Bx(i)))
+			when ODIN_OS != .Freestanding {
 			if intrinsics.atomic_load(&async_hook_pending) != 0 {
 				return #must_tail vm_thread_poll(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 			}
 		}
-							}
-						} else if floatforloop(L, base + ra) { // float loop
-							pc = vm_pc_add(pc, -(getarg_Bx(i)))
-							when ODIN_OS != .Freestanding {
-			if intrinsics.atomic_load(&async_hook_pending) != 0 {
-				return #must_tail vm_thread_poll(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
-			}
 		}
-						}
 
 
 		if trap != 0 {

@@ -285,13 +285,14 @@ String lengths use a contextless handler but retain the switch VM's saved-PC
 and stack-top updates; other lengths use the ordinary helper with the original
 context. Constant-operand floor division and modulo use the contextless raw
 arithmetic helper, with the same saved-PC and top updates; their zero-divisor
-errors use the original context. A one-instruction integer `FORLOOP` can be
-selected at `FORPREP` when no trace is armed. Its loop retains each register
-update and interrupt poll; a pending interrupt returns to the ordinary poll and
-fetch path at the back edge.
-Other loops, floating-point loops and traced execution use the normal handler.
-The call-hook work at frame entry is separated from the no-hook path, with the
-same base refresh after the hook. These rewrites are guarded by the generator.
+errors use the original context. On an integer `FORLOOP` back edge, the next
+instruction is read before the loop registers are updated; a pending interrupt
+or trace discards that read and uses the ordinary poll or trace path. The code
+is immutable while the activation runs, and the same register tags are written
+as in the switch. This applies to integer loops generally, not just empty ones;
+floating-point loops use the ordinary path. The call-hook work at frame entry
+is separated from the no-hook path, with the same base refresh after the hook.
+These rewrites are guarded by the generator.
 
 The threaded CALL handler specializes non-allocating Lua-closure setup and
 native calls without hooks whose callers want zero or one result. A native

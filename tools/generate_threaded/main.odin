@@ -296,6 +296,38 @@ if is_string(rb) {
 trap = L.frames[ci_idx].u.l.trap
 `
 		}
+		// Fetch the integer loop's next instruction before the register updates.
+		// The running activation's code is immutable; a poll or trace discards
+		// this read and fetches again through the ordinary path.
+		if name == "FORLOOP" {
+			body = dedent(body)
+			body = replace_exact(body, `if count > 0 {
+		step := int_value(&regs[ra + 1].val)
+		idx := int_value(&regs[ra + 2].val)
+		set_int(&regs[ra].val, u2s(count - 1)) // decrement counter
+		set_int(&regs[ra + 2].val, int_add(idx, step)) // advance control
+		pc = vm_pc_add(pc, -(getarg_Bx(i))) // jump back
+		trap = vm_poll_async_hook(L, trap)
+	}`, `if count > 0 {
+		target := vm_pc_add(pc, -(getarg_Bx(i)))
+		next_i := target[0]
+		step := int_value(&regs[ra + 1].val)
+		idx := int_value(&regs[ra + 2].val)
+		set_int(&regs[ra].val, u2s(count - 1))
+		set_int(&regs[ra + 2].val, int_add(idx, step))
+		pc = target
+		when ODIN_OS != .Freestanding {
+			if intrinsics.atomic_load(&async_hook_pending) != 0 {
+				return #must_tail vm_thread_poll(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+			}
+		}
+		if trap != 0 {
+			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}`)
+		}
 		if name == "MODK" || name == "IDIVK" {
 			body = replace_exact(body, "vm_arith(", "vm_thread_arith(")
 			if name == "MODK" {
