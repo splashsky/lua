@@ -2466,10 +2466,10 @@ when VM_THREADED {
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
 		ra := base + getarg_A(i)
-		rb := stack_value(L, base + getarg_B(i))
-		rc := stack_value(L, base + getarg_C(i))
+		rb := &regs[getarg_B(i)].val
+		rc := &regs[getarg_C(i)].val
 		when VM_THREADED {
-			if !vm_thread_tryget(rb, rc, stack_value(L, ra)) {
+			if !vm_thread_tryget(rb, rc, &regs[getarg_A(i)].val) {
 				_ = ctx
 				trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), rb, rc, ra, ctx)
 			}
@@ -2586,10 +2586,10 @@ when VM_THREADED {
 		trap := trap_arg
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
-		ra := stack_value(L, base + getarg_A(i))
-		rb := stack_value(L, base + getarg_B(i))
+		ra := &regs[getarg_A(i)].val
+		rb := &regs[getarg_B(i)].val
 		when VM_THREADED {
-			rc := &k[getarg_C(i)] if testarg_k(i) != 0 else stack_value(L, base + getarg_C(i))
+			rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
 			if !vm_thread_tryset(ra, rb, rc) {
 				_ = ctx
 				trap = vm_thread_setslow(L, ci_idx, vm_pc_index(pc, code), ra, rb, rc, ctx)

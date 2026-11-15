@@ -286,9 +286,19 @@ regs = ([^]StackValue)(&L.stack[base])`, dispatch))
 			body = replace_exact(body, "thread_ctx := context", "_ = ctx")
 			body = replace_exact(body, "ra, &thread_ctx)", "ra, ctx)")
 		}
+		// regs already points at the current base. It remains valid until a
+		// callout, and all these pointers are consumed before that callout.
+		if name == "GETTABLE" {
+			body = replace_exact(body, "stack_value(L, base + getarg_B(i))", "&regs[getarg_B(i)].val")
+			body = replace_exact(body, "stack_value(L, base + getarg_C(i))", "&regs[getarg_C(i)].val")
+			body = replace_exact(body, "vm_thread_tryget(rb, rc, stack_value(L, ra))", "vm_thread_tryget(rb, rc, &regs[getarg_A(i)].val)")
+		}
 		if name == "SETTABLE" {
 			body = replace_exact(body, "thread_ctx := context", "_ = ctx")
 			body = replace_exact(body, "rc, &thread_ctx)", "rc, ctx)")
+			body = replace_exact(body, "stack_value(L, base + getarg_A(i))", "&regs[getarg_A(i)].val")
+			body = replace_exact(body, "stack_value(L, base + getarg_B(i))", "&regs[getarg_B(i)].val")
+			body = replace_exact(body, "else stack_value(L, base + getarg_C(i))", "else &regs[getarg_C(i)].val")
 		}
 		if name == "CALL" {
 			body = replace_exact(body, "thread_ctx := context", "_ = ctx")
