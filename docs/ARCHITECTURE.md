@@ -189,8 +189,9 @@ architectures use automatically; forcing threaded elsewhere is a compile error.
 Each of the 85 opcodes has a handler, and a 128-entry table maps the whole
 seven-bit opcode field, with one error handler for the 43 unused encodings. Odin's
 `"preserve/none"` convention and `#must_tail` turn every fetch into an indirect
-jump. It has been run only on Linux x86-64; Windows x64, Linux arm64 and macOS
-arm64 objects were inspected for indirect tail jumps but not run.
+jump. It runs natively on Linux x86-64 and under QEMU emulation on Linux arm64;
+Windows x64 and macOS arm64 objects were inspected for indirect tail jumps but
+not run.
 
 Handlers pass `L`, the next PC, the register-base pointer, closure, code base,
 frame index, trap, an Odin context pointer and the current instruction.

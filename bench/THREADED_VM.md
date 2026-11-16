@@ -6,10 +6,14 @@ choice, and the automatic choice elsewhere. This file records the current
 comparison of the two against reference Lua. The remaining work is in
 [docs/FUTURE_WORK.md](../docs/FUTURE_WORK.md).
 
-It has been run only on Linux x86-64. Windows x64, Linux arm64 and macOS arm64,
-and the freestanding amd64 SysV, amd64 Win64 and arm64 objects, are
-cross-compiled, and their `MOVE` handler was checked to end in an indirect jump
-(`jmp` on amd64, `br` on arm64). That is not runtime validation.
+It runs natively on Linux x86-64 only. Under QEMU user-mode emulation on Linux
+arm64 the PUC-Rio suite passed in both interpreters, plain and stressed, and the
+unit tests passed except one NaN-sign test fixture
+([docs/plans/validation.md](../docs/plans/validation.md)); emulation says nothing
+about speed. Windows x64 and macOS arm64, and the freestanding amd64 SysV, amd64
+Win64 and arm64 objects, are cross-compiled, and their `MOVE` handler was checked
+to end in an indirect jump (`jmp` on amd64, `br` on arm64). That is not runtime
+validation.
 
 ## Current comparison (master `fbcffa8`, 2026-11-15)
 

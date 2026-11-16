@@ -91,8 +91,10 @@ VM_THREADED=0 bash build/test.sh --stress --asan
 VM_THREADED=0 STRESS=1 ASAN=1 bash build/puc.sh
 ```
 
-The threaded interpreter has been run only on Linux x86-64. Windows x64, Linux
-arm64 and macOS arm64 are cross-compiled but not yet run.
+Both interpreters run natively on Linux x86-64 only. On Linux arm64 they have
+run under QEMU user-mode emulation (see `docs/plans/validation.md` for the
+sysroot recipe): the PUC-Rio suite passes, plain and stressed. Windows x64 and
+macOS arm64 are cross-compiled but not yet run.
 
 The switch opcode bodies are the source of the threaded handlers. After changing
 one, or a helper a threaded specialization mirrors, run

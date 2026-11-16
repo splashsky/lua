@@ -22,9 +22,10 @@ comparisons against a reference `lua`/`luac` you build yourself are supported
   on Linux x86-64, in both interpreters, including forced stack relocation under
   AddressSanitizer.
 - A tail-call-threaded interpreter is the default on amd64 and arm64; the switch
-  interpreter is used on other architectures and with `VM_THREADED=0`. The
-  threaded interpreter has been run only on Linux x86-64; Windows x64, Linux arm64
-  and macOS arm64 are cross-compiled but not yet run.
+  interpreter is used on other architectures and with `VM_THREADED=0`. Both run
+  natively on Linux x86-64 and, under QEMU user-mode emulation, on Linux arm64,
+  where the PUC-Rio suite passes. Windows x64 and macOS arm64 are cross-compiled
+  but not yet run.
 - Against reference Lua 5.5.1 on Linux x86-64, the default executes no more
   instructions than reference on simple calls, string building, tables, sorting,
   local dates and number formatting. The largest remaining gaps are Lua patterns
