@@ -57,6 +57,39 @@ string_byte_comparison_handles_long_unaligned_ranges :: proc(t: ^testing.T) {
 }
 
 @(test)
+string_byte_comparison_respects_short_allocation_boundaries :: proc(t: ^testing.T) {
+	// Each allocation ends exactly at the comparison's end. ASan therefore
+	// catches an over-read even when the overlapping words are unaligned.
+	testing.expect(t, kernel.mem_eq(nil, nil, 0))
+	alloc := kernel.default_allocator()
+	for offset in 0 ..< 8 {
+		for n in 1 ..< 8 {
+			size := uint(offset + n)
+			a := ([^]u8)(alloc.alloc(alloc.ud, nil, 0, size))
+			b := ([^]u8)(alloc.alloc(alloc.ud, nil, 0, size))
+			if a == nil || b == nil {
+				if a != nil do alloc.alloc(alloc.ud, a, size, 0)
+				if b != nil do alloc.alloc(alloc.ud, b, size, 0)
+				testing.expect(t, false, "allocation failed")
+				return
+			}
+			for i in 0 ..< n {
+				a[offset + i] = u8(i + 1)
+				b[offset + i] = u8(i + 1)
+			}
+			testing.expect(t, kernel.mem_eq(&a[offset], &b[offset], uint(n)))
+			for i in 0 ..< n {
+				b[offset + i] ~= 0xff
+				testing.expect(t, !kernel.mem_eq(&a[offset], &b[offset], uint(n)))
+				b[offset + i] ~= 0xff
+			}
+			alloc.alloc(alloc.ud, a, size, 0)
+			alloc.alloc(alloc.ud, b, size, 0)
+		}
+	}
+}
+
+@(test)
 string_short_and_long_boundary_storage :: proc(t: ^testing.T) {
 	c: Counting_Allocator
 	L := kernel.new_state(kernel.Allocator{alloc = counting_alloc, ud = &c})

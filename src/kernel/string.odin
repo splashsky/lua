@@ -153,6 +153,19 @@ string_hashlongstr :: proc "contextless" (ts: ^TString) -> u32 {
 mem_eq :: #force_inline proc "contextless" (a: [^]u8, b: [^]u8, n: uint) -> bool {
 	// Use bounded unaligned word loads for short ranges, and the standard block
 	// comparison for longer ones. Neither path reads past the supplied bytes.
+	if n < 8 {
+		// The first and last words cover the whole range, possibly overlapping.
+		// This avoids separate 4/2/1-byte tail tests on common interned keys.
+		if n >= 4 {
+			return intrinsics.unaligned_load((^u32)(a)) == intrinsics.unaligned_load((^u32)(b)) &&
+				intrinsics.unaligned_load((^u32)(&a[n - 4])) == intrinsics.unaligned_load((^u32)(&b[n - 4]))
+		}
+		if n >= 2 {
+			return intrinsics.unaligned_load((^u16)(a)) == intrinsics.unaligned_load((^u16)(b)) &&
+				intrinsics.unaligned_load((^u16)(&a[n - 2])) == intrinsics.unaligned_load((^u16)(&b[n - 2]))
+		}
+		return n == 0 || a[0] == b[0]
+	}
 	if n >= 64 do return mem.compare_ptrs(rawptr(a), rawptr(b), int(n)) == 0
 	i: uint = 0
 	for n - i >= 8 {
