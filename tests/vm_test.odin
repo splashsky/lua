@@ -317,6 +317,78 @@ vm_concat_coercion_and_yield :: proc(t: ^testing.T) {
 	testing.expect(t, kernel.api_toboolean(L, -1))
 }
 
+// Global reads use a captured _ENV. Cover open and closed upvalues, missing
+// keys, non-tables and a yielding __index that can relocate the stacks.
+@(test)
+vm_global_reads_and_yield :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local function closed(env)
+		  local _ENV = env
+		  return function() return answer end
+		end
+		local function open(env)
+		  local _ENV = env
+		  local function read() return answer end
+		  return read()
+		end
+		assert(open({answer = 12}) == 12)
+		local read = closed({answer = 42})
+		assert(read() == 42 and closed({})() == nil)
+		assert(not pcall(closed(false)))
+		local env = setmetatable({}, {__index = function(_, key)
+		  coroutine.yield(key)
+		  collectgarbage('collect')
+		  return 71
+		end})
+		local co = coroutine.create(closed(env))
+		local hooks = 0
+		debug.sethook(co, function() hooks = hooks + 1 end, '', 1)
+		local ok, key = coroutine.resume(co)
+		assert(ok and key == 'answer')
+		local done, value = coroutine.resume(co)
+		assert(done and value == 71 and hooks > 0)
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
+// Loaded bytecode is not validated to require a string constant here. Retain
+// the switch's generic-key behavior for such instructions.
+@(test)
+vm_global_read_non_string_constant :: proc(t: ^testing.T) {
+	fx: Parse_Fixture
+	status := compile(&fx, "return answer")
+	defer teardown_parser(&fx)
+	testing.expect_value(t, status, kernel.Thread_Status.Ok)
+	if status != .Ok do return
+	p := main_proto(&fx)
+	found := false
+	for i in 0 ..< p.sizecode {
+		if kernel.get_opcode(p.code[i]) == .GETTABUP {
+			kernel.set_int(&p.k[kernel.getarg_C(p.code[i])], 7)
+			found = true
+			break
+		}
+	}
+	testing.expect(t, found)
+	if !found do return
+	kernel.func_initupvals(fx.L, fx.cl)
+	tab := kernel.table_new(fx.L)
+	kernel.set_table(kernel.upval_value(kernel.closure_upvals(fx.cl)[0]), tab)
+	value: kernel.TValue
+	kernel.set_int(&value, 42)
+	testing.expect_value(t, kernel.table_setint(fx.L, tab, 7, &value), kernel.Thread_Status.Ok)
+	testing.expect_value(t, kernel.api_pcall(fx.L, 0, 1, 0), kernel.Thread_Status.Ok)
+	testing.expect_value(t, kernel.api_tointeger(fx.L, -1), 42)
+}
+
 // Variable-key reads cover array and short-string hits, integer-hash and
 // generic keys, and misses whose __index yields and moves the stacks.
 @(test)

@@ -117,7 +117,8 @@ emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	   name == "vm_thread_CALL_lcf" || name == "vm_thread_CALL_ccl" ||
 	   name == "vm_thread_RETURN0_slow" || name == "vm_thread_RETURN1_slow" ||
 	   name == "vm_thread_gettable_miss" || name == "vm_thread_gettable_int" ||
-	   name == "vm_thread_gettable_generic" || name == "vm_thread_concat_meta_op" {
+	   name == "vm_thread_gettable_generic" || name == "vm_thread_gettabup_miss" ||
+	   name == "vm_thread_gettabup_generic" || name == "vm_thread_concat_meta_op" {
 		noinline = "#force_no_inline "
 	}
 	fmt.sbprintf(b, "\t%s :: %sproc \"preserve/none\" %s {{\n", name, noinline, SIG)
@@ -305,6 +306,19 @@ base = L.frames[ci_idx].func + 1
 regs = ([^]StackValue)(&L.stack[base])`, dispatch))
 	emit_proc(&b, "vm_thread_trace", fmt.tprintf("%s\n%s", dedent(trace), next))
 	emit_proc(&b, "vm_thread_poll", fmt.tprintf("trap = vm_apply_async_hook(L, trap)\n%s", dispatch))
+	// Constant short-string global hits do not need a generic key dispatch or
+	// ordinary-ABI callout. Preserve generic keys for unvalidated bytecode.
+	emit_proc(&b, "vm_thread_gettabup_miss", fmt.tprintf("%s\n%s", `ra := base + getarg_A(i)
+upval := upval_value(closure_upvals(cl)[getarg_B(i)])
+rc := &k[getarg_C(i)]
+trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), upval, rc, ra, ctx)
+`, dispatch), true)
+	emit_proc(&b, "vm_thread_gettabup_generic", fmt.tprintf("%s\n%s", `upval := upval_value(closure_upvals(cl)[getarg_B(i)])
+rc := &k[getarg_C(i)]
+if !vm_thread_tryget(upval, rc, &regs[getarg_A(i)].val) {
+	return #must_tail vm_thread_gettabup_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`, dispatch), true)
 	// The hot GETTABLE handler tail-transitions to these cold paths, so the
 	// ordinary ABI callouts cannot force it to spill the VM registers on hits.
 	emit_proc(&b, "vm_thread_gettable_miss", fmt.tprintf("%s\n%s", `ra := base + getarg_A(i)
@@ -345,6 +359,20 @@ trap = L.frames[ci_idx].u.l.trap
 		if name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "SELF" {
 			body = replace_exact(body, "thread_ctx := context", "_ = ctx")
 			body = replace_exact(body, "ra, &thread_ctx)", "ra, ctx)")
+		}
+		if name == "GETTABUP" {
+			body = `upval := upval_value(closure_upvals(cl)[getarg_B(i)])
+rc := &k[getarg_C(i)]
+if base_type(upval) != TTABLE {
+	return #must_tail vm_thread_gettabup_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+if type_tag(rc) != VSHRSTR {
+	return #must_tail vm_thread_gettabup_generic(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+if tag_is_empty(table_getshortstr((^Table)(upval.value_.gc), str_value(rc), &regs[getarg_A(i)].val)) {
+	return #must_tail vm_thread_gettabup_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`
 		}
 		// Only array and short-string hits stay in this handler. The array
 		// range check leaves integer hash lookups for the complete cold path.

@@ -2181,6 +2181,55 @@ when VM_THREADED {
 		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
 	}
 
+	vm_thread_gettabup_miss :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		ra := base + getarg_A(i)
+		upval := upval_value(closure_upvals(cl)[getarg_B(i)])
+		rc := &k[getarg_C(i)]
+		trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), upval, rc, ra, ctx)
+
+		if trap != 0 {
+			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		next_i := pc[0]
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}
+
+	vm_thread_gettabup_generic :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		upval := upval_value(closure_upvals(cl)[getarg_B(i)])
+		rc := &k[getarg_C(i)]
+		if !vm_thread_tryget(upval, rc, &regs[getarg_A(i)].val) {
+			return #must_tail vm_thread_gettabup_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+
+		if trap != 0 {
+			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		next_i := pc[0]
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}
+
 	vm_thread_gettable_miss :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
 		pc := pc_arg
 		regs := regs_arg
@@ -2560,19 +2609,17 @@ when VM_THREADED {
 		trap := trap_arg
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
-		ra := base + getarg_A(i)
 		upval := upval_value(closure_upvals(cl)[getarg_B(i)])
 		rc := &k[getarg_C(i)]
-		when VM_THREADED {
-			if !vm_thread_tryget(upval, rc, stack_value(L, ra)) {
-				_ = ctx
-				trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), upval, rc, ra, ctx)
-			}
-		} else {
-			vm_gettable(L, ci_idx, vm_pc_index(pc, code), upval, rc, ra)
-			trap = L.frames[ci_idx].u.l.trap
+		if base_type(upval) != TTABLE {
+			return #must_tail vm_thread_gettabup_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 		}
-
+		if type_tag(rc) != VSHRSTR {
+			return #must_tail vm_thread_gettabup_generic(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		if tag_is_empty(table_getshortstr((^Table)(upval.value_.gc), str_value(rc), &regs[getarg_A(i)].val)) {
+			return #must_tail vm_thread_gettabup_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
 
 		if trap != 0 {
 			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
