@@ -568,6 +568,19 @@ read_line :: proc(L: ^kernel.State, f: ^stream.Stream, chop: bool) -> bool {
 	// the result. Zeroing the 1 KiB scratch area first only adds work per read.
 	b: Buffer = ---
 	aux_buffinit(L, &b)
+	// The initial scratch area is already available. Most lines fit in it, so
+	// finish directly while keeping the same placeholder during string creation.
+	// Replacing that light userdata with the result avoids rotating two slots.
+	n, found := stream.read_until(f, b.init_b[:], '\n')
+	if found || n < AUX_BUFFERSIZE {
+		added := n
+		if found && chop do added -= 1
+		kernel.api_pushlstring(L, b.init_b[:added])
+		kernel.api_replace(L, -2)
+		return found || added > 0
+	}
+	// A full scratch area without a newline needs the ordinary growable buffer.
+	aux_addsize(&b, uint(n))
 	found_newline := false
 	for {
 		buff := aux_prepbuffsize(&b, AUX_BUFFERSIZE)
@@ -586,7 +599,7 @@ read_line :: proc(L: ^kernel.State, f: ^stream.Stream, chop: bool) -> bool {
 	}
 	aux_pushresult(&b)
 	// Success if we read a newline or produced any bytes at all.
-	return found_newline || kernel.api_rawlen(L, -1) > 0
+	return found_newline || b.n > 0
 }
 
 // Read the entire remaining file in buffer-sized chunks -- reference `read_all`.

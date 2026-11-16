@@ -122,6 +122,14 @@ io_bulk_read_edge_cases :: proc(t: ^testing.T) {
 		"local long = ''; for i = 1, 20000 do long = long .. 'x' end\n" +
 		"put(long .. '\\nlast'); f = assert(io.open(path, 'r'))\n" +
 		"assert(f:read('l') == long and f:read('L') == 'last' and f:read('l') == nil); f:close()\n" +
+		// Exercise both sides of the 1 KiB initial scratch area, with and
+		// without a delimiter and with a NUL in the line.
+		"for _, n in ipairs{1022, 1023, 1024, 1025, 2048} do\n" +
+		"  local s = ''; for i = 1, n - 1 do s = s .. 'x' end; s = s .. '\\0'\n" +
+		"  put(s .. '\\n' .. s .. '\\n' .. s); f = assert(io.open(path, 'rb'))\n" +
+		"  local x, y = f:read('l', 'L'); assert(x == s and y == s .. '\\n')\n" +
+		"  assert(f:read('l') == s and f:read('l') == nil); f:close()\n" +
+		"end\n" +
 		// read_number leaves one byte in ungetc pushback; the bulk line reader
 		// must return that byte before touching the stream's buffered raw bytes.
 		"put('12x\\n'); f = assert(io.open(path, 'r'))\n" +
