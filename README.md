@@ -52,8 +52,8 @@ build/      Build/test scripts (tracked) and build output (ignored).
 docs/       Architecture and design notes.
 ```
 
-For *why* the kernel is a single package and how error handling / coroutines work
-without `longjmp`, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Planned
+For *why* the kernel is a single package and how error handling / coroutines use
+`longjmp` and explicit frames, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Planned
 work, mostly performance, and the measurements behind it are in
 [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md).
 
@@ -70,6 +70,12 @@ See [BUILDING.md](BUILDING.md). Quick version:
 .\build\build.ps1 all
 .\build\test.ps1
 ```
+
+The tail-call-threaded VM is the default on amd64 and arm64; other architectures
+select the switch automatically. Set `VM_THREADED=0` for the switch in the
+wrappers, or pass `-define:VM_THREADED=false` to Odin directly. The threaded VM
+has been runtime-tested only on Linux x86-64; Windows x64, Linux arm64 and macOS
+arm64 were cross-checked but not run. See [BUILDING.md](BUILDING.md#interpreter-selection).
 
 ## Interactive line editing
 
