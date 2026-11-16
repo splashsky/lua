@@ -46,6 +46,37 @@ math_num :: proc(L: ^kernel.State, src: string) -> (kernel.Number, bool) {
 }
 
 @(test)
+math_transcendental_argument_paths :: proc(t: ^testing.T) {
+	L := math_state()
+	defer kernel.close_state(L)
+	st := math_run(L,
+		`local entries = {
+		  {'sin', math.sin}, {'cos', math.cos}, {'tan', math.tan},
+		  {'asin', math.asin}, {'acos', math.acos}, {'atan', math.atan},
+		  {'exp', math.exp}, {'log', math.log},
+		}
+		for _, entry in ipairs(entries) do
+		  local name, f = entry[1], entry[2]
+		  assert(f('0.5') == f(0.5) and f(1) == f(1.0))
+		  local ok, err = pcall(f, false)
+		  assert(not ok and err == "bad argument #1 to '?' (number expected, got boolean)", err)
+		  ok, err = pcall(f)
+		  assert(not ok and err == "bad argument #1 to '?' (number expected, got no value)", err)
+		end
+		for _, name in ipairs({'atan', 'log'}) do
+		  local f = math[name]
+		  assert(f('0.5', nil) == f(0.5))
+		  assert(f('0.5', '2') == f(0.5, 2))
+		  local ok, err = pcall(f, 0.5, false)
+		  assert(not ok and err == "bad argument #2 to '?' (number expected, got boolean)", err)
+		end`)
+	if st != .Ok {
+		message, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "numeric coercion, optional arguments and errors: %s", message)
+	}
+}
+
+@(test)
 math_rounding_and_type :: proc(t: ^testing.T) {
 	L := math_state()
 	defer kernel.close_state(L)

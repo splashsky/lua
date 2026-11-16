@@ -52,55 +52,48 @@ math_abs :: proc "c" (Lp: rawptr) -> i32 {
 }
 
 math_sin :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	kernel.api_pushnumber(L, kernel.num_sin(aux_checknumber(L, 1)))
+	kernel.api_native_pushnumber(L, kernel.num_sin(native_checknumber(L, 1)))
 	return 1
 }
 
 math_cos :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	kernel.api_pushnumber(L, kernel.num_cos(aux_checknumber(L, 1)))
+	kernel.api_native_pushnumber(L, kernel.num_cos(native_checknumber(L, 1)))
 	return 1
 }
 
 math_tan :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	kernel.api_pushnumber(L, kernel.num_tan(aux_checknumber(L, 1)))
+	kernel.api_native_pushnumber(L, kernel.num_tan(native_checknumber(L, 1)))
 	return 1
 }
 
 math_asin :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	kernel.api_pushnumber(L, kernel.Number(math.asin(f64(aux_checknumber(L, 1)))))
+	kernel.api_native_pushnumber(L, kernel.Number(math.asin(f64(native_checknumber(L, 1)))))
 	return 1
 }
 
 math_acos :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	kernel.api_pushnumber(L, kernel.Number(math.acos(f64(aux_checknumber(L, 1)))))
+	kernel.api_native_pushnumber(L, kernel.Number(math.acos(f64(native_checknumber(L, 1)))))
 	return 1
 }
 
 // `math.atan(y [, x])` -- two-argument form is `atan2(y, x)`; x defaults to 1,
 // which makes the one-argument call the ordinary arctangent.
 math_atan :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	y := aux_checknumber(L, 1)
-	x := aux_optnumber(L, 2, 1)
-	kernel.api_pushnumber(L, kernel.Number(math.atan2(f64(y), f64(x))))
+	y := native_checknumber(L, 1)
+	x := kernel.api_native_type(L, 2) <= kernel.TNIL ? 1 : native_checknumber(L, 2)
+	kernel.api_native_pushnumber(L, kernel.Number(math.atan2(f64(y), f64(x))))
 	return 1
 }
 
 math_exp :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	kernel.api_pushnumber(L, kernel.num_exp(aux_checknumber(L, 1)))
+	kernel.api_native_pushnumber(L, kernel.num_exp(native_checknumber(L, 1)))
 	return 1
 }
 
@@ -113,14 +106,13 @@ math_sqrt :: proc "c" (Lp: rawptr) -> i32 {
 // `math.log(x [, base])` -- special-cases base 2 and base 10 to their dedicated
 // libc entry points (more accurate than a division), else `log(x)/log(base)`.
 math_log :: proc "c" (Lp: rawptr) -> i32 {
-	context = runtime.default_context()
 	L := state(Lp)
-	x := f64(aux_checknumber(L, 1))
+	x := f64(native_checknumber(L, 1))
 	res: f64
-	if kernel.api_isnoneornil(L, 2) {
+	if kernel.api_native_type(L, 2) <= kernel.TNIL {
 		res = math.ln(x)
 	} else {
-		base := f64(aux_checknumber(L, 2))
+		base := f64(native_checknumber(L, 2))
 		if base == 2.0 {
 			res = math.log2(x)
 		} else if base == 10.0 {
@@ -129,7 +121,7 @@ math_log :: proc "c" (Lp: rawptr) -> i32 {
 			res = math.ln(x) / math.ln(base)
 		}
 	}
-	kernel.api_pushnumber(L, kernel.Number(res))
+	kernel.api_native_pushnumber(L, kernel.Number(res))
 	return 1
 }
 
