@@ -286,9 +286,10 @@ set2 :: proc(L: ^kernel.State, i: IdxT, j: IdxT) {
 // Is the value at stack index `a` less than the value at `b` under the sort's
 // order? Reference `sort_comp`. With no comparator we use the language's `<`;
 // with one we call it. The `a-1`/`b-2` offsets compensate for the extra values
-// pushed onto the stack during the comparator call.
+// pushed onto the stack during the comparator call. Inlining lets the checked
+// API comparison specialize the fixed indices at each partition call site.
 @(private = "file")
-sort_comp :: proc(L: ^kernel.State, a: int, b: int) -> bool {
+sort_comp :: #force_inline proc(L: ^kernel.State, a: int, b: int) -> bool {
 	if kernel.api_isnil(L, 2) { // no function?
 		return kernel.api_compare(L, a, b, kernel.OPLT) // a < b
 	}

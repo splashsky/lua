@@ -371,9 +371,9 @@ api_rawequal :: proc(L: ^State, idx1, idx2: int) -> bool {
 
 // Compare two values with a given operator, honoring metamethods -- reference
 // `lua_compare`. `op` is one of `LUA_OPEQ`/`LUA_OPLT`/`LUA_OPLE`.
-// Inline the checked index translation so constant indices at API call sites
-// can discard the other index classes without changing the assertion handler.
-api_compare :: proc(L: ^State, idx1, idx2: int, op: int) -> bool {
+// Inline the entry and checked index translation so constant indices and opcodes
+// can discard the other cases without changing the assertion handler.
+api_compare :: #force_inline proc(L: ^State, idx1, idx2: int, op: int) -> bool {
 	o1 := #force_inline index2value(L, idx1)
 	o2 := #force_inline index2value(L, idx2)
 	if !(isvalid(L, o1) && isvalid(L, o2)) {
