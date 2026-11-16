@@ -43,7 +43,10 @@ check_one src/compiler   0
 check_one src/kernel    1
 check_one src/stdlib 1
 check_one tests      1
-check_one tools/generate_threaded 0
+
+# The generator imports no kernel packages and uses none of their defines.
+echo "==> check tools/generate_threaded"
+odin check "$REPO_ROOT/tools/generate_threaded"
 
 # The bare-metal build selects a different set of files via `#+build freestanding`,
 # so the hosted checks above cannot catch a break in it. Check it explicitly, or the

@@ -27,8 +27,7 @@ $Targets = @(
     @{ Path = 'src\compiler';   Lib = $false },
     @{ Path = 'src\kernel';    Lib = $true  },
     @{ Path = 'src\stdlib'; Lib = $true  },
-    @{ Path = 'tests';      Lib = $true  },
-    @{ Path = 'tools\generate_threaded'; Lib = $false }
+    @{ Path = 'tests';      Lib = $true  }
 )
 
 $failed = $false
@@ -42,6 +41,11 @@ foreach ($t in $Targets) {
     }
     if ($LASTEXITCODE -ne 0) { $failed = $true }
 }
+
+# The generator imports no kernel packages and uses none of their defines.
+Write-Host '==> check tools\generate_threaded'
+& odin check (Join-Path $RepoRoot 'tools\generate_threaded')
+if ($LASTEXITCODE -ne 0) { $failed = $true }
 
 if ($failed) { throw "One or more packages failed to check." }
 
