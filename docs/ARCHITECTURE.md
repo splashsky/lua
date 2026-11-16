@@ -33,9 +33,12 @@ until you know why they are the way they are.
 
 The hosted I/O library shares `src/stream/` with the command-line programs.
 Each stream serializes operations with its own mutex; `flush_all` pins streams
-from a separately locked process-wide list before taking their mutexes. It can
-therefore flush a different state's stream between two public operations. EOF
-and error indicators are atomic, and the last OS error is thread-local.
+one at a time from a separately locked process-wide list before taking their
+mutexes. It can therefore flush a different state's stream between two public
+operations, and reports a failure on any selected stream. EOF and error
+indicators are atomic, and the last OS error is thread-local. Tests that create
+deliberately failing streams or call `flush_all` serialize with a test mutex;
+this isolates their expectations without changing stream locking.
 
 Bulk delimiter reads copy ordinary bytes, including the delimiter, while holding
 the stream mutex and update position and pushback cookies as `getc` would.
@@ -296,14 +299,14 @@ Variable-key table handlers address operands directly from that base, whose
 pointers are consumed before any callout; the slow read still receives a stack
 index for its result. Global reads keep short-string hits in their handler and
 tail-transition to separate generic-key and miss handlers; non-string constants
-remain supported for unvalidated bytecode. Field and variable-key reads try the
-shared contextless table lookup before entering a no-inline miss path. Variable-key
-array and short-string hits stay in their handler; integer-hash and other key
-types tail-transition to contextless lookup handlers without repeating the
-table/type dispatch. Known empty slots and non-tables go straight to the
-existing finish path without repeating the lookup. Method lookup
-also handles a string whose `__index` is a table with a matching key; it keeps
-the saved PC and stack top updates made by the original non-table path.
+remain supported for unvalidated bytecode. Field reads use the shared contextless
+lookup and a no-inline miss path. Variable-key array and short-string hits stay
+in their handler; integer-hash and other key types tail-transition to contextless
+lookup handlers without repeating the table/type dispatch. Known empty slots
+and non-tables go straight to the existing finish path without repeating the
+lookup. Method lookup also handles a string whose `__index` is a table with a
+matching key; it keeps the saved PC and stack top updates made by the original
+non-table path.
 
 Variable-key integer writes of non-collectable values use the ordinary pre-set
 without a context. Other writes tail-transition to handlers for primitive
@@ -355,6 +358,9 @@ directly through the current register base in both modes. The call-hook work
 at frame entry is separated from the no-hook path, with the same base refresh
 after the hook.
 These rewrites are guarded by the generator.
+
+Closure creation keeps its upvalue barrier: an emergency collection can blacken
+the anchored closure before the new upvalues are wired.
 
 The threaded CALL handler specializes non-allocating Lua-closure frame setup;
 native calls, growth and `__call` tail-transition to separate handlers so their
@@ -427,13 +433,9 @@ stack ceiling and its reserves fit; larger custom ceilings use the full-width
 count. This does not narrow saved PCs or stack/frame indices and leaves the frame
 allocation size unchanged.
 
-For `CALL`, the VM can set up Lua and native frames without allocating when
-stack headroom and a frame slot are already available. Non-functions and growth
-go through the full precall protocol; native calls also use that path when a
-call hook is enabled. Lua hooks still run at frame entry, and native return hooks
-run in `do_poscall`. A native callback can allocate and move either array, so its
-frame is retained by index and resolved again after the callback. `HARDSTACKTESTS`
-always uses the full protocol so its forced moves still exercise every call.
+For `CALL`, the non-allocating paths described above rely on existing stack and
+frame headroom. The callback's frame is retained by index and resolved again
+after a native callback, which can move either array.
 
 Internal invariant assertions follow reference `lua_assert`: release builds omit
 them; debug, Odin test and stress builds enable them. Embedding API precondition
@@ -444,7 +446,10 @@ ordinary checked index translation, so constant-index callers can discard unused
 index classes without changing the caller-supplied assertion handler. The table
 library still uses these public API entries, including their metamethod and
 stack-relocation paths; sort also inlines its comparison wrapper to specialize
-its fixed stack indices.
+its fixed stack indices. `api_tolstring` inlines the already-string case; its
+numeric slow path roots the result before the reference GC checkpoint and
+re-resolves the stack index after collection and finalizers may have moved it.
+The returned bytes remain valid only while the string is kept reachable.
 
 ## Decision 4 — a fallible allocator and honest OOM
 
@@ -472,11 +477,11 @@ On hosted Linux with libc, `os.getenv` passes the rooted, NUL-terminated Lua
 argument directly to the host and copies its result into Lua before the GC
 check. Windows and no-CRT builds retain the scoped host-string lookup. Linux
 local date and table-to-time conversions share a bounded static timezone cache:
-a mutex protects its TZif image, POSIX rule and last transition range. The
-current `TZ` is compared on every call; when it is unset, the site default is
-re-statted. Unusually large inputs fall back to the scoped loader. No Lua call
-runs with the mutex held, and zone names are copied before unlocking. This
-storage has process lifetime without a per-state allocation or leak. Other
+a mutex protects its 4 KiB TZ key, 64 KiB TZif image, POSIX rule and last
+transition range. The current `TZ` is compared on every call; when it is unset, the site default is
+re-statted. Unusually large keys, files or abbreviations fall back to the scoped
+loader. No Lua call runs with the mutex held, and needed zone names are copied
+before unlocking. This storage has process lifetime without a per-state allocation or leak. Other
 hosts retain their existing timezone paths; freestanding excludes the OS library.
 
 On 64-bit targets an `UpVal` is 48 bytes. Its body overlays the open-list links
@@ -494,7 +499,8 @@ either in a no-inline slow helper or only on the branch that needs it.
 `api_native_*` is a narrow positive-argument fast path for these callbacks, not a
 replacement for the embedding API: the latter keeps its existing procedure types
 and caller-supplied assertion handler. Both paths retain `API_CHECKS`; stress stack
-checks still perform forced relocation. The transcendental math callbacks use
+checks still perform forced relocation. A pointer to a native argument must not
+survive an operation that moves the stack. The transcendental math callbacks use
 these helpers for numeric arguments, while string coercion and errors take their
 existing default-context slow paths. Optional `atan` and `log` arguments retain
 the same missing/nil and numeric-conversion rules.
