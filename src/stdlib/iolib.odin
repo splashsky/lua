@@ -625,6 +625,12 @@ read_all :: proc(L: ^kernel.State, f: ^stream.Stream) {
 read_chars :: proc(L: ^kernel.State, f: ^stream.Stream, n: uint) -> bool {
 	b: Buffer = --- // only the bytes actually read are added to the result
 	aux_buffinit(L, &b)
+	if n <= AUX_BUFFERSIZE {
+		nr := stream.read(f, b.init_b[:n])
+		kernel.api_pushlstring(L, b.init_b[:nr])
+		kernel.api_replace(L, -2)
+		return nr > 0
+	}
 	p := aux_prepbuffsize(&b, n)
 	nr := stream.read(f, p[:n])
 	aux_addsize(&b, uint(nr))
