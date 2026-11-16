@@ -7,7 +7,7 @@ a reimplementation of **Lua 5.5.1**.
 The goal is *correctness first*: an implementation whose observable behavior matches
 reference Lua as closely as we can make it — same language semantics, same garbage
 collection behavior (incremental + generational), and byte-compatible bytecode.
-Performance work comes later, once correct is locked in.
+Performance changes are measured against reference and must preserve correctness.
 
 The implementation is self-contained: no C source is vendored and we never link
 against reference Lua. Correctness is proved against the official PUC-Rio 5.5 test
@@ -35,9 +35,10 @@ See [BUILDING.md](BUILDING.md#branding) for every knob.
 
 ## Status
 
-Early scaffolding. See the phased plan and progress in the project docs. Every phase is
-designed, reviewed, and then implemented; nothing ships without honest tests that
-truthfully prove correctness (no tests fitted to pass).
+The runtime and standard libraries pass the PUC-Rio suite on Linux x86-64 in
+both VM modes, including relocation and sanitizer configurations. Other threaded
+targets still need runtime validation. See the project docs for the architecture,
+measurements and remaining work.
 
 ## Layout
 
