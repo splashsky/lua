@@ -106,47 +106,23 @@ workload. The runners use those names rather than maintaining hard-coded copies.
 ## Why comparison runs are isolated
 
 Running a whole file in one interpreter process makes later results depend on
-earlier workloads. Two full collections before timing reclaim unreachable
-objects, but they do not shrink the allocator's heap capacity or reset the
-collector's pacing and debt. A later benchmark can therefore see a materially
-different runtime state than it gets in a fresh process.
-
-`strconcat` made the problem especially visible:
-
-| build | in-suite | run alone |
-|---|---:|---:|
-| pre-change | 1,388,889 ops/s | 1,282,051 ops/s |
-| current | 609,524 ops/s | **1,828,571 ops/s** |
-| PUC reference | 1,307,190 ops/s | 1,234,568 ops/s |
-
-The in-suite result calls the current build a 0.44x regression, while the fresh
-process result shows a 1.43x improvement. That inversion is a harness artifact,
-not a property of string concatenation. **Published or decision-making
-comparison numbers should always come from isolated runs.** The all-in-one mode
-remains available because those interaction effects can themselves be useful
-when deliberately investigating allocator or GC behavior. Runner headings say
-`isolated process` or `all-in-one process` so captured output is unambiguous.
+earlier workloads: full collections before timing reclaim garbage but do not
+shrink the allocator's heap or reset the collector's pacing. In one measurement
+`strconcat` looked like a 0.44× regression in-suite and was a 1.43× improvement
+run alone. **Decision-making numbers should always come from isolated runs.** The
+all-in-one mode remains for deliberately investigating those interactions; runner
+headings say `isolated process` or `all-in-one process`.
 
 ## Reading the output
 
 Each normal benchmark reports CPU seconds, work units per second, and the change
-in Lua-visible heap size. An “op” has a different meaning on every line, so
+in Lua-visible heap size. An “op” means something different on every line, so
 **ops/sec is comparable only between interpreters for the same benchmark name**.
-Never compare the ops/sec values of two different benchmark names.
 
 `collectgarbage("count")` reports memory visible to Lua's allocator in KiB. Peak
-RSS is sampled by the runner and covers the whole process, including the
-executable, native stacks, allocator overhead, and libraries. They answer
-different questions and should not be expected to match.
+RSS is sampled by the runner and covers the whole process, so the two should not
+be expected to match.
 
-Machine load, thermal state, and background activity materially affect timings.
-Only same-session, back-to-back lua-odin/reference runs should be treated as a
-comparison. Even then, repeat noisy results and consider alternating interpreter
-order when investigating a small difference; the standard runner intentionally
-runs lua-odin first for a stable, easy-to-understand protocol.
-
-On a loaded Linux machine, wall-clock times are especially noisy. As an additional
-comparison, alternate builds and collect `perf stat -x, -e cycles:u,instructions:u`
-for at least five runs of each workload, reporting the minimum cycles and instruction
-counts. Instruction counts help distinguish a genuine path change from scheduling
-noise; use isolated benchmark names for the same reason as above.
+Timings depend on machine load, so only same-session, back-to-back runs are a
+comparison. On a loaded machine prefer `build/vm-compare.sh`: instruction counts
+separate a real path change from scheduling noise.
