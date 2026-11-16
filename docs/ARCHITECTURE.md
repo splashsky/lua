@@ -245,7 +245,7 @@ inspected amd64 and arm64 objects Odin's `"preserve/none"` calling convention an
 are the architectures supported by the current jump shim; enabling this VM on
 another architecture is explicitly rejected rather than assuming an ABI. Runtime
 validation has only been performed on Linux x86-64: Windows x64, Linux arm64 and
-macOS arm64 have been cross-checked but not run, by the user's decision.
+macOS arm64 have been cross-compiled to objects but not run, by the user's decision.
 
 Handlers pass `L`, the next PC, the register-base pointer, closure, code base,
 frame index, trap, an Odin context pointer, and the current instruction. The

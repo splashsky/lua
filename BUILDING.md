@@ -102,8 +102,8 @@ Forcing threaded on architectures other than amd64 or arm64 is rejected. Automat
 switch selection does not imply the rest of the runtime supports those targets.
 
 Threaded runtime validation has only been performed on Linux x86-64. Windows x64,
-Linux arm64 and macOS arm64 have been cross-checked, but the user chose to skip
-their runtime validation; they remain an unvalidated gap.
+Linux arm64 and macOS arm64 have been cross-compiled to objects, but the user
+chose to skip their runtime validation; they remain an unvalidated gap.
 
 The switch opcode bodies are the source of the threaded handlers. After changing
 them, run `bash build/generate-threaded.sh` or `.\build\generate-threaded.ps1` on

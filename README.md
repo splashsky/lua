@@ -75,7 +75,7 @@ The tail-call-threaded VM is the default on amd64 and arm64; other architectures
 select the switch automatically. Set `VM_THREADED=0` for the switch in the
 wrappers, or pass `-define:VM_THREADED=false` to Odin directly. The threaded VM
 has been runtime-tested only on Linux x86-64; Windows x64, Linux arm64 and macOS
-arm64 were cross-checked but not run. See [BUILDING.md](BUILDING.md#interpreter-selection).
+arm64 were cross-compiled to objects but not run. See [BUILDING.md](BUILDING.md#interpreter-selection).
 
 ## Interactive line editing
 

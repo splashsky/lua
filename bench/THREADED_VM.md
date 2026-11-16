@@ -3,8 +3,8 @@
 > **Status (November 2026):** threaded dispatch is the default on amd64 and
 > arm64. The switch is retained as the handler source, as an explicit opt-out,
 > and as the automatic choice elsewhere. Runtime validation is Linux x86-64
-> only; Windows x64, Linux arm64 and macOS arm64 were cross-checked but not run
-> by the user's decision. The remaining work is in
+> only; Windows x64, Linux arm64 and macOS arm64 were cross-compiled to objects
+> but not run by the user's decision. The remaining work is in
 > [docs/FUTURE_WORK.md](../docs/FUTURE_WORK.md).
 
 ## Current comparison: 2026-11-15

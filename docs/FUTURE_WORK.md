@@ -69,9 +69,9 @@ choice on other architectures; `VM_THREADED=0` explicitly selects it.
 Remaining, in priority order:
 
 1. **Runtime validation on Windows x64, Linux arm64 and macOS arm64.** These
-   targets have been cross-checked but not run. The user decided to skip their
-   runtime validation for this flip; they remain an unvalidated gap, not a
-   demonstrated runtime success.
+   targets have been cross-compiled to objects but not run. The user decided to
+   skip their runtime validation for this flip; they remain an unvalidated gap,
+   not a demonstrated runtime success.
 2. **Cycle re-measurement on a quiet machine.** The new comparisons were taken
    on a shared, heavily loaded host. Treat cycles as approximate and repeat on
    a quiet machine before relying on small differences.
