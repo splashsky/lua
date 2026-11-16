@@ -512,15 +512,16 @@ if newci >= 0 {{
 trap = L.frames[ci_idx].u.l.trap
 %s`, dispatch), true)
 			// These transitions borrow the frame-index argument for the function
-			// slot. Successful native calls restore L.ci to the caller, including
-			// after hooks or stack/frame relocation; yields do not return here.
+			// slot. Capture the caller's index before the native call and resolve
+			// the frame again afterward: hooks and callbacks may move the array.
+			// Yields do not return here.
 			for variant in ([]string{"lcf", "ccl"}) {
 				f := "callee.value_.f"
 				if variant == "ccl" {f = "(^CClosure)(callee.value_.gc).f"}
 				emit_proc(&b, fmt.tprintf("vm_thread_CALL_%s", variant), fmt.tprintf(`func := ci_idx
 callee := &regs[getarg_A(i)].val
-_ = vm_thread_native_try(L, func, getarg_C(i), %s, ctx)
 ci_idx = L.ci
+_ = vm_thread_native_try(L, func, getarg_C(i), %s, ctx)
 trap = L.frames[ci_idx].u.l.trap
 %s`, f, dispatch), true)
 			}

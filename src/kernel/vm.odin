@@ -4295,8 +4295,8 @@ when VM_THREADED {
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
 		func := ci_idx
 		callee := &regs[getarg_A(i)].val
-		_ = vm_thread_native_try(L, func, getarg_C(i), callee.value_.f, ctx)
 		ci_idx = L.ci
+		_ = vm_thread_native_try(L, func, getarg_C(i), callee.value_.f, ctx)
 		trap = L.frames[ci_idx].u.l.trap
 		if trap != 0 {
 			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
@@ -4319,8 +4319,8 @@ when VM_THREADED {
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
 		func := ci_idx
 		callee := &regs[getarg_A(i)].val
-		_ = vm_thread_native_try(L, func, getarg_C(i), (^CClosure)(callee.value_.gc).f, ctx)
 		ci_idx = L.ci
+		_ = vm_thread_native_try(L, func, getarg_C(i), (^CClosure)(callee.value_.gc).f, ctx)
 		trap = L.frames[ci_idx].u.l.trap
 		if trap != 0 {
 			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
