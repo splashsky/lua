@@ -105,6 +105,15 @@ tzif_version2_uses_64_bit_block :: proc(t: ^testing.T) {
 	kind, found := stdlib.TZif_At(zone, 4_000_000_000)
 	testing.expect(t, found && kind.offset == 7200 && kind.is_dst &&
 		kind.abbreviation == "DST", "the 64-bit block, not the compatibility block, is used")
+	before, before_ok := stdlib.TZif_At(zone, 3_999_999_999)
+	after, after_ok := stdlib.TZif_At(zone, 4_000_000_001)
+	again, again_ok := stdlib.TZif_At(zone, 4_000_000_000)
+	testing.expect(t, before_ok && before.offset == 0 && !before.is_dst,
+		"the previous type applies until the transition")
+	testing.expect(t, after_ok && after.offset == 0 && !after.is_dst && after.abbreviation == "UTC",
+		"the footer applies immediately after the final explicit transition")
+	testing.expect(t, again_ok && again.offset == 7200 && again.is_dst,
+		"revisiting the final transition still selects its explicit type")
 }
 
 @(test)

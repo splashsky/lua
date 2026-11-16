@@ -23,8 +23,11 @@ package stdlib
 // Windows. The file discovery and real POSIX OS path are only cross-compiled
 // here; they still need end-to-end confirmation on an actual Linux/macOS host.
 
+import "base:runtime"
 import "core:fmt"
 import "core:os"
+import "core:sync"
+import "core:sys/posix"
 
 TZif_Local_Type :: struct {
 	offset:       i64,
@@ -560,18 +563,28 @@ POSIX_TZ_At :: proc(r: POSIX_TZ_Rule, timestamp: i64) -> TZif_Local_Type {
 }
 
 TZif_At :: proc(z: TZif_Zone, timestamp: i64) -> (TZif_Local_Type, bool) {
+	kind, found, _, _ := tzif_at_range(z, timestamp)
+	return kind, found
+}
+
+// The inclusive range has the same selected type. POSIX footer rules are
+// conservatively cached only for the exact instant, since their transitions
+// recur rather than being bounded by the TZif transition array.
+@(private = "file")
+tzif_at_range :: proc(z: TZif_Zone, timestamp: i64) -> (TZif_Local_Type, bool, i64, i64) {
 	if z.transition_count == 0 {
 		if z.footer != "" {
 			if rule, ok := POSIX_TZ_Parse(z.footer); ok {
-				return POSIX_TZ_At(rule, timestamp), true
+				return POSIX_TZ_At(rule, timestamp), true, timestamp, timestamp
 			}
 		}
-		return TZif_Type(z, 0)
+		kind, ok := TZif_Type(z, 0)
+		return kind, ok, min(i64), max(i64)
 	}
 	last, _ := tzif_transition(z, z.transition_count - 1)
 	if timestamp > last && z.footer != "" {
 		if rule, ok := POSIX_TZ_Parse(z.footer); ok {
-			return POSIX_TZ_At(rule, timestamp), true
+			return POSIX_TZ_At(rule, timestamp), true, timestamp, timestamp
 		}
 	}
 	lo, hi := 0, z.transition_count
@@ -588,7 +601,17 @@ TZif_At :: proc(z: TZif_Zone, timestamp: i64) -> (TZif_Local_Type, bool) {
 	if lo > 0 {
 		type_index = int(z.data[z.index_offset + lo - 1])
 	}
-	return TZif_Type(z, type_index)
+	begin, end := i64(min(i64)), i64(max(i64))
+	if lo > 0 do begin, _ = tzif_transition(z, lo - 1)
+	if lo < z.transition_count {
+		next, _ := tzif_transition(z, lo)
+		end = next - 1
+	} else if z.footer != "" {
+		// At the last transition the footer may take over one second later.
+		end = timestamp
+	}
+	kind, ok := TZif_Type(z, type_index)
+	return kind, ok, begin, end
 }
 
 Local_Zone :: struct {
@@ -640,6 +663,14 @@ local_zone_path :: proc(name: string) -> (Local_Zone, bool) {
 load_local_zone :: proc() -> (Local_Zone, bool) {
 	if value, found := os.lookup_env("TZ", context.temp_allocator); found {
 		defer delete(value, context.temp_allocator)
+		return load_local_zone_for(value, true)
+	}
+	return load_local_zone_for("", false)
+}
+
+@(private = "file")
+load_local_zone_for :: proc(value: string, found: bool) -> (Local_Zone, bool) {
+	if found {
 		if value == "" {
 			rule, _ := POSIX_TZ_Parse("UTC0")
 			return Local_Zone{posix = rule, is_posix = true}, true
@@ -663,6 +694,155 @@ load_local_zone :: proc() -> (Local_Zone, bool) {
 		return {}, false
 	}
 	return local_zone_file("/etc/localtime")
+}
+
+// Linux's C library retains its parsed timezone. Keep a bounded, process-wide
+// copy rather than allocating a cache with no state-close owner. The mutex also
+// protects the parsed slices and the last result; no Lua call is made while it
+// is held. Unusually large files, TZ values or abbreviations use the original
+// scoped loader instead of imposing an observable size limit.
+when ODIN_OS == .Linux && !ODIN_NO_CRT {
+	@(private)
+	Local_Zone_Cache :: struct {
+		mutex: sync.Mutex,
+		initialized, env_found, loaded: bool,
+		key_len: int,
+		key: [4096]u8,
+		data: [65536]u8,
+		zone: Local_Zone,
+		stat: posix.stat_t,
+		last_valid: bool,
+		last_begin, last_end: i64,
+		last: TZif_Local_Type,
+	}
+
+	@(private = "file")
+	local_zone_cache: Local_Zone_Cache
+
+	// Return with the cache locked. A nil return means the scoped loader must be
+	// used instead, with no lock held. Callers must never invoke Lua while locked.
+	@(private)
+	cached_local_zone_open :: proc() -> ^Local_Zone_Cache {
+		// getenv's result is borrowed, as in the libc timezone code. Concurrent
+		// modification of the process environment has the host's usual rules.
+		env := posix.getenv("TZ")
+		found := env != nil
+		value := string(env) if found else ""
+		if len(value) > len(local_zone_cache.key) {
+			// A later return to the previous short TZ must reload it rather than
+			// treating the intervening oversized value as if it never occurred.
+			sync.mutex_lock(&local_zone_cache.mutex)
+			local_zone_cache.initialized = false
+			local_zone_cache.last_valid = false
+			sync.mutex_unlock(&local_zone_cache.mutex)
+			return nil
+		}
+
+		sync.mutex_lock(&local_zone_cache.mutex)
+		keep_lock := false
+		defer if !keep_lock do sync.mutex_unlock(&local_zone_cache.mutex)
+		c := &local_zone_cache
+		changed := !c.initialized || c.env_found != found ||
+			string(c.key[:c.key_len]) != value
+		file_stat: posix.stat_t
+		if !found {
+			// With TZ unset glibc's non-reentrant localtime re-stats the site
+			// default; compare the same device, inode and whole-second mtime.
+			if posix.stat("/etc/localtime", &file_stat) != .OK {
+				c.initialized = false
+				return nil
+			}
+			changed = changed || c.stat.st_dev != file_stat.st_dev ||
+				c.stat.st_ino != file_stat.st_ino ||
+				c.stat.st_mtim.tv_sec != file_stat.st_mtim.tv_sec
+		}
+		if changed {
+			c.initialized = false
+			c.last_valid = false
+			c.key_len = copy(c.key[:], value)
+			c.env_found = found
+			c.stat = file_stat
+			key := string(c.key[:c.key_len])
+			temp := runtime.default_temp_allocator_temp_begin()
+			zone, loaded := load_local_zone_for(key, found)
+			if loaded && zone.is_posix {
+				name := key
+				if name == "" do name = "UTC0"
+				if len(name) > 0 && name[0] == ':' do name = name[1:]
+				rule, ok := POSIX_TZ_Parse(name)
+				if !ok {
+					free_local_zone(&zone)
+					aux_host_temp_end(temp)
+					return nil
+				}
+				c.zone = Local_Zone{posix = rule, is_posix = true}
+			} else if loaded {
+				if len(zone.data) > len(c.data) {
+					free_local_zone(&zone)
+					aux_host_temp_end(temp)
+					return nil
+				}
+				n := copy(c.data[:], zone.data)
+				parsed, ok := TZif_Parse(c.data[:n])
+				if !ok {
+					free_local_zone(&zone)
+					aux_host_temp_end(temp)
+					return nil
+				}
+				c.zone = Local_Zone{data = c.data[:n], tzif = parsed}
+			}
+			free_local_zone(&zone)
+			aux_host_temp_end(temp)
+			c.loaded = loaded
+			c.initialized = true
+		}
+		keep_lock = true
+		return c
+	}
+
+	@(private)
+	cached_local_zone_close :: proc(c: ^Local_Zone_Cache) {
+		sync.mutex_unlock(&c.mutex)
+	}
+
+	// The caller holds the cache mutex and consumes the borrowed abbreviation
+	// before unlocking. A range hit remains valid on both sides of a transition.
+	@(private)
+	cached_local_zone_lookup :: proc(c: ^Local_Zone_Cache, t: i64) -> (TZif_Local_Type, bool) {
+		if c.last_valid && t >= c.last_begin && t <= c.last_end do return c.last, true
+		kind: TZif_Local_Type
+		ok := true
+		begin, end := t, t
+		if c.zone.is_posix {
+			kind = POSIX_TZ_At(c.zone.posix, t)
+			if !c.zone.posix.has_dst do begin, end = min(i64), max(i64)
+		} else {
+			kind, ok, begin, end = tzif_at_range(c.zone.tzif, t)
+		}
+		if !ok do return {}, false
+		c.last = kind
+		c.last_begin, c.last_end = begin, end
+		c.last_valid = true
+		return kind, true
+	}
+
+	@(private)
+	cached_local_zone_at :: proc(t: i64, need_zone: bool, out: []u8) -> (TZif_Local_Type, bool, bool, bool) {
+		c := cached_local_zone_open()
+		if c == nil do return {}, false, false, false
+		defer cached_local_zone_close(c)
+		if !c.loaded do return {}, false, false, true
+		kind, ok := cached_local_zone_lookup(c, t)
+		if !ok do return {}, false, false, false
+		if need_zone {
+			if len(kind.abbreviation) > len(out) do return {}, false, false, false
+			copy(out, kind.abbreviation)
+			kind.abbreviation = string(out[:len(kind.abbreviation)])
+		} else {
+			kind.abbreviation = ""
+		}
+		return kind, true, c.zone.is_posix, true
+	}
 }
 
 free_local_zone :: proc(z: ^Local_Zone) {

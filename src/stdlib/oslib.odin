@@ -293,6 +293,18 @@ timestamp_from_local :: proc(wall: Civil_Time, nominal: i64, wanted_dst: int) ->
 		got, valid := local_at_timestamp(t)
 		return t, got, valid
 	} else {
+		when ODIN_OS == .Linux && !ODIN_NO_CRT {
+			cached := cached_local_zone_open()
+			if cached != nil {
+				defer cached_local_zone_close(cached)
+				if !cached.loaded {
+					got := civil_at_timestamp(nominal)
+					got.zone = "UTC"
+					return nominal, got, true
+				}
+				return timestamp_from_loaded_zone(cached.zone, wall, nominal, wanted_dst, cached)
+			}
+		}
 		temp := runtime.default_temp_allocator_temp_begin()
 		defer aux_host_temp_end(temp) // no Lua calls in this scope
 		zone, loaded := load_local_zone()
@@ -302,99 +314,114 @@ timestamp_from_local :: proc(wall: Civil_Time, nominal: i64, wanted_dst: int) ->
 			return nominal, got, true
 		}
 		defer free_local_zone(&zone)
+		return timestamp_from_loaded_zone(zone, wall, nominal, wanted_dst)
+	}
+}
 
-		standard_t, daylight_t: i64
-		standard_c, daylight_c: Civil_Time
-		have_standard, have_daylight := false, false
-		best_after_t, best_other_t: i64
-		best_after_c, best_other_c: Civil_Time
-		best_requested_t: i64
-		best_requested_c: Civil_Time
-		best_after_delta := i64(max(i64))
-		best_other_delta := i64(max(i64))
-		best_requested_delta := i64(max(i64))
+// The only caller uses the returned calendar fields, not its zone name; do
+// not let a slice of the cache escape after the mutex is released.
+@(private = "file")
+timestamp_from_loaded_zone :: proc(zone: Local_Zone, wall: Civil_Time, nominal: i64, wanted_dst: int, cache: rawptr = nil) -> (i64, Civil_Time, bool) {
+	standard_t, daylight_t: i64
+	standard_c, daylight_c: Civil_Time
+	have_standard, have_daylight := false, false
+	best_after_t, best_other_t: i64
+	best_after_c, best_other_c: Civil_Time
+	best_requested_t: i64
+	best_requested_c: Civil_Time
+	best_after_delta := i64(max(i64))
+	best_other_delta := i64(max(i64))
+	best_requested_delta := i64(max(i64))
 
-		// TZif type indexes are bytes, so there can be at most 256 candidate
-		// offsets. POSIX-only zones contribute their standard and daylight pair.
-		count := zone.is_posix ? (zone.posix.has_dst ? 2 : 1) : zone.tzif.type_count
-		for i in 0 ..< count {
-			candidate: TZif_Local_Type
-			ok := true
-			if zone.is_posix {
-				if i == 0 {
-					candidate = TZif_Local_Type{offset = zone.posix.standard_offset}
-				} else {
-					candidate = TZif_Local_Type{
-						offset = zone.posix.daylight_offset,
-						is_dst = true,
-					}
-				}
+	// TZif type indexes are bytes, so there can be at most 256 candidate
+	// offsets. POSIX-only zones contribute their standard and daylight pair.
+	count := zone.is_posix ? (zone.posix.has_dst ? 2 : 1) : zone.tzif.type_count
+	for i in 0 ..< count {
+		candidate: TZif_Local_Type
+		ok := true
+		if zone.is_posix {
+			if i == 0 {
+				candidate = TZif_Local_Type{offset = zone.posix.standard_offset}
 			} else {
-				candidate, ok = TZif_Type(zone.tzif, i)
-			}
-			if !ok {
-				continue
-			}
-			t := nominal - candidate.offset
-			actual, found := local_zone_at(zone, t)
-			if !found {
-				continue
-			}
-			got_nominal := t + actual.offset
-			got := civil_at_timestamp(got_nominal)
-			got.offset = actual.offset
-			got.isdst = actual.is_dst ? 1 : 0
-			got.zone = actual.abbreviation
-			if same_wall(got, wall) {
-				if actual.is_dst {
-					if !have_daylight {
-						daylight_t, daylight_c, have_daylight = t, got, true
-					}
-				} else if !have_standard {
-					standard_t, standard_c, have_standard = t, got, true
+				candidate = TZif_Local_Type{
+					offset = zone.posix.daylight_offset,
+					is_dst = true,
 				}
-				continue
 			}
-			delta := got_nominal - nominal
-			if delta >= 0 && delta < best_after_delta {
-				best_after_t, best_after_c = t, got
-				best_after_delta = delta
-			}
-			absolute := delta < 0 ? -delta : delta
-			if wanted_dst >= 0 && candidate.is_dst == (wanted_dst == 1) &&
-			   absolute < best_requested_delta {
-				best_requested_t, best_requested_c = t, got
-				best_requested_delta = absolute
-			}
-			if absolute < best_other_delta {
-				best_other_t, best_other_c = t, got
-				best_other_delta = absolute
-			}
+		} else {
+			candidate, ok = TZif_Type(zone.tzif, i)
 		}
-		if wanted_dst == 0 && have_standard {
+		if !ok {
+			continue
+		}
+		t := nominal - candidate.offset
+		actual: TZif_Local_Type
+		found: bool
+		when ODIN_OS == .Linux && !ODIN_NO_CRT {
+			if cache != nil {
+				actual, found = cached_local_zone_lookup((^Local_Zone_Cache)(cache), t)
+			} else {
+				actual, found = local_zone_at(zone, t)
+			}
+		} else {
+			actual, found = local_zone_at(zone, t)
+		}
+		if !found {
+			continue
+		}
+		got_nominal := t + actual.offset
+		got := civil_at_timestamp(got_nominal)
+		got.offset = actual.offset
+		got.isdst = actual.is_dst ? 1 : 0
+		if same_wall(got, wall) {
+			if actual.is_dst {
+				if !have_daylight {
+					daylight_t, daylight_c, have_daylight = t, got, true
+				}
+			} else if !have_standard {
+				standard_t, standard_c, have_standard = t, got, true
+			}
+			continue
+		}
+		delta := got_nominal - nominal
+		if delta >= 0 && delta < best_after_delta {
+			best_after_t, best_after_c = t, got
+			best_after_delta = delta
+		}
+		absolute := delta < 0 ? -delta : delta
+		if wanted_dst >= 0 && candidate.is_dst == (wanted_dst == 1) &&
+		   absolute < best_requested_delta {
+			best_requested_t, best_requested_c = t, got
+			best_requested_delta = absolute
+		}
+		if absolute < best_other_delta {
+			best_other_t, best_other_c = t, got
+			best_other_delta = absolute
+		}
+	}
+	if wanted_dst == 0 && have_standard {
+		return standard_t, standard_c, true
+	}
+	if wanted_dst == 1 && have_daylight {
+		return daylight_t, daylight_c, true
+	}
+	if wanted_dst < 0 {
+		if have_standard {
 			return standard_t, standard_c, true
 		}
-		if wanted_dst == 1 && have_daylight {
+		if have_daylight {
 			return daylight_t, daylight_c, true
 		}
-		if wanted_dst < 0 {
-			if have_standard {
-				return standard_t, standard_c, true
-			}
-			if have_daylight {
-				return daylight_t, daylight_c, true
-			}
-			if best_after_delta != i64(max(i64)) {
-				return best_after_t, best_after_c, true
-			}
-		} else if best_requested_delta != i64(max(i64)) {
-			return best_requested_t, best_requested_c, true
+		if best_after_delta != i64(max(i64)) {
+			return best_after_t, best_after_c, true
 		}
-		if best_other_delta != i64(max(i64)) {
-			return best_other_t, best_other_c, true
-		}
-		return 0, {}, false
+	} else if best_requested_delta != i64(max(i64)) {
+		return best_requested_t, best_requested_c, true
 	}
+	if best_other_delta != i64(max(i64)) {
+		return best_other_t, best_other_c, true
+	}
+	return 0, {}, false
 }
 
 @(private = "file")
@@ -754,6 +781,21 @@ format_conversion :: proc(B: ^Buffer, op: string, c: Civil_Time, utc: bool) {
 // ending the region; a throw cannot strand the region or its file image.
 @(private = "file")
 local_date :: proc(L: ^kernel.State, t: i64, zone_buf: []u8, need_zone: bool) -> Civil_Time {
+	when ODIN_OS == .Linux && !ODIN_NO_CRT {
+		kind, cache_loaded, is_posix, usable := cached_local_zone_at(t, need_zone, zone_buf)
+		if usable {
+			if cache_loaded && is_posix && (t < TM_MIN_TIMESTAMP || t > TM_MAX_TIMESTAMP) {
+				aux_error(L, "date result cannot be represented in this installation")
+			}
+			c := civil_at_timestamp(t + (cache_loaded ? kind.offset : 0))
+			if cache_loaded {
+				c.offset = kind.offset
+				c.isdst = kind.is_dst ? 1 : 0
+				c.zone = kind.abbreviation
+			}
+			return c
+		}
+	}
 	temp := runtime.default_temp_allocator_temp_begin()
 	zone, loaded := load_local_zone()
 	c := civil_at_timestamp(t)

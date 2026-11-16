@@ -8,7 +8,9 @@ package tests
 
 import "base:runtime"
 import "core:os"
+import "core:strings"
 import "core:testing"
+import "core:thread"
 import kernel "lang:kernel"
 import stdlib "lang:stdlib"
 
@@ -63,6 +65,60 @@ oslib_time_roundtrip :: proc(t: ^testing.T) {
 		"return 1",
 	)
 	testing.expect(t, st == .Ok, "os.time/os.date round-trip a date table")
+}
+
+Os_Date_Worker :: struct {
+	expected: string,
+	ok: bool,
+}
+
+// Repeatedly switch timestamps on independent Lua states, including around the
+// 2024 northern and southern DST changes. Tests must not change process-wide TZ
+// while the rest of the test runner is using the environment.
+oslib_date_concurrent_source :: `
+	local times = {0, 1710053999, 1710054000, 1711846799, 1711846800,
+		1712415599, 1712415600, 1728142199, 1728142200,
+		1730613599, 1730613600, 1705320000, 1719835200}
+	local result = ''
+	for i = 1, 260 do
+		local t = times[(i-1) % #times + 1]
+		local d, u = os.date('*t', t), os.date('!*t', t)
+		assert(os.time(d) == t)
+		result = result .. os.date('%F %T %z %Z', t) .. '|' ..
+			d.year .. ':' .. d.yday .. ':' .. d.wday .. ':' .. tostring(d.isdst) .. '|' ..
+			u.year .. ':' .. u.yday .. ':' .. u.wday .. '\n'
+	end
+	return result
+`
+
+@(test)
+oslib_date_concurrent_states :: proc(t: ^testing.T) {
+	when ODIN_OS == .Linux && thread.IS_SUPPORTED {
+		L := oslib_state()
+		defer kernel.close_state(L)
+		if !testing.expect_value(t, oslib_run(L, oslib_date_concurrent_source), kernel.Thread_Status.Ok) do return
+		result, ok := kernel.api_tolstring(L, -1)
+		if !testing.expect(t, ok) do return
+		expected := strings.clone(result)
+		defer delete(expected)
+		workers: [8]Os_Date_Worker
+		threads: [8]^thread.Thread
+		for i in 0 ..< len(workers) {
+			workers[i].expected = expected
+			threads[i] = thread.create(proc(th: ^thread.Thread) {
+				worker := (^Os_Date_Worker)(th.data)
+				L := oslib_state()
+				defer kernel.close_state(L)
+				if oslib_run(L, oslib_date_concurrent_source) != .Ok do return
+				actual, ok := kernel.api_tolstring(L, -1)
+				worker.ok = ok && actual == worker.expected
+			})
+			threads[i].data = &workers[i]
+		}
+		for th in threads do thread.start(th)
+		for th in threads do thread.destroy(th)
+		for worker in workers do testing.expect(t, worker.ok, "concurrent states preserve local-time results")
+	}
 }
 
 @(test)
