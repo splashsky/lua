@@ -173,7 +173,9 @@ Dyndata :: struct {
 //
 // `BlockCnt` tracks one lexical block on a stack rooted at `FuncState.bl`; it
 // snapshots the label/goto/variable counts at block entry so scope exit can
-// restore them and resolve gotos. Defined in reference Lua's `lparser.c`.
+// restore them and resolve gotos. Caller-owned blocks and function states are
+// unlinked before their frames return; errors abandon the protected parser state.
+// Defined in reference Lua's `lparser.c`.
 BlockCnt :: struct {
 	previous:  ^BlockCnt, // enclosing block
 	firstlabel: int, // index of first label in this block
@@ -1352,7 +1354,7 @@ body :: proc(ls: ^LexState, e: ^Expdesc, ismethod: bool, line: int) {
 	bl: BlockCnt
 	new_fs.f = addprototype(ls)
 	new_fs.f.linedefined = line
-	open_func(ls, &new_fs, &bl)
+	open_func(ls, (^FuncState)(rawptr(&new_fs)), (^BlockCnt)(rawptr(&bl)))
 	checknext(ls, '(')
 	if ismethod {
 		new_localvarliteral(ls, "self") // implicit 'self' parameter
@@ -1651,7 +1653,7 @@ expr :: proc(ls: ^LexState, v: ^Expdesc) {
 block :: proc(ls: ^LexState) {
 	fs := ls.fs
 	bl: BlockCnt
-	enterblock(fs, &bl, 0)
+	enterblock(fs, (^BlockCnt)(rawptr(&bl)), 0)
 	statlist(ls)
 	leaveblock(fs)
 }
@@ -1814,7 +1816,7 @@ whilestat :: proc(ls: ^LexState, line: int) {
 	lex_next(ls) // skip WHILE
 	whileinit := code_getlabel(fs)
 	condexit := cond(ls)
-	enterblock(fs, &bl, 1)
+	enterblock(fs, (^BlockCnt)(rawptr(&bl)), 1)
 	checknext(ls, TK_DO)
 	block(ls)
 	code_patchlist(fs, code_jump(fs), whileinit) // loop back (luaK_jumpto)
@@ -1829,8 +1831,8 @@ repeatstat :: proc(ls: ^LexState, line: int) {
 	fs := ls.fs
 	repeat_init := code_getlabel(fs)
 	bl1, bl2: BlockCnt
-	enterblock(fs, &bl1, 1) // loop block
-	enterblock(fs, &bl2, 0) // scope block
+	enterblock(fs, (^BlockCnt)(rawptr(&bl1)), 1) // loop block
+	enterblock(fs, (^BlockCnt)(rawptr(&bl2)), 0) // scope block
 	lex_next(ls) // skip REPEAT
 	statlist(ls)
 	check_match(ls, TK_UNTIL, TK_REPEAT, line)
@@ -1883,7 +1885,7 @@ forbody :: proc(ls: ^LexState, base, line, nvars: int, isgen: bool) {
 	checknext(ls, TK_DO)
 	prep := code_codeABx(fs, forprep[sel], base, 0)
 	fs.freereg -= 1 // both 'forprep' opcodes pop one register
-	enterblock(fs, &bl, 0) // scope for the declared control variables
+	enterblock(fs, (^BlockCnt)(rawptr(&bl)), 0) // scope for the declared control variables
 	adjustlocalvars(ls, nvars)
 	code_reserveregs(fs, nvars)
 	block(ls)
@@ -1951,7 +1953,7 @@ forlist :: proc(ls: ^LexState, indexname: ^TString) {
 forstat :: proc(ls: ^LexState, line: int) {
 	fs := ls.fs
 	bl: BlockCnt
-	enterblock(fs, &bl, 1) // scope for the loop and control variables
+	enterblock(fs, (^BlockCnt)(rawptr(&bl)), 1) // scope for the loop and control variables
 	lex_next(ls) // skip 'for'
 	varname := str_checkname(ls) // first variable name
 	switch ls.t.token {
@@ -2344,7 +2346,7 @@ statement :: proc(ls: ^LexState) {
 @(private = "file")
 mainfunc :: proc(ls: ^LexState, fs: ^FuncState) {
 	bl: BlockCnt
-	open_func(ls, fs, &bl)
+	open_func(ls, fs, (^BlockCnt)(rawptr(&bl)))
 	setvararg(fs) // the main function is always vararg
 	env := allocupvalue(fs) // ...and its sole upvalue is _ENV
 	env.instack = 1
