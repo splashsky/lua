@@ -805,13 +805,13 @@ forprep :: proc(L: ^State, ra: int) -> bool {
 // One step of a float `for` loop -- reference Lua's `floatforloop`. Returns true
 // (and updates the control variable) if the loop should continue.
 @(private = "file")
-floatforloop :: proc(L: ^State, ra: int) -> bool {
-	step := flt_value(stack_value(L, ra + 1))
-	limit := flt_value(stack_value(L, ra))
-	idx := flt_value(stack_value(L, ra + 2)) + step
+floatforloop :: proc "contextless" (regs: [^]StackValue, ra: int) -> bool {
+	step := flt_value(&regs[ra + 1].val)
+	limit := flt_value(&regs[ra].val)
+	idx := flt_value(&regs[ra + 2].val) + step
 	cont := idx <= limit if 0 < step else limit <= idx
 	if cont {
-		set_float(stack_value(L, ra + 2), idx)
+		set_float(&regs[ra + 2].val, idx)
 		return true
 	}
 	return false
@@ -1635,7 +1635,7 @@ vm_execute :: proc(L: ^State, ci_idx_in: int) {
 						pc = vm_pc_add(pc, -(getarg_Bx(i))) // jump back
 						trap = vm_poll_async_hook(L, trap)
 					}
-				} else if floatforloop(L, base + ra) { // float loop
+				} else if floatforloop(regs, ra) { // float loop
 					pc = vm_pc_add(pc, -(getarg_Bx(i)))
 					trap = vm_poll_async_hook(L, trap)
 				}
@@ -4749,7 +4749,7 @@ when VM_THREADED {
 				pc = vm_pc_add(pc, 1)
 				return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
 			}
-		} else if floatforloop(L, base + ra) { // float loop
+		} else if floatforloop(regs, ra) { // float loop
 			pc = vm_pc_add(pc, -(getarg_Bx(i)))
 			when ODIN_OS != .Freestanding {
 			if intrinsics.atomic_load(&async_hook_pending) != 0 {

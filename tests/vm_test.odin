@@ -389,6 +389,37 @@ vm_global_read_non_string_constant :: proc(t: ^testing.T) {
 	testing.expect_value(t, kernel.api_tointeger(fx.L, -1), 42)
 }
 
+// Float FORLOOP uses the current register base, including after calls in its
+// body. Exercise both directions and unordered/infinite arithmetic too.
+@(test)
+vm_float_loop_edges :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local sum = 0
+		for i = 3.0, 1.0, -0.5 do
+		  collectgarbage('step')
+		  sum = sum + i
+		end
+		assert(sum == 10.0)
+		local nan = 0/0
+		local n = 0
+		for i = 1.0, 3.0, nan do n = n + 1 end
+		assert(n == 1)
+		for i = 1.0, nan do n = n + 100 end
+		for i = 1.0, 3.0, math.huge do n = n + 1 end
+		assert(n == 2)
+		assert(not pcall(function() for i = 1.0, 3.0, -0.0 do end end))
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
 // Variable-key reads cover array and short-string hits, integer-hash and
 // generic keys, and misses whose __index yields and moves the stacks.
 @(test)

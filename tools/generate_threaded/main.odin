@@ -272,7 +272,7 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src, 
 			fmt.sbprintf(&edge_text, "%s\n%s\n", name, strings.trim_space(dedent(bodies[i])))
 		}
 	}
-	if digest(strings.to_string(edge_text)) != "df280857be3ce46c7cff5070c0d712050786179e155e71585e4e43854f0c8fdd" {fail("edge-poll body changed")}
+	if digest(strings.to_string(edge_text)) != "c3951a1461ec1537a3069a5cd04912b710bc6af8606a02c872f539c15bdb98a6" {fail("edge-poll body changed")}
 	invalid := between(cases, "Op_Code(125), Op_Code(126), Op_Code(127):\n", "\n\t\t\t}")
 	if !strings.contains(invalid, "debug_runerror(L, \"invalid opcode\")") {fail("missing invalid opcode case")}
 
