@@ -294,8 +294,10 @@ The threaded upvalue handlers derive the inline vector from the carried closure,
 the same non-moving object held in the function slot below the register base.
 Variable-key table handlers address operands directly from that base, whose
 pointers are consumed before any callout; the slow read still receives a stack
-index for its result. Global, field and variable-key reads try the shared
-contextless table lookup before entering a no-inline miss path. Variable-key
+index for its result. Global reads keep short-string hits in their handler and
+tail-transition to separate generic-key and miss handlers; non-string constants
+remain supported for unvalidated bytecode. Field and variable-key reads try the
+shared contextless table lookup before entering a no-inline miss path. Variable-key
 array and short-string hits stay in their handler; integer-hash and other key
 types tail-transition to contextless lookup handlers without repeating the
 table/type dispatch. Known empty slots and non-tables go straight to the
@@ -304,15 +306,19 @@ also handles a string whose `__index` is a table with a matching key; it keeps
 the saved PC and stack top updates made by the original non-table path.
 
 Variable-key integer writes of non-collectable values use the ordinary pre-set
-without a context. The slow setter also tries short-string pre-sets for primitive
-values; that shared pre-set declines a new white key in a black table. It may
-finish an integer-key write of a collectable value without a context only when
-the ordinary back barrier is a no-op, with no allocation or re-entry between
-the color test and the write. A needed barrier uses the original setter. An
-unfinished pre-set passes its location to the original finish path. These hits
-cannot move the stack or change the trap. Misses receive the activation's
-original context and reload the trap after any callout. The generator guards
-the shared pre-set and barrier predicates as well as the opcode bodies.
+without a context. Other writes tail-transition to handlers for primitive
+short-string keys, collectable integer values, or the ordinary general setter.
+The shared short-string pre-set declines a new white key in a black table.
+Collectable integer writes finish without a context only when the ordinary back
+barrier is a no-op, with no allocation or re-entry between the color test and
+the write. A needed barrier uses the original setter. An unfinished pre-set
+uses the original setter and finish path. Immediate integer reads and writes
+similarly keep their contextless hits in the handler; collectable writes use
+the same inert-barrier check, and misses use the ordinary immediate helpers.
+These hits cannot move the stack or change the trap. Misses receive the
+activation's original context and reload the trap after any callout. The
+generator guards the shared pre-sets, immediate helpers and barrier predicates
+as well as the opcode bodies.
 
 Threaded concatenation follows the same right-to-left folding, coercion and
 top/saved-PC protocol as the switch VM. Its contextless common path mirrors
@@ -334,8 +340,10 @@ instruction is read before the loop registers are updated; a pending interrupt
 or trace discards that read and uses the ordinary poll or trace path. The code
 is immutable while the activation runs, and the same register tags are written
 as in the switch. This applies to integer loops generally, not just empty ones;
-floating-point loops use the ordinary path. The call-hook work at frame entry
-is separated from the no-hook path, with the same base refresh after the hook.
+floating-point loops use the ordinary path and address their control slots
+directly through the current register base in both modes. The call-hook work
+at frame entry is separated from the no-hook path, with the same base refresh
+after the hook.
 These rewrites are guarded by the generator.
 
 The threaded CALL handler specializes non-allocating Lua-closure frame setup;
