@@ -465,7 +465,10 @@ either in a no-inline slow helper or only on the branch that needs it.
 `api_native_*` is a narrow positive-argument fast path for these callbacks, not a
 replacement for the embedding API: the latter keeps its existing procedure types
 and caller-supplied assertion handler. Both paths retain `API_CHECKS`; stress stack
-checks still perform forced relocation.
+checks still perform forced relocation. The transcendental math callbacks use
+these helpers for numeric arguments, while string coercion and errors take their
+existing default-context slow paths. Optional `atan` and `log` arguments retain
+the same missing/nil and numeric-conversion rules.
 
 ## Decision 5 — byte-compatible bytecode is per a fixed ABI config
 

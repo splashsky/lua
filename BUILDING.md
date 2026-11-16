@@ -312,3 +312,18 @@ LC_ALL=C /path/to/reference/lua tests/format_diff.lua > /tmp/format-reference.tx
 LC_ALL=C build/out/lua tests/format_diff.lua > /tmp/format-odin.txt
 cmp /tmp/format-reference.txt /tmp/format-odin.txt
 ```
+
+For bit-for-bit verification of math changes, run `tests/transcend_bits.lua`
+with the old and new interpreters and compare their binary output:
+
+```bash
+/path/to/old/lua tests/transcend_bits.lua > /tmp/math-old.bin
+build/out/lua tests/transcend_bits.lua > /tmp/math-new.bin
+cmp /tmp/math-old.bin /tmp/math-new.bin
+```
+
+It prints the input and result counts on standard error; an optional integer
+argument replaces the default 100,000 full-range random inputs. The corpus
+also covers special values and neighbours of important boundaries. Reference
+libm need not match every bit of the existing implementation, so compare to
+the old build as well as any reference interpreter.
