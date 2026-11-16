@@ -5,8 +5,8 @@ which back specific claims made in commit messages.
 
 ## `generate_threaded/`
 
-Generates the experimental threaded VM from the switch opcode bodies, and checks
-the guarded rewrites and specialized helpers for drift. Run it from the repo root:
+Generates the default threaded VM from the switch opcode bodies, and checks the
+guarded rewrites and specialized helpers for drift. Run it from the repo root:
 
 ```sh
 bash build/generate-threaded.sh          # regenerate
@@ -14,7 +14,8 @@ bash build/generate-threaded.sh --check  # verify without writing
 ```
 
 On Windows use `.\build\generate-threaded.ps1` or pass `-Check`. The wrappers
-compile this Odin tool first; `build/check.*` uses its check mode.
+compile this Odin tool first; `build/test.*` uses its check mode. `build/check.*`
+type-checks the tool and both VMs without linking or running the generator.
 
 ## `strtod_verify/`
 

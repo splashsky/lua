@@ -15,7 +15,8 @@
 #
 # Individual knobs can still be overridden: BRAND_DISPLAY, SOURCE_EXT,
 # ENV_PREFIX. VM_THREADED selects the interpreter in every wrapper: 1 for
-# threaded, 0 for switch, or unset to use the build default.
+# threaded, 0 for switch, or unset for threaded on amd64/arm64 and switch
+# elsewhere. Forcing threaded on an unsupported architecture is rejected.
 #
 # Source this file, then use $BRAND_DEFINES (an array), $BRAND_EXE and
 # $BRAND_COMPILER_EXE.

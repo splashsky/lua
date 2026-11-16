@@ -14,8 +14,9 @@
 
     Individual knobs can still be overridden for full control, e.g.
     `-Brand moon -SourceExt .mn`. Every wrapper also reads $env:VM_THREADED:
-    '1' selects threaded, '0' selects switch, and unset uses the build default.
-    Other values are rejected.
+    '1' selects threaded, '0' selects switch, and unset selects threaded on
+    amd64/arm64 and switch elsewhere. Other values and unsupported forced
+    threaded builds are rejected.
 #>
 
 # The -define: flags for a brand, or an empty array for the default profile.

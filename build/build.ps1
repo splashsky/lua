@@ -21,7 +21,8 @@
     Output lands in build\out\.
 
     Set $env:VM_THREADED to '1' for the threaded VM or '0' for the switch VM.
-    Remove it to use the build default. Other values are rejected.
+    Remove it for the default: threaded on amd64/arm64, switch elsewhere.
+    Other values and unsupported forced threaded builds are rejected.
 #>
 [CmdletBinding()]
 param(
