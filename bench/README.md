@@ -64,7 +64,9 @@ larger native stack used by the project's other CLI scripts.
 ### Comparing VM instruction counts on Linux
 
 `build/vm-compare.sh` builds explicitly selected switch and threaded interpreters
-side by side under `TMPDIR`, and optionally compares reference Lua:
+side by side under `TMPDIR`, and optionally compares reference Lua. The threaded
+column represents the default on amd64 and arm64; the switch is selectable with
+`VM_THREADED=0` in single-mode wrappers:
 
 ```sh
 REFLUA=/path/to/lua CPU=12 ./build/vm-compare.sh 5 > comparison.md

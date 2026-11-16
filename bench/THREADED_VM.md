@@ -12,7 +12,8 @@
 On an AMD Ryzen 9 7950X, Linux x86-64, Odin `dev-2026-11-nightly:9a69916`,
 `REFLUA=/tmp/opencode/refbuild/src/lua CPU=12 bash build/vm-compare.sh 5` builds
 both `-o:speed` PIE modes explicitly and rotates them with reference Lua 5.5.1
-(`-O2`). The explicit threaded build is byte-identical in `.text` to the unset
+(`-O2`). The source is 368b850 plus the default flip c9db250. The explicit
+threaded build is byte-identical in `.text` to the unset
 default on this host. Each isolated workload starts a fresh process; counts
 from `perf stat -e instructions:u,cycles:u` include startup and harness setup.
 The local-time probe used `TZ` unset, with `/etc/localtime` pointing to
@@ -78,7 +79,7 @@ from 174.6M minimum to 192.6M median instructions with the randomized hash seed.
 For Linux x86-64 `-o:speed` PIE builds of the current source, GNU `size`
 reports text/data of 898,151/63,864 bytes for threaded, 874,310/62,840 for
 switch, and 283,206/6,216 for reference Lua 5.5.1. The unset-default and explicit
-`VM_THREADED=true` builds have byte-identical `.text`. `nm -S` reports:
+`-define:VM_THREADED=true` builds have byte-identical `.text`. `nm -S` reports:
 
 | Symbol group | Bytes |
 |---|---:|
