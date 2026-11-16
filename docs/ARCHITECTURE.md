@@ -197,22 +197,22 @@ fully explicit:
 - Each frame records everything needed to resume it: program counter, stack base/top,
   expected result count, call kind, protected-call recovery info, any continuation
   (`callk`/`pcallk`), hook/finalizer state, and any partially-completed operation.
-- The interpreter (`luaV_execute` in `vm.odin`) is a **trampoline**, but an *in-place*
-  one rather than an outcome-returning one. It is a single labeled loop (`newframe`)
-  that reloads its per-frame locals (closure, constants, code, base, pc) from the
-  current frame. Ordinary Lua→Lua calls, tail calls, and returns never grow the native
-  Odin stack: `OP_CALL` pushes a frame and does `continue newframe`; a return pops the
-  frame index and `continue newframe`s back into the caller — unless the returning
-  frame was entered *fresh* from C (the `CIST_FRESH` bit), in which case `luaV_execute`
-  returns to whoever invoked it. Only metamethods, iterators, and `pcall` re-enter
-  `luaV_execute` recursively (through `luaD_call`), and each such callee is marked
-  fresh so it returns cleanly.
+- The interpreter (`vm_execute`, reference `luaV_execute`) is an **in-place
+  trampoline**, not an outcome-returning one. The switch VM uses a labeled loop
+  (`newframe`); the default threaded VM tail-transitions between opcode and frame
+  entry handlers. Both reload per-frame locals (closure, constants, code, base,
+  pc) on frame entry. Ordinary Lua→Lua calls, tail calls and returns never grow
+  the native Odin stack: calls push an explicit frame, returns pop it, and both
+  re-enter the appropriate frame. A frame entered *fresh* from C (`CIST_FRESH`)
+  returns to its native caller instead. Metamethods, iterators and `pcall` can
+  re-enter the VM recursively (through reference `luaD_call`); these activations
+  are fresh so they return cleanly.
 
   The unified `Exec_Signal`/`Exec_Outcome` vocabulary still lives in `control.odin` and
   names these transitions for documentation and for the host-callback contract, but the
-  hot path expresses *Continue/Returned* as loop control and *Errored/Yielded* as a
-  `longjmp` (see below) rather than as a returned tagged value — this is both faster and
-  a closer match to reference Lua's own `lvm.c`.
+  hot path expresses *Continue/Returned* as loop control or tail transitions and
+  *Errored/Yielded* as a `longjmp` (see below) rather than as a returned tagged
+  value — this is both faster and a closer match to reference Lua's own `lvm.c`.
 
 **Both errors and yields unwind with `longjmp`; coroutines resume over the heap frame
 stack.** `throw` long-jumps to the nearest protected boundary for a real error, and
@@ -232,17 +232,20 @@ Lua: an ordinary callback is non-yieldable across its native frame, while a yiel
 callback must register a continuation. A callback returns a *tagged outcome*, not just
 an integer result count.
 
-### Experimental tail-call-threaded dispatch
+### Tail-call-threaded dispatch
 
-`-define:VM_THREADED=true` selects an experimental alternative; the switch VM
-remains the default. Each of the 85 opcodes has a handler, and a 128-entry table
-maps the entire seven-bit opcode field to handlers, including one error handler
-for the 43 unused encodings. Each fetch tail-jumps through the table. The table
-contains procedure addresses, relocated once by the loader. On the tested
-amd64 and arm64 targets Odin's `"preserve/none"` calling convention and
+The threaded VM is the default on amd64 and arm64. `VM_THREADED=0` in the wrappers
+or `-define:VM_THREADED=false` in direct Odin commands selects the switch; other
+architectures select it automatically. Each of the 85 opcodes has a handler, and
+a 128-entry table maps the entire seven-bit opcode field to handlers, including
+one error handler for the 43 unused encodings. Each fetch tail-jumps through the
+table. It contains procedure addresses, relocated once by the loader. In the
+inspected amd64 and arm64 objects Odin's `"preserve/none"` calling convention and
 `#must_tail` produce indirect jumps rather than growing the native stack. Those
 are the architectures supported by the current jump shim; enabling this VM on
-another architecture is explicitly rejected rather than assuming an ABI.
+another architecture is explicitly rejected rather than assuming an ABI. Runtime
+validation has only been performed on Linux x86-64: Windows x64, Linux arm64 and
+macOS arm64 have been cross-checked but not run, by the user's decision.
 
 Handlers pass `L`, the next PC, the register-base pointer, closure, code base,
 frame index, trap, an Odin context pointer, and the current instruction. The
@@ -337,8 +340,8 @@ and emits both paths. These specializations duplicate parts of the shared
 helpers and must be reviewed when those helpers change. Both modes use the same
 tests, including forced stack and frame relocation. Results and limitations are
 recorded in
-[bench/THREADED_VM.md](../bench/THREADED_VM.md); what remains before it can become
-the default is listed in [FUTURE_WORK.md](FUTURE_WORK.md).
+[bench/THREADED_VM.md](../bench/THREADED_VM.md); remaining validation and
+performance work is listed in [FUTURE_WORK.md](FUTURE_WORK.md).
 
 ## Decision 3 — persistent indices, temporary VM pointers
 
