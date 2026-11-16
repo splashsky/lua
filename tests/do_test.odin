@@ -604,6 +604,20 @@ local function exercise(n)
   return select('#', native_results(n))
 end
 assert(exercise(10) == 3)
+-- Variable argument counts use CALL B=0; zero fixed arguments also test
+-- the nil-fill path. Exercise both light C functions and C closures.
+local function fixed(a,b,c) return a,b,c end
+local function many(...)
+  local a,b,c = fixed(...)
+  local d,e,f = native_results(...)
+  local g,h,j = native_closure(...)
+  return a,b,c,d,e,f,g,h,j
+end
+local a,b,c,d,e,f,g,h,j = many(11)
+assert(a == 11 and b == nil and c == nil)
+assert(d == 12 and e == 13 and f == 14 and g == 12 and h == 13 and j == 14)
+local function missing(a,b,c) assert(a == nil and b == nil and c == nil) end
+missing()
 local a,b,c = native_closure(11)
 assert(a == 12 and b == 13 and c == 14)
 local function moved()

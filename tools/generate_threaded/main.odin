@@ -113,6 +113,8 @@ emit_indented :: proc(b: ^strings.Builder, s: string) {
 emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	noinline := ""
 	if name == "vm_thread_enter" || name == "vm_thread_trace" || name == "vm_thread_poll" ||
+	   name == "vm_thread_CALL_slow" || name == "vm_thread_CALL_precalled" ||
+	   name == "vm_thread_CALL_lcf" || name == "vm_thread_CALL_ccl" ||
 	   name == "vm_thread_RETURN0_slow" || name == "vm_thread_RETURN1_slow" ||
 	   name == "vm_thread_gettable_miss" || name == "vm_thread_gettable_int" ||
 	   name == "vm_thread_gettable_generic" || name == "vm_thread_concat_meta_op" {
@@ -494,6 +496,89 @@ for nres > 0 {
 ci_idx -= 1
 return #must_tail vm_thread_enter(%s)
 `, body, ARGS)
+		}
+		// Keep all ABI callouts out of the ordinary Lua-to-Lua call path.
+		// The slow handler is the complete switch-derived body. The fast arm
+		// checks everything before publishing any part of the new frame.
+		if name == "CALL" {
+			emit_proc(&b, "vm_thread_CALL_slow", fmt.tprintf("%s%s", body, dispatch), true)
+			emit_proc(&b, "vm_thread_CALL_precalled", fmt.tprintf(`ra := base + getarg_A(i)
+nresults := getarg_C(i) - 1
+newci := vm_thread_precall(L, ra, nresults, ctx)
+if newci >= 0 {{
+	ci_idx = newci
+	return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}}
+trap = L.frames[ci_idx].u.l.trap
+%s`, dispatch), true)
+			// These transitions borrow the frame-index argument for the function
+			// slot. Successful native calls restore L.ci to the caller, including
+			// after hooks or stack/frame relocation; yields do not return here.
+			for variant in ([]string{"lcf", "ccl"}) {
+				f := "callee.value_.f"
+				if variant == "ccl" {f = "(^CClosure)(callee.value_.gc).f"}
+				emit_proc(&b, fmt.tprintf("vm_thread_CALL_%s", variant), fmt.tprintf(`func := ci_idx
+callee := &regs[getarg_A(i)].val
+_ = vm_thread_native_try(L, func, getarg_C(i), %s, ctx)
+ci_idx = L.ci
+trap = L.frames[ci_idx].u.l.trap
+%s`, f, dispatch), true)
+			}
+			body = `when HARDSTACKTESTS {
+	return #must_tail vm_thread_CALL_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+} else {
+	when ODIN_OS != .Freestanding {
+		if intrinsics.atomic_load(&async_hook_pending) != 0 {
+			return #must_tail vm_thread_CALL_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+	}
+	a := getarg_A(i)
+	ra := base + a
+	b := getarg_B(i)
+	top := L.top
+	if b != 0 {
+		top = ra + b
+		L.top = top
+	}
+	L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
+	callee := &regs[a].val
+	tag := type_tag(callee)
+	if tag == VLCF {
+		return #must_tail vm_thread_CALL_lcf(L, pc, regs, cl, code, ra, trap, ctx, i)
+	}
+	if tag == VCCL {
+		return #must_tail vm_thread_CALL_ccl(L, pc, regs, cl, code, ra, trap, ctx, i)
+	}
+	if tag != VLCL {
+		return #must_tail vm_thread_CALL_precalled(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+	p := (^LClosure)(callee.value_.gc).p
+	fsize := int(p.maxstacksize)
+	next := L.ci + 1
+	if L.stack_size - top <= fsize || next >= L.frames_capacity {
+		return #must_tail vm_thread_CALL_precalled(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+	L.ci = next
+	ci := &L.frames[next]
+	ci.func = ra
+	ci.callstatus = u32(getarg_C(i))
+	ci.top = ra + 1 + fsize
+	ci.u.l.savedpc = 0
+	ci.u.l.nextraargs = 0
+	ci.u.l.trap = 0
+	end := ra + 1 + int(p.numparams)
+	if top < end {
+		for top < end {
+			set_nil(stack_value(L, top))
+			top += 1
+		}
+		L.top = top
+	}
+	ci_idx = next
+	return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`
+			terminal = true
 		}
 		if !terminal {body = fmt.tprintf("%s%s", body, dispatch)}
 		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "SETTABLE" || name == "SELF" || name == "CALL" || name == "LEN" || name == "CONCAT" || name == "MODK" || name == "IDIVK")
