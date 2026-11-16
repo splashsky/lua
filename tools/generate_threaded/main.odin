@@ -118,7 +118,10 @@ emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	   name == "vm_thread_RETURN0_slow" || name == "vm_thread_RETURN1_slow" ||
 	   name == "vm_thread_gettable_miss" || name == "vm_thread_gettable_int" ||
 	   name == "vm_thread_gettable_generic" || name == "vm_thread_gettabup_miss" ||
-	   name == "vm_thread_gettabup_generic" || name == "vm_thread_concat_meta_op" {
+	   name == "vm_thread_gettabup_generic" || name == "vm_thread_settable_slow" ||
+	   name == "vm_thread_settable_str" || name == "vm_thread_settable_collect" ||
+	   name == "vm_thread_settable_general" ||
+	   name == "vm_thread_concat_meta_op" {
 		noinline = "#force_no_inline "
 	}
 	fmt.sbprintf(b, "\t%s :: %sproc \"preserve/none\" %s {{\n", name, noinline, SIG)
@@ -174,6 +177,7 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src, 
 	review(between(table_src, "table_getint :: proc", "// This is the Odin equivalent"), "3f43ee7bb008ff2e3bf42367fa07e3a3f84eb5a75484f68a0d0d76408d0cbf20", "table_getint")
 	review(between(table_src, "table_fastgeti :: #force_inline proc", "table_getshortstr :: proc"), "9e2ed5c5700ae19c8185bcfb1f6f1e62ede27e1ed89e1c574532ba0eb26d448b", "table_fastgeti")
 	review(between(table_src, "table_fastget ::", "// ---------------------------------------------------------------------------\n// Insertion into the hash part"), "8490a704b65daa82efe7a00322f7c5bff9188b22a50549d5f79ac50d2ae846c0", "table_fastget")
+	review(between(table_src, "table_psetint :: proc", "// Like `luaH_fastgeti`"), "929c6909217b5914c0ac0303a2eaf59498699811f0dcbfc12dabc714869faf42", "table_psetint")
 	review(between(table_src, "table_fastseti :: #force_inline proc", "// Reference's short-string preset"), "38b0e28d813b2d93e29b4b5c9b614b99bd77d3485f3ceec1e50af82517aec017", "table_fastseti")
 	review(between(table_src, "table_psetshortstr :: proc", "table_psetstr :: proc"), "f7f146d846e2a8f0750cfada9e307bfd00cbbfd00c9433f95e4cac703d65dafc", "table_psetshortstr")
 	review(between(gc_src, "gc_barrierback :: #force_inline proc", "// ---------------------------------------------------------------------------\n// Marking"), "e0cd00545b842118e7412e431990db1781e48a19244480187c41aa845b44dff4", "gc_barrierback")
@@ -338,6 +342,33 @@ if tag_is_empty(table_get((^Table)(rb.value_.gc), rc, &regs[getarg_A(i)].val)) {
 	return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 }
 `, dispatch), true)
+	// Keep ordinary ABI calls off the array and integer-hash write paths.
+	emit_proc(&b, "vm_thread_settable_slow", fmt.tprintf("%s\n%s", `ra := &regs[getarg_A(i)].val
+rb := &regs[getarg_B(i)].val
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+trap = vm_thread_setslow(L, ci_idx, vm_pc_index(pc, code), ra, rb, rc, ctx)
+`, dispatch), true)
+	emit_proc(&b, "vm_thread_settable_general", fmt.tprintf("%s\n%s", `ra := &regs[getarg_A(i)].val
+rb := &regs[getarg_B(i)].val
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+#force_inline vm_settable(L, ci_idx, vm_pc_index(pc, code), ra, rb, rc)
+trap = L.frames[ci_idx].u.l.trap
+`, dispatch))
+	emit_proc(&b, "vm_thread_settable_str", fmt.tprintf("%s\n%s", `ra := &regs[getarg_A(i)].val
+rb := &regs[getarg_B(i)].val
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+if table_psetshortstr((^Table)(ra.value_.gc), str_value(rb), rc) != HOK {
+	return #must_tail vm_thread_settable_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`, dispatch), true)
+	emit_proc(&b, "vm_thread_settable_collect", fmt.tprintf("%s\n%s", `ra := &regs[getarg_A(i)].val
+rb := &regs[getarg_B(i)].val
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+h := (^Table)(ra.value_.gc)
+if (is_black(obj2gco(h)) && keepinvariant(L.g)) || table_fastseti(h, int_value(rb), rc) != HOK {
+	return #must_tail vm_thread_settable_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`, dispatch), true)
 	emit_proc(&b, "vm_thread_concat_meta_op", fmt.tprintf("%s\n%s", `ra := base + getarg_A(i)
 L.top = ra + 2
 L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
@@ -402,11 +433,34 @@ if is_integer(rc) {
 `
 		}
 		if name == "SETTABLE" {
-			body = replace_exact(body, "thread_ctx := context", "_ = ctx")
-			body = replace_exact(body, "rc, &thread_ctx)", "rc, ctx)")
-			body = replace_exact(body, "stack_value(L, base + getarg_A(i))", "&regs[getarg_A(i)].val")
-			body = replace_exact(body, "stack_value(L, base + getarg_B(i))", "&regs[getarg_B(i)].val")
-			body = replace_exact(body, "else stack_value(L, base + getarg_C(i))", "else &regs[getarg_C(i)].val")
+			body = `ra := &regs[getarg_A(i)].val
+rb := &regs[getarg_B(i)].val
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+if base_type(ra) != TTABLE {
+	return #must_tail vm_thread_settable_general(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+if is_collectable(rc) {
+	if is_integer(rb) {
+		return #must_tail vm_thread_settable_collect(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+	return #must_tail vm_thread_settable_general(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+if !is_integer(rb) {
+	if type_tag(rb) == VSHRSTR {
+		return #must_tail vm_thread_settable_str(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+	return #must_tail vm_thread_settable_general(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+h := (^Table)(ra.value_.gc)
+key := int_value(rb)
+if Unsigned(key) - 1 >= Unsigned(h.asize) {
+	if table_psetint(h, key, rc) != HOK {
+		return #must_tail vm_thread_settable_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	}
+} else if table_fastseti(h, key, rc) != HOK {
+	return #must_tail vm_thread_settable_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`
 		}
 		if name == "CALL" {
 			body = replace_exact(body, "thread_ctx := context", "_ = ctx")

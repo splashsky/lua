@@ -469,6 +469,44 @@ vm_variable_table_reads :: proc(t: ^testing.T) {
 	testing.expect(t, kernel.api_toboolean(L, -1))
 }
 
+// SETTABLE also handles integer-hash and non-string hash keys. Its cold
+// fallbacks must preserve the key and value across a yielding __newindex.
+@(test)
+vm_table_write_hash_keys_and_yield :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local obj, long = {}, string.rep('x', 100)
+		local keys = {-9, 1.25, false, obj, long, 'short'}
+		local plain = {}
+		for i, key in ipairs(keys) do
+		  plain[key] = i
+		  plain[key] = i + 10
+		  assert(plain[key] == i + 10)
+		end
+		for _, key in ipairs(keys) do
+		  local tab = setmetatable({}, {__newindex = function(t, k, v)
+		    coroutine.yield(k, v)
+		    collectgarbage('collect')
+		    rawset(t, k, v)
+		  end})
+		  local value = {key}
+		  local co = coroutine.create(function() tab[key] = value; return tab[key] end)
+		  local ok, k, v = coroutine.resume(co)
+		  assert(ok and k == key and v == value)
+		  local done, result = coroutine.resume(co)
+		  assert(done and result == value and result[1] == key)
+		end
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
 // Integer writes can take the contextless path only when no GC barrier is
 // needed. Empty slots with __newindex, writes needing a barrier, and non-table
 // objects still have to follow the ordinary yielding/error paths.
