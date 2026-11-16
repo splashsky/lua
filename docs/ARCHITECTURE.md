@@ -1,9 +1,10 @@
 # lua-odin architecture
 
-This document explains the *shape* of the implementation and — more importantly — the
-handful of decisions that Odin forces on us that reference Lua (written in C) didn't
-have to make. Read this before touching the kernel; several things look surprising
-until you know why they are the way they are.
+This document explains the shape of the implementation and the decisions Odin
+forces on us that reference Lua, written in C, did not have to make. Read it
+before touching the kernel; several things look surprising until you know why
+they are the way they are. Measurements and remaining work are in
+[FUTURE_WORK.md](FUTURE_WORK.md).
 
 ## The big picture
 
@@ -29,88 +30,51 @@ until you know why they are the way they are.
                 +------------------------------------+
 ```
 
-### Hosted buffered streams
-
-The hosted I/O library shares `src/stream/` with the command-line programs.
-Each stream serializes operations with its own mutex; `flush_all` pins streams
-one at a time from a separately locked process-wide list before taking their
-mutexes. It can therefore flush a different state's stream between two public
-operations, and reports a failure on any selected stream. EOF and error
-indicators are atomic, and the last OS error is thread-local. Tests that create
-deliberately failing streams or call `flush_all` serialize with a test mutex;
-this isolates their expectations without changing stream locking.
-
-Bulk delimiter reads copy ordinary bytes, including the delimiter, while holding
-the stream mutex and update position and pushback cookies as `getc` would.
-Windows text translation still handles CRLF, Ctrl-Z, and saved lookahead. For
-lines and bounded reads that fit the Lua buffer's initial scratch area, the I/O
-library retains its stack placeholder through string creation and replaces it
-with the result; longer reads retain the growable, to-be-closed buffer path.
+`src/stream/` is the hosted buffered-stream layer shared by the I/O library and
+the two programs; see [Hosted services](#hosted-services).
 
 ## Decision 1 — the kernel is a *single* Odin package
 
-In C, Lua's kernel is a pile of `.c`/`.h` files that freely `#include` one another:
-`lvm.c` calls into `ldo.c`, which calls `lgc.c`, which calls back into `lvm`-level
-concepts, and so on. It is one tightly mutually-recursive unit held together by header
-declarations.
+In C, Lua's kernel is a set of `.c`/`.h` files that freely include one another:
+`lvm.c` calls into `ldo.c`, which calls `lgc.c`, which calls back into VM-level
+concepts. It is one mutually recursive unit held together by header declarations.
 
-Odin has a hard rule: **one directory is one package, and packages may not form import
-cycles.** There is no way to split mutually-recursive code across Odin packages. So the
-entire kernel lives in **one package**, `src/kernel/`, as many files that share a single
-namespace (files in the same Odin package see each other's declarations with no
-`import` needed). This mirrors Lua's kernel exactly and sidesteps the cycle rule.
+Odin has a hard rule: **one directory is one package, and packages may not form
+import cycles.** So the entire kernel lives in one package, `src/kernel/`, as many
+files sharing a single namespace. This mirrors Lua's kernel and sidesteps the
+cycle rule. The standard libraries and the two executables depend on the kernel
+but never the reverse, so they are separate packages. The kernel must never
+import `stdlib`; if it seems to need to, the public API is missing something.
 
-The standard libraries and the two executables are genuinely downstream — they depend
-on the kernel but the kernel never depends on them — so they *are* separate packages.
-The kernel must never import `stdlib`; if it ever seems to need to, that's a signal the
-public API is missing something.
+Because files in one package share a namespace, a helper needed by a sibling file
+should be `@(private)` (package-visible), not `@(private = "file")` plus a copy.
 
 ### Freestanding platform boundary
 
 `ODIN_OS == .Freestanding` is the platform switch; there is no parallel project
 define. In that build the dependency graph stops before every hosted service:
-`stream.odin`, `io`, `os`, `package`, the interactive debug library, and both
-standalone mains carry `#+build !freestanding`. The freestanding stdlib surface
-is base, coroutine, math, string, table, and utf8. Base omits its three hosted
-entries (`print`, `loadfile`, and `dofile`) while retaining in-memory `load`.
+`stream.odin`, `io`, `os`, `package`, the interactive debug library and both
+mains carry `#+build !freestanding`. The freestanding stdlib is base, coroutine,
+math, string, table and utf8; base omits `print`, `loadfile` and `dofile` but
+keeps in-memory `load`.
 
-The kernel itself never owns a heap. Hosted builds add `default_allocator` in a
-host-only source file; freestanding builds expose only the
-allocator-taking `new_state`. Firmware must provide that callback, its arena or
-heap policy, and any panic/reset behavior. The build also passes
-`-default-to-nil-allocator`, so an unintended Odin allocation cannot silently
-reach for a platform heap that does not exist.
+The kernel never owns a heap. Hosted builds add `default_allocator` in a
+host-only file; freestanding builds expose only the allocator-taking
+`new_state`, and pass `-default-to-nil-allocator` so an unintended Odin
+allocation cannot reach for a heap that does not exist.
 
-**Convention for platform-split files.** A target-dependent subsystem is split as
-*one untagged file holding everything shared* plus *small tagged files holding only
-what genuinely differs*. It is never split as two whole-file forks. Concretely:
-`auxlib.odin` carries no build tag and is compiled for every target, while
-`auxlib_hosted.odin` (`#+build !freestanding`) holds the file loaders,
-`luaL_newstate`, the file/exec result reporters, and the stderr warning system, and
-`auxlib_freestanding.odin` (`#+build freestanding`) holds only `aux_makeseed` —
-the single routine that is not simply *absent* on bare metal but needs a different
-body. `base.odin` follows the same shape, with `print`/`loadfile`/`dofile` in
-`base_hosted.odin`.
+**Platform-split files** are *one untagged file holding everything shared* plus
+*small tagged files holding only what differs*, never two whole-file forks:
+`auxlib.odin` is untagged, `auxlib_hosted.odin` holds the loaders, `newstate`,
+result reporters and warnings, and `auxlib_freestanding.odin` holds only
+`aux_makeseed`. The one exception is `base_funcs`, spelled out in full in both
+`base_hosted.odin` and `base_freestanding.odin`: registration order fixes the
+key order in `_G`, which `pairs(_G)` makes observable.
 
-The one deliberate exception is a registration table: `base_funcs` is spelled out
-in full in *both* `base_hosted.odin` and `base_freestanding.odin` rather than being
-assembled from a shared list plus per-target extras. Registration order determines
-the order keys are inserted into `_G`, hence that table's node layout and
-`pairs(_G)` iteration order. Lua leaves that unspecified but it is observable, so
-each target owns one explicit ordered list.
-
-Because files in one Odin package share a namespace, a helper needed by a sibling
-file should be `@(private)` (package-visible), not `@(private = "file")`. Marking it
-file-private and then re-declaring a copy next door is how duplication creeps back
-in.
-
-`build/check.*` type-checks the freestanding target alongside the hosted packages
-precisely so this split cannot rot unnoticed.
-
-One small build define remains for amd64 ABI selection, not platform selection:
-the wrappers set `FREESTANDING_WIN64_ABI=true` for Odin's Win64 and MinGW
-freestanding triples. `ODIN_OS` is correctly `Freestanding` for all of them,
-but Odin does not expose the sub-ABI needed by the assembly setjmp/longjmp shim.
+`build/check.*` type-checks the freestanding target alongside the hosted
+packages so this split cannot rot unnoticed. The only other define,
+`FREESTANDING_WIN64_ABI`, selects the amd64 register set for the jump shim on
+Odin's Win64 and MinGW freestanding triples, which Odin does not expose.
 
 File-to-origin map (each Odin file corresponds to reference `l*.c`/`l*.h`):
 
@@ -142,9 +106,9 @@ File-to-origin map (each Odin file corresponds to reference `l*.c`/`l*.h`):
 
 ### Naming: neutral in the source, branded at build time
 
-Nothing in the source spells the name of the language it implements. The kernel
-subsystems use neutral, semantic prefixes rather than reference Lua's `lua*_`
-initials, so a rebranded distribution needs no renaming pass:
+Nothing in the source spells the name of the language it implements. Kernel
+subsystems use neutral prefixes rather than reference Lua's `lua*_` initials, so
+a rebranded distribution needs no renaming pass:
 
 | Reference C | Here      | Reference C | Here       | Reference C | Here      |
 |-------------|-----------|-------------|------------|-------------|-----------|
@@ -157,379 +121,255 @@ initials, so a rebranded distribution needs no renaming pass:
 | `luaP_*`    | `opcode_*`| `luaZ_*`    | `zio_*`    | `LUA_*`     | (stripped)|
 
 `lua_State` is `State`, `lua_Debug` is `Debug_Info`, and `LUA_TNIL` and friends
-are simply the kernel's own `TNIL` tags.
+are the kernel's own `TNIL` tags. Backticked `lua*` names *in comments* always
+name the **reference C** identifier being mirrored, never one in this tree.
 
-**Comment convention.** Backticked `lua*` names *in comments* are always the
-**reference C** identifier being mirrored, never a name that exists in this
-tree — that provenance is the point of those comments. When a comment means our
-code, it uses our spelling.
+Odin defines produce values, not identifiers, which is why names are neutral
+rather than brand-derived. Everything that *is* data (`_VERSION`, the banner, the
+bytecode signature, the source extension, the environment prefix, the search
+paths) is a `#config` constant in `src/kernel/brand.odin`; see BUILDING.md.
 
-Identifiers cannot be parameterized by `-define:` (Odin resolves names at
-compile time and defines only produce *values*), which is exactly why the names
-are neutral rather than brand-derived. Everything that *is* data —  the
-`_VERSION` string, the banner, the bytecode signature, the source extension, the
-environment-variable prefix, the search paths — lives behind the `#config`
-constants in `src/kernel/brand.odin`. See BUILDING.md for the knobs.
+## Decision 2 — an explicit frame stack, a trampoline, and `longjmp` for errors
 
-## Decision 2 — an explicit-frame-stack VM with a trampoline (plus real `longjmp` for errors)
+Reference Lua uses the native C stack for two different things:
 
-This is the single most important design decision, and it was confirmed by reviewing
-the plan before writing any code.
+1. `setjmp`/`longjmp` (`luaD_throw` / `luaD_rawrunprotected`) unwinds arbitrarily
+   deep C frames to the nearest protected boundary when an error is raised.
+2. Coroutines suspend deep inside the interpreter and resume later.
 
-Reference Lua does two distinct things with the native C stack:
+These are different problems with different solutions.
 
-1. It uses `setjmp`/`longjmp` (`luaD_throw` / `luaD_rawrunprotected`) to unwind across
-   arbitrarily deep C call frames when an error is raised, snapping the state back to
-   the nearest protected-call (`pcall`) boundary.
-2. Its coroutines suspend execution from deep inside the interpreter and resume later —
-   effectively stack switching.
+**Errors use a libc-free `setjmp`/`longjmp`.** `throw` and `run_protected` in
+`control.odin` model `luaD_throw` and `luaD_rawrunprotected`. The machine-state
+save and jump are small inline-assembly routines in `jmp.odin` for amd64 (SysV
+and Win64 register sets) and arm64; other architectures fail at compile time.
+They must stay `#force_no_inline`, for the reason in that file's header. Because
+a `longjmp` skips every intervening `defer`, a raw (non-GC) allocation must never
+be freed in a `defer` a throw could leap over: the protected wrapper that owns it
+frees it explicitly on both paths, as reference frees the parser's
+`Dyndata`/`Mbuffer` after `luaD_pcall`.
 
-These are **not** the same problem, and they do **not** need the same solution.
+**Coroutines need an explicit heap frame stack.** `longjmp` can only unwind a
+stack, not resume one it left, so a recursive interpreter cannot implement
+`coroutine.yield`. Like reference Lua's `CallInfo` list, and together with
+`longjmp` rather than instead of it:
 
-**Errors (1) use real `setjmp`/`longjmp`.** An earlier revision of this document assumed
-Odin had no access to them; that was wrong. Odin's standard library binds them in
-`core:c/libc`, and on Windows the binding deliberately selects UCRT's *non-unwinding*
-`longjmp` (the plain register-restoring jump Lua wants, no SEH unwind). So `throw` /
-`run_protected` (see `src/kernel/control.odin`) model `luaD_throw` / `luaD_rawrunprotected`
-faithfully: `throw` stashes the status on the innermost `Longjmp` and jumps straight
-back to the matching `run_protected`. `throw` never returns; it keeps a `Thread_Status`
-return type purely so existing `return throw(...)` propagation sites keep compiling, but
-both of its paths diverge (`longjmp` and `abort` are `-> !`). The one discipline this
-imposes: because a `longjmp` skips every intervening `defer`, cleanup of a **raw**
-(non-GC) allocation must never live in a `defer` a throw could leap over — the protected
-wrapper that owns such memory frees it explicitly on both paths, exactly as reference Lua
-frees the parser's `Dyndata`/`Mbuffer` after `luaD_pcall`.
-
-**Coroutines (2) still need the explicit heap frame stack.** `longjmp` only *unwinds* a
-stack; it cannot *resume* one it already left. A naive recursive interpreter (where a Lua
-call is an Odin function call) therefore still cannot implement `coroutine.yield`, because
-once we return up the Odin stack to suspend we've destroyed the frames we'd need to
-resume. Reference Lua handles this with its explicit `CallInfo` list — and, crucially, it
-uses that list *together with* `longjmp`, not instead of it. We do the same.
-
-So we do what reference Lua effectively models with its `CallInfo` list, but make it
-fully explicit:
-
-- Each `State` owns its **value stack** and its **call-frame stack** as arrays it
-  manages itself — *not* the native Odin call stack.
-- Each frame records everything needed to resume it: program counter, stack base/top,
-  expected result count, call kind, protected-call recovery info, any continuation
-  (`callk`/`pcallk`), hook/finalizer state, and any partially-completed operation.
+- Each `State` owns its **value stack** and **call-frame stack** as arrays it
+  manages itself, not the native Odin stack. A frame records everything needed to
+  resume it: PC, base/top, expected results, call kind, recovery info, any
+  continuation (`callk`/`pcallk`) and any partially completed operation.
 - The interpreter (`vm_execute`, reference `luaV_execute`) is an **in-place
-  trampoline**, not an outcome-returning one. The switch VM uses a labeled loop
-  (`newframe`); the default threaded VM tail-transitions between opcode and frame
-  entry handlers. Both reload per-frame locals (closure, constants, code, base,
-  pc) on frame entry. Ordinary Lua→Lua calls, tail calls and returns never grow
-  the native Odin stack: calls push an explicit frame, returns pop it, and both
-  re-enter the appropriate frame. A frame entered *fresh* from C (`CIST_FRESH`)
-  returns to its native caller instead. Metamethods, iterators and `pcall` can
-  re-enter the VM recursively (through reference `luaD_call`); these activations
-  are fresh so they return cleanly.
+  trampoline**. The switch VM uses a labeled loop (`newframe`); the default
+  threaded VM tail-transitions between opcode and frame-entry handlers. Lua→Lua
+  calls, tail calls and returns never grow the native stack. A frame entered
+  fresh from C (`CIST_FRESH`) returns to its native caller. Metamethods,
+  iterators and `pcall` re-enter the VM recursively through `luaD_call`, as fresh
+  activations.
 
-  The unified `Exec_Signal`/`Exec_Outcome` vocabulary still lives in `control.odin` and
-  names these transitions for documentation and for the host-callback contract, but the
-  hot path expresses *Continue/Returned* as loop control or tail transitions and
-  *Errored/Yielded* as a `longjmp` (see below) rather than as a returned tagged
-  value — this is both faster and a closer match to reference Lua's own `lvm.c`.
+Errors and yields both leave with `longjmp`: `throw` jumps to the nearest
+protected boundary, and `api_yieldk` jumps out with a `Yield` status. A yield is
+resumable because the coroutine's heap frames are left intact: `api_resume`
+walks back into them through `resume`/`unroll`/`precover` in `do.odin`,
+finishing the interrupted instruction (`luaV_finishOp`) or running the C
+continuation. Error recovery instead reconciles the frame stack at the catch
+site: it restores the frame index, closes upvalues and to-be-closed slots and
+installs the error object (`luaD_pcall`/`luaD_closeprotected`).
 
-**Both errors and yields unwind with `longjmp`; coroutines resume over the heap frame
-stack.** `throw` long-jumps to the nearest protected boundary for a real error, and
-`api_yieldk` long-jumps out with a `Yield` status for a suspension. What makes the yield
-*resumable* is that the coroutine's frames are heap arrays that are left intact: the
-resuming `api_resume` walks back into them via `resume`/`unroll`/`precover` (in `do.odin`),
-finishing the interrupted instruction (`luaV_finishOp`) or running the C continuation, and
-then trampolines onward. You cannot resume suspended Lua execution after the native frames
-that ran it have returned, so the frames must live in the heap where we can pause and
-resume them. Error recovery, by contrast, reconciles the explicit frame stack at the catch
-site — restoring the frame index, closing open upvalues and to-be-closed slots, and
-installing the error object (`luaD_pcall`/`luaD_closeprotected`). The two hard problems are
-solved by these two mechanisms working together, exactly as in reference Lua.
-
-Host (Odin) callbacks follow the same continuation rules as C functions in reference
-Lua: an ordinary callback is non-yieldable across its native frame, while a yieldable
-callback must register a continuation. A callback returns a *tagged outcome*, not just
-an integer result count.
+Host (Odin) callbacks follow the continuation rules of C functions in reference
+Lua: an ordinary callback is non-yieldable across its native frame, and a
+yieldable one must register a continuation. `control.odin`'s
+`Exec_Signal`/`Exec_Outcome` names these transitions for the callback contract;
+the hot path expresses them as loop control, tail transitions and `longjmp`.
 
 ### Tail-call-threaded dispatch
 
-The threaded VM is the default on amd64 and arm64. `VM_THREADED=0` in the wrappers
-or `-define:VM_THREADED=false` in direct Odin commands selects the switch; other
-architectures select it automatically. Each of the 85 opcodes has a handler, and
-a 128-entry table maps the entire seven-bit opcode field to handlers, including
-one error handler for the 43 unused encodings. Each fetch tail-jumps through the
-table. It contains procedure addresses, relocated once by the loader. In the
-inspected amd64 and arm64 objects Odin's `"preserve/none"` calling convention and
-`#must_tail` produce indirect jumps rather than growing the native stack. Those
-are the architectures supported by the current jump shim; enabling this VM on
-another architecture is explicitly rejected rather than assuming an ABI. Runtime
-validation has only been performed on Linux x86-64: Windows x64, Linux arm64 and
-macOS arm64 have been cross-compiled to objects but not run, by the user's decision.
+The threaded VM is the default on amd64 and arm64. `VM_THREADED=0` in the
+wrappers, or `-define:VM_THREADED=false`, selects the switch, which other
+architectures use automatically; forcing threaded elsewhere is a compile error.
+Each of the 85 opcodes has a handler, and a 128-entry table maps the whole
+seven-bit opcode field, with one error handler for the 43 unused encodings. Odin's
+`"preserve/none"` convention and `#must_tail` turn every fetch into an indirect
+jump. It has been run only on Linux x86-64; Windows x64, Linux arm64 and macOS
+arm64 objects were inspected for indirect tail jumps but not run.
 
 Handlers pass `L`, the next PC, the register-base pointer, closure, code base,
-frame index, trap, an Odin context pointer, and the current instruction. The
-constants are derived from the closure, and the register-base *index* from the
-pointer and the current stack, when an opcode needs them. A VM activation owns
-the context copy for the lifetime of its tail-call chain. Frame entry is another
-tail transition, which re-derives the closure, PC, and base and performs the
-normal call-hook setup. Lua-to-Lua calls, tail calls and returns therefore use
-the same explicit frame stack; `CIST_FRESH`
-returns to the native caller. Native calls, iterators and metamethods retain their
-existing re-entrant boundaries.
+frame index, trap, an Odin context pointer and the current instruction.
+Constants and the base index are derived when needed. A VM activation owns the
+context copy for its whole tail-call chain; frame entry is another tail
+transition that re-derives closure, PC and base and runs the call hook. The
+fetch trap is a separate cold handler that runs `debug_traceexec` and refreshes
+the base, including after relocation. Interrupts are polled at the same edges
+as the switch; slow polls tail-jump to a handler that applies the request and
+continues. Errors, yields and coroutine resumption use the same protected
+boundaries and continuations as the switch.
 
-The fetch trap moves to a separate cold handler: it runs `debug_traceexec` and
-refreshes the base before fetching, including after relocation. `VARARGPREP`
-refreshes the base immediately and retains its delayed call-hook behavior.
-Interrupts are still polled at the same control-flow edges; edge-only slow polls
-tail-jump to a handler that applies the request and continues at the next fetch.
-Errors and yields still long-jump through the existing protected boundaries.
-Coroutine resumption runs the existing interrupted-op continuation and re-enters
-`vm_execute`, rebuilding the local PC from the persistent index.
+**Generated from the switch.** The switch bodies in `vm.odin` are the source of
+the checked-in threaded region, generated by `tools/generate_threaded/` (run
+`bash build/generate-threaded.sh`); `build/test.*` fails on drift. The generator
+checks the opcode inventory and frame transitions, and hashes every rewritten
+body and every shared helper a specialization mirrors, so a change to one
+requires reviewing the specialization before updating the hash. This catches
+drift; it does not prove equivalence. Threaded-only helpers live in
+`vm_threaded_fast.odin` and `vm_threaded_concat.odin`: declaring them in
+`vm.odin` measurably changed the switch's code placement.
 
-The switch bodies in `vm.odin` are the source of the checked-in threaded region,
-generated by the Odin tool `tools/generate_threaded/`; `build/test.*` builds
-and runs it to check for drift. The generator verifies the opcode inventory and
-frame transitions. It also rejects unreviewed changes to rewritten entry, fetch,
-poll, and specialized opcode bodies, as well as the ordinary table and call
-helpers those specializations mirror. This requires review when a guarded body
-changes; it is not a proof of semantic equivalence.
+**Specialized paths.** Most handlers are the switch bodies. These are rewritten:
 
-The threaded upvalue handlers derive the inline vector from the carried closure,
-the same non-moving object held in the function slot below the register base.
-Variable-key table handlers address operands directly from that base, whose
-pointers are consumed before any callout; the slow read still receives a stack
-index for its result. Global reads keep short-string hits in their handler and
-tail-transition to separate generic-key and miss handlers; non-string constants
-remain supported for unvalidated bytecode. Field reads use the shared contextless
-lookup and a no-inline miss path. Variable-key array and short-string hits stay
-in their handler; integer-hash and other key types tail-transition to contextless
-lookup handlers without repeating the table/type dispatch. Known empty slots
-and non-tables go straight to the existing finish path without repeating the
-lookup. Method lookup also handles a string whose `__index` is a table with a
-matching key; it keeps the saved PC and stack top updates made by the original
-non-table path.
+- **Calls.** `CALL` keeps non-allocating Lua-closure frame setup in the handler;
+  native calls, stack growth and `__call` tail-transition to separate handlers so
+  their callouts cannot force spills on the Lua path. A fresh, unhooked Lua frame
+  reuses the already loaded code for its first entry. Native setup keeps the
+  encoded result count and the caller's frame index; frames are resolved again
+  after the callback, which may relocate either stack or install hooks. Return
+  hooks, to-be-closed values and result counts other than zero or one use the
+  ordinary post-call path. `RETURN0`/`RETURN1` keep no-hook result movement in
+  the handler; interrupts and hooks tail-transition to a copy of the switch body.
+- **Table reads.** Global reads keep short-string hits in the handler and
+  tail-transition to generic-key and miss handlers; non-string constants from
+  unvalidated bytecode remain supported. Field reads use the shared contextless
+  lookup. Variable-key array and short-string hits stay in the handler; other
+  key types go to contextless lookup handlers, and known empty slots and
+  non-tables go straight to the finish path. `SELF` handles a string whose
+  `__index` is a table.
+- **Table writes.** Integer-key writes of non-collectable values, short-string
+  writes of primitives, immediate-index (`GETI`/`SETI`) hits and global writes
+  use the ordinary pre-sets without a context. Collectable values are written
+  contextless only when the back barrier would be a no-op. An unfinished global
+  short-string pre-set passes its hash location to the finish handler in the
+  trap argument, so the lookup is not repeated.
+- **Concatenation.** The common path mirrors short-string interning and string
+  allocation (same C-ABI allocator, GC link and debt accounting) without a
+  context; a non-coercible pair goes to a cold metamethod handler.
+- **Other.** String `LEN` and constant-operand `//` and `%` are contextless, with
+  zero-divisor errors on the original context. The integer `FORLOOP` back edge
+  reads the next instruction before updating the loop registers; a pending
+  interrupt or trace discards it. Float loops address their control slots from
+  the register base in both modes. Upvalue handlers take the vector from the
+  carried closure.
 
-Variable-key integer writes of non-collectable values use the ordinary pre-set
-without a context. Other writes tail-transition to handlers for primitive
-short-string keys, collectable integer values, or the ordinary general setter.
-The shared short-string pre-set declines a new white key in a black table.
-Collectable integer writes finish without a context only when the ordinary back
-barrier is a no-op, with no allocation or re-entry between the color test and
-the write. A needed barrier uses the original setter. An unfinished pre-set
-uses the original setter and finish path. Immediate integer reads and writes
-similarly keep their contextless hits in the handler; collectable writes use
-the same inert-barrier check, and misses use the ordinary immediate helpers.
-These hits cannot move the stack or change the trap. Misses receive the
-activation's original context and reload the trap after any callout. The
-generator guards the shared pre-sets, immediate helpers and barrier predicates
-as well as the opcode bodies.
-
-Global writes likewise use the short-string pre-set without a context for
-primitive values, or for collectable values when the ordinary back barrier is
-inert. Other key types, non-tables and real barriers retain the ordinary setter.
-On an unfinished short-string pre-set, its nonnegative hash location travels in
-the tail transition's trap argument; the finish handler saves PC and top, calls
-the original finish path, and reloads the frame trap afterward just as the
-ordinary setter does. A compile-time bound ensures the location fits in that
-argument. The shared pre-set still checks new-key barriers, and no allocation
-or re-entry occurs before a completed contextless write.
-
-Threaded concatenation follows the same right-to-left folding, coercion and
-top/saved-PC protocol as the switch VM. Its contextless common path mirrors
-short-string interning and fresh string-object allocation: it calls the same
-C-ABI allocator, links the same GC object and updates debt by the same amount.
-It re-resolves stack slots after a numeric conversion that may have triggered
-an emergency collection. Allocation retries, intern-table growth, GC steps,
-errors and metamethod calls use the activation's original context. A
-two-operand non-coercible pair tail-transitions to a cold metamethod handler;
-the other cases use the contextless fold and its original-context callouts.
-The generator guards the mirrored concat, string, allocation and GC helpers.
-
-String lengths use a contextless handler but retain the switch VM's saved-PC
-and stack-top updates; other lengths use the ordinary helper with the original
-context. Constant-operand floor division and modulo use the contextless raw
-arithmetic helper, with the same saved-PC and top updates; their zero-divisor
-errors use the original context. On an integer `FORLOOP` back edge, the next
-instruction is read before the loop registers are updated; a pending interrupt
-or trace discards that read and uses the ordinary poll or trace path. The code
-is immutable while the activation runs, and the same register tags are written
-as in the switch. This applies to integer loops generally, not just empty ones;
-floating-point loops use the ordinary path and address their control slots
-directly through the current register base in both modes. The call-hook work
-at frame entry is separated from the no-hook path, with the same base refresh
-after the hook.
-These rewrites are guarded by the generator.
-
-Closure creation keeps its upvalue barrier: an emergency collection can blacken
-the anchored closure before the new upvalues are wired.
-
-The threaded CALL handler specializes non-allocating Lua-closure frame setup;
-native calls, growth and `__call` tail-transition to separate handlers so their
-callouts cannot force spills in the Lua path. A freshly initialized Lua frame
-can reuse the already loaded prototype's code for its first entry: no callout
-or relocation occurs between setup and that entry. Hooked calls use the
-ordinary entry instead. Native call hooks and growth remain out of line. Native
-setup retains the encoded CALL result count and captures the caller's frame
-index before the callback; the callback may relocate either stack or install
-hooks, so frames are resolved again afterward. Return hooks, to-be-closed
-values and result counts other than zero or one use the ordinary post-call
-path. Relocation test mode routes all calls through the ordinary helper so its
-forced moves still happen. The specialized helpers are in
-`vm_threaded_fast.odin`: keeping them out of `vm.odin` also avoids a measured
-switch-VM code-placement regression.
-
-Threaded `RETURN0` and `RETURN1` keep their no-hook result movement in the hot
-handler. A pending interrupt or active hook tail-transitions to a separate copy
-of the switch-derived body, which polls, saves the PC and resolves the frame
-after hooks just as the switch does. The generator guards the original bodies
-and emits both paths. These specializations duplicate parts of the shared
-helpers and must be reviewed when those helpers change. Both modes use the same
-tests, including forced stack and frame relocation. Results and limitations are
-recorded in
-[bench/THREADED_VM.md](../bench/THREADED_VM.md); remaining validation and
-performance work is listed in [FUTURE_WORK.md](FUTURE_WORK.md).
+**Rules every specialization follows.** A contextless hit must not allocate,
+re-enter Lua, move a stack or change the trap. A miss or callout receives the
+activation's original context, after the same saved-PC and top updates the
+switch makes, and reloads the trap afterwards. A collectable value may be stored
+without the barrier only when the barrier would do nothing, with no allocation
+or re-entry between the color test and the store. Anything that can trigger an
+emergency collection re-resolves stack slots afterwards. `CLOSURE` keeps its
+upvalue barrier: an emergency collection can blacken the anchored closure before
+its upvalues are wired. Relocation test mode (`HARDSTACKTESTS`) routes calls
+through the ordinary helper so its forced moves still happen.
 
 ## Decision 3 — persistent indices, temporary VM pointers
 
 Because the value and frame stacks can reallocate, frames, protected boundaries,
-open upvalues, and API stack slots store **indices/offsets**. They resolve a slot
-to a pointer only for an operation on the current backing array. Frame pointers
-are never retained across re-entrant calls. Active frames are exactly `0..L.ci`;
-there is no separate live-frame count to reconcile after an error unwind.
+open upvalues and API stack slots store **indices**, resolved to a pointer only
+for one operation on the current array. Frame pointers are never retained across
+re-entrant calls. Active frames are exactly `0..L.ci`.
 
-The VM also keeps a local register-base pointer. Stack reallocation
-arms the trap on every Lua frame; after a potentially moving call, the VM reloads
-the trap and re-derives the base at the next fetch, before dereferencing it. Such
-calls include metamethods, GC, hooks, native calls, iterators and varargs. A handler
-that needs a register pointer again within the same instruction must re-derive it
-immediately after the call instead of waiting for the next fetch.
-Tail-call argument sliding similarly derives a temporary stack pointer only after
-its growth check; the following copies and nil writes cannot allocate or re-enter
-Lua, and no such pointer survives that operation.
+The VM keeps a local register-base pointer. Stack reallocation arms the trap on
+every Lua frame; after a potentially moving call (metamethods, GC, hooks, native
+calls, iterators, varargs) the VM reloads the trap and re-derives the base at
+the next fetch. A handler that needs a register again within the same
+instruction must re-derive it immediately after the call. Tail-call argument
+sliding derives a temporary pointer only after its growth check; nothing between
+can allocate.
 
-The saved program counter remains an instruction index. Completed prototypes have
-immutable code rooted by the closure in the live frame's function slot; undumping
-copies the code, including for stripped and fixed-mode chunks. However, a loader
-reader can obtain the still-being-compiled closure through a C temporary exposed
-by the debug API, start it in a coroutine and yield. Compilation can then grow
-or shrink its code before that coroutine resumes. A saved code pointer would be
-outdated; the index lets frame entry re-derive the PC from the current code array.
-The local dispatch PC only exists while its VM activation is running, when that
-reader has not yet returned control to the parser.
+The saved PC is an instruction index, not a pointer. A loader reader can obtain
+a still-compiling closure through the debug API, start it in a coroutine and
+yield; compilation can then resize its code before the coroutine resumes. The
+index lets frame entry re-derive the PC from the current code array.
 
-`HARDSTACKTESTS` forces even no-growth value-stack checks and GC shrink paths, and
-every frame push, to allocate a different block and free the old block. It poisons
-the old block before freeing outside ASan; the test scripts can combine stress
-with AddressSanitizer to catch outdated references. Frame growth also arms the existing
-per-frame traps, before publishing the new slot. As in reference's `ltests` build,
-stress defaults to a 68,000-slot stack limit so stack-overflow tests finish despite
-quadratic copying; ordinary builds retain the 1,000,000-slot limit. Extra allocations
-can change GC timing and Lua-visible memory measurements in this test mode.
+Frame setup leaves `u2` untouched (every use writes it before its continuation
+reads it), nil-fills missing fixed arguments after both growth checks, and
+publishes the final top before the callee runs. The hidden vararg count is 32
+bits when the stack ceiling allows.
 
-Frame setup leaves `u2` untouched: each of its yield, protected-call, and close
-uses writes the field before the matching continuation can read it. Missing fixed
-arguments are nil-filled after both growth checks, and the final top is published
-before the callee runs. The hidden-vararg count is 32 bits when the configured
-stack ceiling and its reserves fit; larger custom ceilings use the full-width
-count. This does not narrow saved PCs or stack/frame indices and leaves the frame
-allocation size unchanged.
+`HARDSTACKTESTS` forces every value-stack check, GC shrink and frame push to move
+to a new block and free (and, outside ASan, poison) the old one; combined with
+AddressSanitizer it catches outdated pointers. As in reference's `ltests` build,
+it defaults to a 68,000-slot stack limit instead of 1,000,000. Its extra
+allocations change GC timing.
 
-For `CALL`, the non-allocating paths described above rely on existing stack and
-frame headroom. The callback's frame is retained by index and resolved again
-after a native callback, which can move either array.
-
-Internal invariant assertions follow reference `lua_assert`: release builds omit
-them; debug, Odin test and stress builds enable them. Embedding API precondition
-checks have their own `API_CHECKS` switch and remain enabled by default to preserve
-the existing embedding contract. Input checks and fail-fast guards are not
-disabled by these switches. Integer table access and comparisons inline their
-ordinary checked index translation, so constant-index callers can discard unused
-index classes without changing the caller-supplied assertion handler. The table
-library still uses these public API entries, including their metamethod and
-stack-relocation paths; sort also inlines its comparison wrapper to specialize
-its fixed stack indices. `api_tolstring` inlines the already-string case; its
-numeric slow path roots the result before the reference GC checkpoint and
-re-resolves the stack index after collection and finalizers may have moved it.
-The returned bytes remain valid only while the string is kept reachable.
+Internal assertions follow reference `lua_assert`: off in release, on in debug,
+test and stress builds. Embedding API precondition checks have their own
+`API_CHECKS` switch, on by default. Input checks and fail-fast guards are never
+disabled.
 
 ## Decision 4 — a fallible allocator and honest OOM
 
-Reference Lua can catch out-of-memory: allocation failure triggers an emergency
-collection and retry, and a *preallocated* memory-error object means reporting OOM
-never itself needs to allocate. We reproduce this with a single **fallible allocator
-abstraction** through which all kernel allocation flows. The kernel avoids standard
-containers that panic or allocate implicitly, so an allocation failure is always a
-value we can handle (`Out_Of_Memory`) rather than a crash. OOM is tested at allocation
-points, not hand-waved.
+Reference Lua survives out-of-memory: a failed allocation triggers an emergency
+collection and retry, and a preallocated error object means reporting OOM never
+allocates. We reproduce this with one **fallible allocator callback** for all
+kernel allocation. The kernel avoids containers that panic or allocate
+implicitly, so failure is always a handled value. OOM is tested at allocation
+points.
 
-On Linux, macOS and the BSDs the hosted default allocator goes directly through
-Odin's contextless C-heap `realloc`/`free` wrappers; Windows uses its process
-heap. These blocks are returned only through the same callback, not an Odin
-allocator. A failed resize leaves the old block intact for `state_realloc`'s
-emergency collection and retry; signed-size guards reject unrepresentable
-requests before reaching the heap. The 64-bit glibc, musl and macOS C heaps give
-16-byte alignment. BSD heaps need not do so for tiny allocations: FreeBSD's
-jemalloc may give an 8-aligned block for requests of at most 8 bytes. Kernel
-allocation types need at most 8-byte alignment. Typical 32-bit heaps provide at
-least 8 bytes, but the kernel's layout assertions currently require 64-bit
-targets. Freestanding builds use only the embedder's allocator.
+On Linux, macOS and the BSDs the hosted allocator calls Odin's contextless C-heap
+`realloc`/`free`; Windows uses its process heap. A failed resize leaves the old
+block for `state_realloc`'s emergency collection and retry. Kernel types need at
+most 8-byte alignment, which every supported heap provides; the layout
+assertions currently require 64-bit targets.
 
-On hosted Linux with libc, `os.getenv` passes the rooted, NUL-terminated Lua
-argument directly to the host and copies its result into Lua before the GC
-check. Windows and no-CRT builds retain the scoped host-string lookup. Linux
-local date and table-to-time conversions share a bounded static timezone cache:
-a mutex protects its 4 KiB TZ key, 64 KiB TZif image, POSIX rule and last
-transition range. The current `TZ` is compared on every call; when it is unset, the site default is
-re-statted. Unusually large keys, files or abbreviations fall back to the scoped
-loader. No Lua call runs with the mutex held, and needed zone names are copied
-before unlocking. This storage has process lifetime without a per-state allocation or leak. Other
-hosts retain their existing timezone paths; freestanding excludes the OS library.
+On 64-bit targets an `UpVal` is 48 bytes, overlaying the open-list links with the
+closed `TValue`; open upvalues keep a thread and index, not a stack pointer. An
+`LClosure` is a 32-byte header followed by its inline upvalue-pointer vector. GC
+debt, marking and frees use the actual allocation sizes, as in reference. A
+`TString` header is 32 bytes against reference's 24.
 
-On 64-bit targets an `UpVal` is 48 bytes. Its body overlays the open-list links
-with the closed `TValue`; open upvalues retain a thread and full-width index,
-not a movable stack pointer. An `LClosure` has a 32-byte header followed by
-its inline vector of 8-byte upvalue pointers; the vector address is derived
-from the closure. GC debt, marking and frees use the actual allocation sizes,
-just as in reference.
+## Decision 5 — byte-compatible bytecode for one fixed ABI
 
-Native library callbacks retain their C ABI. A hot callback may omit its usual
+Lua chunks embed raw host representations, so "compatible with every Lua build"
+is impossible. We target one configuration: little-endian, 32-bit `Instruction`
+and `int`, 64-bit `lua_Integer`, IEEE-754 binary64 `lua_Number`. Float bit
+patterns are preserved, the C layout is serialized explicitly rather than through
+Odin padding, and incompatible chunks are rejected as the reference header check
+does. `build/clitest.*` compares our dumps byte for byte with a reference `luac`.
+
+## Native callbacks and the embedding API
+
+Native library callbacks keep their C ABI. A hot callback may skip
 `runtime.default_context()` only when its fast path calls exclusively
-`"contextless"` helpers. Coercion, allocation, formatting, error reporting, OS
-operations and other ordinary Odin calls must first establish the default context,
-either in a no-inline slow helper or only on the branch that needs it.
-`api_native_*` is a narrow positive-argument fast path for these callbacks, not a
-replacement for the embedding API: the latter keeps its existing procedure types
-and caller-supplied assertion handler. Both paths retain `API_CHECKS`; stress stack
-checks still perform forced relocation. A pointer to a native argument must not
-survive an operation that moves the stack. The transcendental math callbacks use
-these helpers for numeric arguments, while string coercion and errors take their
-existing default-context slow paths. Optional `atan` and `log` arguments retain
-the same missing/nil and numeric-conversion rules.
+`"contextless"` helpers; coercion, allocation, formatting, errors and OS calls
+must establish the default context first, in a no-inline slow helper or on the
+branch that needs it. `api_native_*` is a narrow positive-argument fast path for
+such callbacks; the embedding API keeps its procedure types and assertion
+handler. The transcendental math functions use it for numeric arguments.
 
-## Decision 5 — byte-compatible bytecode is per a fixed ABI config
+`api_geti`, `api_seti` and `api_compare` inline their checked index translation,
+so constant-index callers such as `table.sort` drop the unused index classes
+while keeping metamethod and relocation paths. `api_tolstring` roots a converted
+number before the reference GC checkpoint and re-resolves the slot afterwards.
+Returned string bytes stay valid only while the string is reachable.
 
-Lua bytecode chunks embed raw host representations (instruction words, `lua_Number`
-bit patterns, integer sizes, endianness, alignment). "Compatible with every Lua build"
-is impossible because the format is configuration-dependent. We therefore target one
-explicit reference configuration:
+Some auxiliary buffers and parser scope records live in the caller's frame and
+are linked into state for the duration of one call, as in reference; Odin warns
+that they may outlive it. Each such site converts the pointer explicitly with a
+comment stating why it does not.
 
-- little-endian,
-- 32-bit `Instruction` and `int`,
-- 64-bit integer (`lua_Integer`),
-- IEEE-754 binary64 (`lua_Number`),
+## Hosted services
 
-preserve floating-point *bit patterns* (never numerically re-encode), and serialize the
-C-defined layout explicitly rather than relying on Odin struct padding. Incompatible
-chunks are rejected exactly as the reference header check does. Correctness is proven
-with golden-byte differential tests against a matching reference `luac` build.
+**Streams.** Each stream serializes operations with its own mutex; `flush_all`
+pins streams one at a time from a separately locked process-wide list before
+taking their mutexes, so it can flush another state's stream between two
+operations and reports a failure on any of them. EOF and error indicators are
+atomic and the last OS error is thread-local. Tests that create deliberately
+failing streams or call `flush_all` serialize on a test mutex. Bulk delimiter
+reads copy bytes under the mutex and update position and pushback as `getc`
+would; Windows text mode still handles CRLF, Ctrl-Z and lookahead. Lines and
+bounded reads that fit the Lua buffer's initial area become strings directly.
+
+**Environment and time zones.** On hosted Linux, `os.getenv` passes the rooted
+Lua argument to the host and copies the result straight into Lua. Local
+`os.date` and table-form `os.time` share a static, mutex-protected time-zone
+cache: a 4 KiB `TZ` key, a 64 KiB TZif image, a POSIX rule and the last
+transition range. `TZ` is compared on every call, and `/etc/localtime` is
+re-statted when `TZ` is unset; oversized keys, files or abbreviations fall back
+to the uncached loader. No Lua code runs with the mutex held. Other hosts keep
+their existing paths; freestanding has no OS library.
 
 ## Testing philosophy
 
-Tests must *truthfully* prove correctness — never fitted to pass by asserting on
-incidental internals. Two layers:
-
-1. **Odin unit + differential tests, every phase.** Compare our behavior/bytecode
-   against reference Lua as each subsystem lands (numeric edge cases, table/string
-   behavior, compiler prototypes as golden bytes, VM instruction-level programs, GC
-   weak/finalizer behavior, coroutine/`pcallk`/hook interactions).
-2. **The official PUC-Rio Lua 5.5 suite** (vendored under `tests/puc`) as the final,
-   whole-language oracle.
+Tests must *truthfully* prove correctness, never be fitted to pass by asserting
+on incidental internals. Two layers: Odin unit and differential tests against
+reference behavior and bytecode, and the official PUC-Rio Lua 5.5 suite under
+`tests/puc`, run verbatim, as the whole-language oracle. Both run in both
+interpreters, and with forced relocation under AddressSanitizer.
