@@ -436,9 +436,7 @@ findloader :: proc(L: ^kernel.State, name: string) {
 		aux_error(L, "'package.searchers' must be a table")
 	}
 	msg: Buffer
-	// On success the unused placeholder or box remains until require returns;
-	// the buffer itself is never used again after this call.
-	aux_buffinit(L, (^Buffer)(rawptr(&msg)))
+	aux_buffinit(L, (^Buffer)(rawptr(&msg))) // unused after return; placeholder/box stays in require
 	aux_addstring(&msg, "\n\t") // prefix for the first accumulated message
 	for i := 1;; i += 1 {
 		if kernel.api_rawgeti(L, 3, kernel.Integer(i)) == kernel.TNIL {
