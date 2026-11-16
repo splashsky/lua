@@ -197,9 +197,9 @@ Kept deliberately small and always documented:
   An unreadable or unsupported zone still falls back to UTC. For `os.time`, an
   unspecified repeated hour chooses standard time, and an unspecified skipped
   hour normalizes forward; an explicit `isdst` chooses that offset's side.
-  The parser is unit-tested from constructed byte images on Windows and the
-  POSIX path is cross-compiled, but real Linux/macOS end-to-end behavior has not
-  been run on this Windows development machine.
+  The parser is unit-tested from constructed byte images. Local-time round trips
+  and the PUC date tests have run on Linux; macOS end-to-end behavior remains
+  unvalidated.
 - **Transcendental functions may differ from the platform's libm in the last
   bit.** `sin`, `cos`, `tan`, `exp` and `pow` are our own pure-Odin
   implementations, checked against reference over 91,606 evaluations at a
