@@ -76,58 +76,42 @@ Binaries land in `build/out/`, named after the brand (`lua` / `luac` by default)
 
 ### Interpreter selection
 
-The tail-call-threaded interpreter is the default on amd64 and arm64. The switch
-is selected automatically on other architectures and can be selected explicitly
-for comparison or debugging:
+The tail-call-threaded interpreter is the default on amd64 and arm64; other
+architectures use the switch interpreter automatically, and forcing threaded on
+them is a compile error. Every wrapper accepts `VM_THREADED=1` (threaded),
+`VM_THREADED=0` (switch) or unset (the default); any other value is rejected. On
+Windows set `$env:VM_THREADED`, and in direct Odin commands pass
+`-define:VM_THREADED=true` or `false`. `build/check.*` and `build/vm-compare.sh`
+always cover both. The PUC wrapper names explicitly selected binaries
+`-threaded` or `-switch`.
 
 ```sh
 VM_THREADED=0 bash build/build.sh all
 VM_THREADED=0 bash build/test.sh --stress --asan
 VM_THREADED=0 STRESS=1 ASAN=1 bash build/puc.sh
-VM_THREADED=0 REFLUAC=/path/to/luac bash build/clitest.sh
-VM_THREADED=0 bash build/rebrand-smoke.sh
-VM_THREADED=0 bash build/build.sh freestanding
 ```
 
-Single-mode build and test wrappers accept `VM_THREADED=1` for threaded and
-`VM_THREADED=0` for switch; unset it to use the architecture-dependent default.
-`build/check.*` checks both modes and `build/vm-compare.sh` builds both modes
-explicitly. Any other value, including an empty value, is rejected. On Windows
-set `$env:VM_THREADED = '1'` or `'0'`,
-or remove it with `Remove-Item Env:VM_THREADED`. For direct Odin commands use
-`-define:VM_THREADED=true` or `-define:VM_THREADED=false`. The PUC wrapper gives
-explicitly selected binaries distinct `-threaded` or `-switch` names, including
-in relocation and memory-checker modes; an unset variable uses the unsuffixed name.
-Forcing threaded on architectures other than amd64 or arm64 is rejected. Automatic
-switch selection does not imply the rest of the runtime supports those targets.
-
-Threaded runtime validation has only been performed on Linux x86-64. Windows x64,
-Linux arm64 and macOS arm64 have been cross-compiled to objects, but the user
-chose to skip their runtime validation; they remain an unvalidated gap.
+The threaded interpreter has been run only on Linux x86-64. Windows x64, Linux
+arm64 and macOS arm64 are cross-compiled but not yet run.
 
 The switch opcode bodies are the source of the threaded handlers. After changing
-them, run `bash build/generate-threaded.sh` or `.\build\generate-threaded.ps1` on
-Windows. These build and run the Odin tool in `tools/generate_threaded/`; no
-Python installation is needed. The generator rejects changes to rewritten paths
-and specialized helpers until reviewed; `build/test.*` verifies the generated
-region before testing, while `build/check.*` type-checks both interpreters without
-linking, including freestanding. See Decision 2
-in `docs/ARCHITECTURE.md` for the safety rules and measured tradeoffs.
+one, or a helper a threaded specialization mirrors, run
+`bash build/generate-threaded.sh` (`.\build\generate-threaded.ps1` on Windows).
+The generator refuses changes to guarded bodies until their specialization has
+been reviewed and its hash updated; `build/test.*` fails if the checked-in
+region is out of date. See Decision 2 in `docs/ARCHITECTURE.md`.
 
-Internal invariant assertions follow reference Lua's `lua_assert`: they are off
-in release builds and on in debug, `odin test`, and stress builds. Override this
-with `-define:INTERNAL_ASSERTS=true` or `false` (stress requires true). Embedding
-API precondition checks are independent and remain on by default for existing
-embedders; `-define:API_CHECKS=false` opts out. Neither option changes Odin or
-core-library assertions. Input checks and fail-fast guards remain unconditional.
+Internal invariant assertions follow reference Lua's `lua_assert`: off in release
+builds, on in debug, `odin test` and stress builds; override with
+`-define:INTERNAL_ASSERTS=true|false` (stress requires true). Embedding API
+precondition checks stay on by default; `-define:API_CHECKS=false` opts out.
+Input checks and fail-fast guards are unconditional.
 
-`-define:HARDSTACKTESTS=true` forces value-stack moves at checks and GC shrink
-paths, and frame-array moves on every frame push. Old blocks are freed and, in
-non-ASan builds, filled with a recognizable pattern first.
-Its `MAXSTACK_LIMIT` defaults to 68,000, as in reference's `ltests` build, instead
-of the release default of 1,000,000. `-define:MAXSTACK_LIMIT=<n>` overrides the
-limit in either configuration. The C-call limit remains 200. Stress allocations
-may change GC timing and Lua-visible heap measurements; this is a test mode.
+`-define:HARDSTACKTESTS=true` forces value-stack moves at every check and GC
+shrink, and frame-array moves on every push, freeing (and outside ASan,
+poisoning) the old block. Its `MAXSTACK_LIMIT` defaults to 68,000, as in
+reference's `ltests` build, instead of 1,000,000; `-define:MAXSTACK_LIMIT=<n>`
+overrides it. The extra allocations change GC timing and Lua-visible heap sizes.
 
 ## Branding
 
@@ -299,9 +283,13 @@ Then point the scripts at those binaries — nothing is read from inside this re
 # macOS / Linux
 REFLUA=/path/to/lua ./build/bench.sh
 REFLUAC=/path/to/luac ./build/clitest.sh
+
+# Linux: instruction counts for switch, threaded and reference under perf
+REFLUA=/path/to/lua CPU=12 ./build/vm-compare.sh 5
 ```
 
-Both checks are skipped cleanly when no reference binary is provided.
+The checks are skipped cleanly when no reference binary is provided. See
+[bench/README.md](bench/README.md) for the harness and how to read its numbers.
 
 For the numeric formatting corpus, run both interpreters on the same host and
 compare their output. The corpus includes successful bytes and error text; it
