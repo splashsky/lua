@@ -457,8 +457,10 @@ api_tolstring_slow :: #force_no_inline proc(L: ^State, idx: int, o: ^TValue) -> 
 	buf: [N2S_BUFF_SZ]u8
 	n := number_to_str(o, buf[:])
 	ts := string_newlstr(L, raw_data(buf[:]), uint(n))
-	set_string(o, ts)
-	converted := index2value(L, idx) // re-fetch (conversion cannot move the stack)
+	if ts == nil do throw(L, .Err_Mem)
+	set_string(index2value(L, idx), ts) // an emergency retry may have moved the stack
+	gc_checkGC(L) // the converted string is now rooted, as in lua_tolstring
+	converted := index2value(L, idx) // collection and finalizers may move the stack
 	return string(str_slice(str_value(converted))), true
 }
 

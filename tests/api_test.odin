@@ -71,6 +71,21 @@ test_api_binary_load_runs_gc :: proc(t: ^testing.T) {
 	testing.expect_value(t, kernel.api_gettop(L), 2)
 }
 
+@(test)
+test_api_tolstring_runs_due_gc_after_rooting :: proc(t: ^testing.T) {
+	L := api_new()
+	defer kernel.close_state(L)
+	kernel.api_pushinteger(L, 918273645)
+	kernel.api_gc(L, kernel.GCCOLLECT)
+	kernel.state_setdebt(L.g, 0)
+	s, ok := kernel.api_tolstring(L, -1)
+	testing.expect(t, ok && s == "918273645")
+	testing.expect(t, L.g.gcstate != kernel.GCSpause, "conversion must run a due GC step")
+	kernel.api_gc(L, kernel.GCCOLLECT)
+	s, ok = kernel.api_tolstring(L, -1)
+	testing.expect(t, ok && s == "918273645", "converted string must remain rooted")
+}
+
 // ---------------------------------------------------------------------------
 // Push / convert round-trips and type queries
 // ---------------------------------------------------------------------------

@@ -25,6 +25,26 @@ string_oom_concat :: proc(L: ^kernel.State, _: rawptr) -> kernel.Thread_Status {
 	return .Ok
 }
 
+string_oom_tolstring :: proc(L: ^kernel.State, _: rawptr) -> kernel.Thread_Status {
+	kernel.api_tolstring(L, -1)
+	return .Ok
+}
+
+@(test)
+string_tolstring_allocation_failure :: proc(t: ^testing.T) {
+	a: String_OOM_Allocator
+	L := kernel.new_state(kernel.Allocator{alloc = string_oom_alloc, ud = &a})
+	if !testing.expect(t, L != nil) do return
+	kernel.api_pushinteger(L, 918273645)
+	a.bytes = kernel.sizelstring(9)
+	status := kernel.run_protected(L, string_oom_tolstring, nil)
+	a.bytes = 0
+	testing.expect_value(t, status, kernel.Thread_Status.Err_Mem)
+	testing.expect(t, a.failures >= 2, "target allocation and emergency retry must fail")
+	kernel.close_state(L)
+	testing.expect_value(t, a.count.outstanding, 0)
+}
+
 @(test)
 string_concat_allocation_failure :: proc(t: ^testing.T) {
 	// The first two cases create a short and a long result respectively; the
@@ -103,6 +123,23 @@ string_retry_alloc :: proc "c" (ud: rawptr, ptr: rawptr, osize, nsize: uint) -> 
 		}
 	}
 	return counting_alloc(&a.count, ptr, osize, nsize)
+}
+
+@(test)
+string_tolstring_survives_emergency_retry :: proc(t: ^testing.T) {
+	a: String_Retry_Allocator
+	L := kernel.new_state(kernel.Allocator{alloc = string_retry_alloc, ud = &a})
+	if !testing.expect(t, L != nil) do return
+	kernel.api_pushinteger(L, 918273645)
+	a.bytes = kernel.sizelstring(9)
+	a.remaining = 1
+	a.enabled = true
+	value, ok := kernel.api_tolstring(L, -1)
+	a.enabled = false
+	testing.expect(t, ok && value == "918273645")
+	testing.expect(t, a.attempts >= 2, "numeric conversion retried after emergency collection")
+	kernel.close_state(L)
+	testing.expect_value(t, a.count.outstanding, 0)
 }
 
 @(test)
