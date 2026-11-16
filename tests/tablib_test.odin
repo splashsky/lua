@@ -206,3 +206,37 @@ tab_sort_comparator :: proc(t: ^testing.T) {
 	s, _ := kernel.api_tolstring(L, -1)
 	testing.expect(t, s == "9,1", "custom comparator sorts descending")
 }
+
+@(test)
+tab_sort_proxy_and_order_metamethods :: proc(t: ^testing.T) {
+	L := tab_state()
+	defer kernel.close_state(L)
+	st := tab_run(L, `
+		local reads, writes, comparisons = 0, 0, 0
+		local mt = {__lt = function(a, b)
+			comparisons = comparisons + 1
+			collectgarbage('collect')
+			return a.v < b.v
+		end}
+		local values = {}
+		for i = 1, 24 do values[i] = setmetatable({v = (i * 13) % 25}, mt) end
+		local proxy = setmetatable({}, {
+			__len = function() return #values end,
+			__index = function(_, k) reads = reads + 1; return values[k] end,
+			__newindex = function(_, k, v) writes = writes + 1; values[k] = v end,
+		})
+		table.sort(proxy)
+		for i = 2, #values do assert(values[i-1].v <= values[i].v) end
+		assert(reads > 0 and writes > 0 and comparisons > 0)
+		local ok, err = pcall(table.sort, {1,2,3,4,5}, function() return true end)
+		assert(not ok)
+		return err
+	`)
+	if st != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "proxy sort: %s", msg)
+	} else {
+		msg, ok := kernel.api_tolstring(L, -1)
+		testing.expect(t, ok && msg == "invalid order function for sorting")
+	}
+}

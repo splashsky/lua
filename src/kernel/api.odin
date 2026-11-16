@@ -371,9 +371,11 @@ api_rawequal :: proc(L: ^State, idx1, idx2: int) -> bool {
 
 // Compare two values with a given operator, honoring metamethods -- reference
 // `lua_compare`. `op` is one of `LUA_OPEQ`/`LUA_OPLT`/`LUA_OPLE`.
+// Inline the checked index translation so constant indices at API call sites
+// can discard the other index classes without changing the assertion handler.
 api_compare :: proc(L: ^State, idx1, idx2: int, op: int) -> bool {
-	o1 := index2value(L, idx1)
-	o2 := index2value(L, idx2)
+	o1 := #force_inline index2value(L, idx1)
+	o2 := #force_inline index2value(L, idx2)
 	if !(isvalid(L, o1) && isvalid(L, o2)) {
 		return false
 	}
@@ -731,9 +733,10 @@ api_geti_slow :: proc(L: ^State, t: ^TValue, n: Integer) -> int {
 // `push(t[i])` for an integer key -- reference `lua_geti`. This entry point is
 // also the inner read primitive for table.sort. Keep its hit path tiny so Odin
 // can optimize it independently of the uncommon metamethod path, which remains
-// outlined in `lua_geti_slow`.
-api_geti :: proc(L: ^State, idx: int, n: Integer) -> int {
-	t := index2value(L, idx)
+// outlined in `api_geti_slow`. Inlining the public entry and checked index
+// translation lets callers with a constant index avoid generic index dispatch.
+api_geti :: #force_inline proc(L: ^State, idx: int, n: Integer) -> int {
+	t := #force_inline index2value(L, idx)
 	if is_table(t) {
 		tag := table_fastgeti(table_value(t), n, stack_value(L, L.top))
 		if !tag_is_empty(tag) {
@@ -922,9 +925,9 @@ api_seti_slow :: proc(
 // `t[n] = v` for an integer key, popping the value -- reference `lua_seti`.
 // table.sort performs swaps through this API, so mirror the get side: inline the
 // successful array update and leave key construction/metamethod handling cold.
-api_seti :: proc(L: ^State, idx: int, n: Integer) {
+api_seti :: #force_inline proc(L: ^State, idx: int, n: Integer) {
 	api_checknelems(L, 1)
-	t := index2value(L, idx)
+	t := #force_inline index2value(L, idx)
 	val := stack_value(L, L.top - 1)
 	hres := HNOTATABLE
 	if is_table(t) {

@@ -212,6 +212,65 @@ test_api_table_integer_keys :: proc(t: ^testing.T) {
 	testing.expect_value(t, kernel.api_rawlen(L, 1), 5) // border length
 }
 
+// These public API entries remain callable as ordinary Odin procedures even
+// when their bodies are inlined at direct call sites.
+@(test)
+test_api_integer_table_procedure_values :: proc(t: ^testing.T) {
+	L := api_new()
+	defer kernel.close_state(L)
+	geti: proc(^kernel.State, int, kernel.Integer) -> int = kernel.api_geti
+	seti: proc(^kernel.State, int, kernel.Integer) = kernel.api_seti
+	compare: proc(^kernel.State, int, int, int) -> bool = kernel.api_compare
+	kernel.api_newtable(L)
+	kernel.api_pushinteger(L, 42)
+	seti(L, -2, -3)
+	testing.expect_value(t, geti(L, -1, -3), kernel.TNUMBER)
+	testing.expect_value(t, kernel.api_tointeger(L, -1), 42)
+	testing.expect(t, compare(L, -1, -1, kernel.OPEQ))
+	testing.expect(t, !compare(L, 10, -1, kernel.OPEQ)) // acceptable empty slot
+	kernel.api_pop(L, 1)
+	kernel.api_pushinteger(L, 77)
+	seti(L, kernel.REGISTRYINDEX, -3)
+	testing.expect_value(t, geti(L, kernel.REGISTRYINDEX, -3), kernel.TNUMBER)
+	testing.expect_value(t, kernel.api_tointeger(L, -1), 77)
+}
+
+@(test)
+test_api_geti_preserves_index_assertion :: proc(t: ^testing.T) {
+	when kernel.API_CHECKS {
+		frames: [1]kernel.Call_Info
+		L: kernel.State
+		L.frames = raw_data(frames[:])
+		frames[0].top = 1
+		testing.expect_assert(t, "unacceptable index")
+		kernel.api_geti(&L, 1, 1)
+	}
+}
+
+@(test)
+test_api_seti_preserves_index_assertion :: proc(t: ^testing.T) {
+	when kernel.API_CHECKS {
+		frames: [1]kernel.Call_Info
+		L: kernel.State
+		L.frames = raw_data(frames[:])
+		L.top = 2 // leave one value to be popped
+		frames[0].top = 1
+		testing.expect_assert(t, "unacceptable index")
+		kernel.api_seti(&L, 1, 1)
+	}
+}
+
+@(test)
+test_api_compare_preserves_index_assertion :: proc(t: ^testing.T) {
+	when kernel.API_CHECKS {
+		frames: [1]kernel.Call_Info
+		L: kernel.State
+		L.frames = raw_data(frames[:])
+		testing.expect_assert(t, "invalid index")
+		kernel.api_compare(&L, 0, 0, kernel.OPLT)
+	}
+}
+
 @(test)
 test_api_rawset_rawget :: proc(t: ^testing.T) {
 	L := api_new()
