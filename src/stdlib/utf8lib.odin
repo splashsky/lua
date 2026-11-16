@@ -207,7 +207,7 @@ utf8_char :: proc "c" (Lp: rawptr) -> i32 {
 		push_utf_char(L, 1)
 	} else {
 		b: Buffer
-		aux_buffinit(L, &b)
+		aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this callback
 		for i in 1 ..= n {
 			push_utf_char(L, i)
 			aux_addvalue(&b)

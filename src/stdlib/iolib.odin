@@ -567,7 +567,7 @@ read_line :: proc(L: ^kernel.State, f: ^stream.Stream, chop: bool) -> bool {
 	// aux_buffinit initializes the header; the stream fills every byte counted in
 	// the result. Zeroing the 1 KiB scratch area first only adds work per read.
 	b: Buffer = ---
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this call
 	// The initial scratch area is already available. Most lines fit in it, so
 	// finish directly while keeping the same placeholder during string creation.
 	// Replacing that light userdata with the result avoids rotating two slots.
@@ -606,7 +606,7 @@ read_line :: proc(L: ^kernel.State, f: ^stream.Stream, chop: bool) -> bool {
 @(private = "file")
 read_all :: proc(L: ^kernel.State, f: ^stream.Stream) {
 	b: Buffer = --- // aux_buffinit initializes the header; reads fill the bytes used
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this call
 	for {
 		p := aux_prepbuffsize(&b, AUX_BUFFERSIZE)
 		nr := stream.read(f, p[:AUX_BUFFERSIZE])
@@ -624,7 +624,7 @@ read_all :: proc(L: ^kernel.State, f: ^stream.Stream) {
 @(private = "file")
 read_chars :: proc(L: ^kernel.State, f: ^stream.Stream, n: uint) -> bool {
 	b: Buffer = --- // only the bytes actually read are added to the result
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this call
 	if n <= AUX_BUFFERSIZE {
 		nr := stream.read(f, b.init_b[:n])
 		kernel.api_pushlstring(L, b.init_b[:nr])

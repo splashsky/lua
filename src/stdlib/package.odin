@@ -210,7 +210,7 @@ readable :: proc(filename: string) -> bool {
 @(private = "file")
 pusherrornotfound :: proc(L: ^kernel.State, path: string) {
 	b: Buffer
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this call
 	aux_addstring(&b, "no file '")
 	aux_addgsub(&b, path, PATH_SEP, "'\n\tno file '")
 	aux_addstring(&b, "'")
@@ -242,7 +242,7 @@ searchpath_push :: proc(
 	}
 	// Expand the whole template list, replacing every '?' with the name.
 	b: Buffer
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this call
 	aux_addgsub(&b, path, PATH_MARK, name)
 	aux_pushresult(&b)
 	expanded, _ := kernel.api_tolstring(L, -1)
@@ -436,7 +436,9 @@ findloader :: proc(L: ^kernel.State, name: string) {
 		aux_error(L, "'package.searchers' must be a table")
 	}
 	msg: Buffer
-	aux_buffinit(L, &msg)
+	// On success the unused placeholder or box remains until require returns;
+	// the buffer itself is never used again after this call.
+	aux_buffinit(L, (^Buffer)(rawptr(&msg)))
 	aux_addstring(&msg, "\n\t") // prefix for the first accumulated message
 	for i := 1;; i += 1 {
 		if kernel.api_rawgeti(L, 3, kernel.Integer(i)) == kernel.TNIL {
@@ -536,7 +538,7 @@ setpath :: proc(L: ^kernel.State, fieldname: string, envname: string, dft: strin
 			prefix := path[:mark] // text before ";;"
 			suffix := path[mark + 2:] // text after ";;"
 			b: Buffer
-			aux_buffinit(L, &b)
+			aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this call
 			if len(prefix) > 0 {
 				aux_addlstring(&b, transmute([]u8)prefix)
 				aux_addchar(&b, PATH_SEP[0])

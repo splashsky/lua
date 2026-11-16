@@ -849,7 +849,7 @@ aux_addgsub :: proc(B: ^Buffer, s: string, p: string, r: string) {
 // stack and returning it -- reference `luaL_gsub`.
 aux_gsub :: proc(L: ^kernel.State, s: string, p: string, r: string) -> string {
 	b: Buffer
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this call
 	aux_addgsub(&b, s, p, r)
 	aux_pushresult(&b)
 	res, _ := kernel.api_tolstring(L, -1)
@@ -1036,7 +1036,7 @@ aux_traceback :: proc(
 	last := lastlevel(L1)
 	// Only elide when there are more frames than the two shown windows combined.
 	limit2show := (last - level > LEVELS1 + LEVELS2) ? LEVELS1 : -1
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this call
 	if has_msg {
 		aux_addstring(&b, msg)
 		aux_addchar(&b, '\n')

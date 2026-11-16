@@ -912,7 +912,7 @@ os_date :: proc "c" (Lp: rawptr) -> i32 {
 		return 1
 	}
 	b: Buffer
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this callback
 	for p := 0; p < len(rest); {
 		if rest[p] != '%' {
 			aux_addchar(&b, rest[p])
