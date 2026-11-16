@@ -415,7 +415,12 @@ Internal invariant assertions follow reference `lua_assert`: release builds omit
 them; debug, Odin test and stress builds enable them. Embedding API precondition
 checks have their own `API_CHECKS` switch and remain enabled by default to preserve
 the existing embedding contract. Input checks and fail-fast guards are not
-disabled by these switches.
+disabled by these switches. Integer table access and comparisons inline their
+ordinary checked index translation, so constant-index callers can discard unused
+index classes without changing the caller-supplied assertion handler. The table
+library still uses these public API entries, including their metamethod and
+stack-relocation paths; sort also inlines its comparison wrapper to specialize
+its fixed stack indices.
 
 ## Decision 4 — a fallible allocator and honest OOM
 
