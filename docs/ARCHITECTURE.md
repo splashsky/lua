@@ -320,6 +320,16 @@ activation's original context and reload the trap after any callout. The
 generator guards the shared pre-sets, immediate helpers and barrier predicates
 as well as the opcode bodies.
 
+Global writes likewise use the short-string pre-set without a context for
+primitive values, or for collectable values when the ordinary back barrier is
+inert. Other key types, non-tables and real barriers retain the ordinary setter.
+On an unfinished short-string pre-set, its nonnegative hash location travels in
+the tail transition's trap argument; the finish handler saves PC and top, calls
+the original finish path, and reloads the frame trap afterward just as the
+ordinary setter does. A compile-time bound ensures the location fits in that
+argument. The shared pre-set still checks new-key barriers, and no allocation
+or re-entry occurs before a completed contextless write.
+
 Threaded concatenation follows the same right-to-left folding, coercion and
 top/saved-PC protocol as the switch VM. Its contextless common path mirrors
 short-string interning and fresh string-object allocation: it calls the same
