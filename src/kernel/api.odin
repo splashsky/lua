@@ -383,6 +383,11 @@ api_compare :: #force_inline proc(L: ^State, idx1, idx2: int, op: int) -> bool {
 	case OPEQ:
 		return vm_equalobj(L, o1, o2)
 	case OPLT:
+		// Match vm_lessthan's numeric branch using its exact mixed-number
+		// helper, without changing code generation in the switch interpreter.
+		if is_number(o1) && is_number(o2) {
+			return #force_inline LTnum(o1, o2)
+		}
 		return vm_lessthan(L, o1, o2)
 	case OPLE:
 		return vm_lessequal(L, o1, o2)
