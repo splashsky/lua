@@ -1,202 +1,188 @@
 # Future work
 
-This is the list of work we intend to do next, mostly performance, with the
-evidence behind each item. It reflects the threaded-default change after 368b850
-(November 2026). Each item says what is known, what has already been tried, and
-what is still open, so the next attempt does not repeat a measured dead end.
+This list reflects the merged master at `fbcffa8` (15 November 2026). It puts
+the remaining work roughly in order of breadth, with measured results and failed
+experiments retained so a future pass does not repeat a dead end. Correctness
+and platform validation remain prerequisites, not performance tradeoffs.
 
-## How the numbers were taken
+## Measurement
 
-All comparisons are against reference PUC-Rio Lua 5.5.1 built with `-O2` on the
-same machine (AMD Ryzen 9 7950X, Linux x86-64, glibc), with lua-odin built
-`-o:speed` (PIE). The workloads are the `bench/` harness (see
-[bench/README.md](../bench/README.md)) and a few one-line probes, quoted where
-they are used.
+The comparison uses reference PUC-Rio Lua 5.5.1 built `-O2`, and lua-odin
+`-o:speed` PIE, on an AMD Ryzen 9 7950X, Linux x86-64, glibc and Odin
+`dev-2026-11-nightly:9a69916`. Five fresh-process runs per workload rotate
+the three interpreters, pinned to CPU 11, sampled at 0.4% busy with its sibling
+at 0.2% before the run. `TZ=America/Chicago` and `HOME=/home/sky` were fixed;
+environment layout affects `getenv`. The host was shared and heavily loaded;
+**instructions are primary and cycles approximate**. Hash seeds, GC and I/O
+vary. Minima, medians, cycles, sizes and method are in
+[bench/THREADED_VM.md](../bench/THREADED_VM.md).
 
-- **Instruction counts** (`perf stat -e instructions:u`, or callgrind) are the
-  primary metric. Fixed paths are repeatable, but hash seeds, GC and temporary
-  file I/O can vary; compare distributions for those, not single runs.
-- The new comparison uses five rotating, isolated runs, pinned to CPU 12 after
-  an idle-core sample. The host was shared and the PUC stress/ASan matrix was
-  active; **cycle figures are approximate**, not a quiet-machine measurement.
-  Re-measure on a quiet machine before relying on a small difference. Full
-  minima, medians and method are in [bench/THREADED_VM.md](../bench/THREADED_VM.md).
-- The retained switch `vm_execute` is one large procedure. Unrelated edits
-  shift register allocation and code placement, and that alone has moved switch
-  call costs by ±3 instructions and empty-loop timings by 10-20%. Threaded
-  handler layout can matter too. Check generated code (callgrind
-  `--dump-instr=yes`, `perf annotate`) before attributing a change.
-
-Median instructions in millions, default threaded / switch / reference. The
-`gtab` reference median varies with the randomized hash seed; its minimum in
-this run was 174.6M, not 192.6M. The full min/median table includes cycles.
+Median user-space instructions in millions, including startup and harness setup:
 
 | Workload | Default threaded | Switch | Reference | Default vs reference |
 |---|---:|---:|---:|---:|
-| micro/fib(32) | 2,063.4 | 2,074.0 | 1,640.5 | +26% |
-| micro/intloop | 6,101.6 | 6,461.6 | 4,952.9 | +23% |
-| micro/floatloop | 8,117.4 | 8,857.4 | 7,217.0 | +12% |
-| micro/strconcat | 657.7 | 673.4 | 880.0 | -25% |
-| micro/strpattern | 5,094.6 | 5,129.8 | 3,803.6 | +34% |
-| micro/tablechurn | 3,752.3 | 3,914.4 | 4,813.0 | -22% |
-| micro/tablesort | 6,167.9 | 6,837.2 | 4,523.3 | +36% |
-| micro/closures | 3,015.5 | 2,985.5 | 3,026.6 | -0.4% |
-| tables/array_insert | 649.5 | 724.5 | 572.5 | +13% |
-| tables/hash_strkey | 1,026.1 | 1,053.9 | 1,288.1 | -20% |
-| tables/hash_prekey | 877.2 | 893.3 | 972.2 | -10% |
-| stdlib/math_transcend | 1,359.9 | 1,457.9 | 1,228.9 | +11% |
-| stdlib/file_lines | 772.1 | 769.0 | 712.7 | +8% |
-| probe/gtab (global read, 2M) | 246.7 | 282.7 | 192.6 | +28% |
-| probe/call1 (one-argument call, 2M) | 434.7 | 480.7 | 388.7 | +12% |
-| probe/empty (numeric loop, 2M) | 66.7 | 72.7 | 56.6 | +18% |
-| probe/os_date (local, 2M) | 67,127.7 | 67,273.7 | 20,788.4 | +223% |
-| probe/getenv (`HOME`, 2M) | 2,516.7 | 2,602.7 | 1,032.6 | +144% |
-| probe/iobench | 9,289.0 | 9,249.2 | 8,012.0 | +16% |
+| micro/fib(32) | 1,901.3 | 2,074.0 | 1,640.5 | +15.9% |
+| micro/intloop | 6,061.5 | 6,421.6 | 4,952.9 | +22.4% |
+| micro/floatloop | 7,519.9 | 8,339.9 | 7,217.0 | +4.2% |
+| micro/strconcat | 645.5 | 667.2 | 880.0 | -26.6% |
+| micro/strpattern | 5,077.4 | 5,112.6 | 3,803.6 | +33.5% |
+| micro/tablechurn | 3,669.8 | 3,881.0 | 4,813.7 | -23.8% |
+| micro/tablesort | 3,577.5 | 3,662.5 | 4,532.3 | -21.1% |
+| micro/closures | 2,919.5 | 2,981.5 | 3,026.6 | -3.5% |
+| tables/array_insert | 613.5 | 712.5 | 572.5 | +7.2% |
+| tables/hash_strkey | 1,017.0 | 1,049.0 | 1,288.0 | -21.0% |
+| tables/hash_prekey | 857.8 | 891.2 | 972.2 | -11.8% |
+| tables/tablesort | 1,005.9 | 1,034.4 | 1,266.3 | -20.6% |
+| stdlib/math_transcend | 1,187.8 | 1,297.8 | 1,228.9 | -3.3% |
+| stdlib/file_lines | 717.9 | 719.1 | 712.7 | +0.7% |
+| probe/gtab (global read, 2M) | 192.7 | 298.7 | 174.6 | +10.4% |
+| probe/call1 (one-argument call, 2M) | 384.7 | 476.7 | 388.7 | -1.0% |
+| probe/empty (numeric loop, 2M) | 62.7 | 68.7 | 56.6 | +10.8% |
+| probe/os_date (local, 2M) | 19,168.1 | 19,297.8 | 20,801.9 | -7.9% |
+| probe/getenv (`HOME`, 2M) | 1,314.7 | 1,472.7 | 1,046.6 | +25.6% |
+| probe/iobench | 8,611.9 | 8,550.2 | 8,070.4 | +6.7% |
 
-Threaded string building, table churn, string keys and number formatting execute
-fewer instructions than reference here; closures and UTC `os.date` are near it.
-Do not infer small cycle wins from these counts on a loaded machine.
+Seed-sensitive medians are not stable rankings: for example earlier reference
+`gtab` runs ranged from 174.6M to 192.6M. Different batches and layouts also
+explain differences from the targeted before/after figures below. Switch's
+large `vm_execute` is sensitive to register allocation and code placement;
+threaded handler layout matters too. Inspect generated code and compare
+distributions before attributing a small change.
 
-## 1. Threaded default: done and what remains
+## 1. Calls, dispatch and numeric loops
 
-The [tail-call-threaded interpreter](ARCHITECTURE.md#tail-call-threaded-dispatch)
-is now the default on amd64 and arm64. The frame-setup pass was ported to its
-specialized call path; upvalue, table-read/write and concatenation improvements
-removed the previously identified instruction regressions in several workloads.
-The switch remains both the source of the generated handlers and the automatic
-choice on other architectures; `VM_THREADED=0` explicitly selects it.
+The [threaded VM](ARCHITECTURE.md#tail-call-threaded-dispatch) is the default
+on amd64 and arm64; switch remains the source of generated handlers and the
+automatic fallback elsewhere. The call pass reduced `call1` from 434.5M to
+388.5M, equal to reference at 194 instructions per iteration in that batch.
+Its threaded/reference breakdown per iteration was: fetch/dispatch 46/27,
+frame entry/re-entry 24/26, `CALL` 25/23, `RETURN1` 21/19, two `MOVE`s 18/28,
+`FORLOOP` 23/23, frame setup 37/48. Closures are now below switch.
 
-Remaining, in priority order:
+- **Open:** `fib(32)` improved 2,063M to 1,901M but remains about 16% above
+  reference's 1,640M. In `fib(22)`, frame entry/re-entry costs 2.293M versus
+  1.433M and other VM work including dispatch 7.938M versus 6.161M. Profile
+  frame re-entry, arithmetic and conditionals without regressing native calls;
+  profile general `RETURN` and closure creation too. The `CLOSURE` barrier is
+  required: an emergency GC can blacken an anchored closure before wiring its
+  upvalues.
+- **Loops:** empty 66.7M → 62.7M (reference 56.6M), `il` 4,350.7M → 4,250.7M
+  (4,000.6M), and `intloop` 6,101.6M → 6,061.5M (4,952.9M). Per iteration,
+  threaded/reference `FORLOOP` is 31/28 and `ADD` plus dispatch 35/32.
+  `intloop` costs 303 versus about 248 instructions: two ADDs 70, MODK 67,
+  IDIVK 64, MULK 36, SUB 35 and FORLOOP 31. Improvements here help many loops;
+  preserve polling, hooks, tags and relocation behavior.
+- **Tried and dropped:** sending native fallback through the original handler
+  raised `ncall` 420.5M → 446.5M; a partially prepared fallback cost 442.5M.
+  More aggressive direct fresh entry reduced `call1` to 376.5M but raised
+  `ncall` 420.5M → 424.5M. Earlier discarded attempts include a frame pointer
+  local to `vm_execute`; 64-byte frames (three extra instructions per call);
+  re-deriving the closure in each handler; moving trace fetch out of line; and
+  native precall as a separate out-of-line procedure (25 extra instructions per
+  native call). See commits 65e55dc, e3fafd4, 6481741, 68f45c9 and 3e82229.
 
-1. **Runtime validation on Windows x64, Linux arm64 and macOS arm64.** These
-   targets have been cross-compiled to objects but not run. The user decided to
-   skip their runtime validation for this flip; they remain an unvalidated gap,
-   not a demonstrated runtime success.
-2. **Cycle re-measurement on a quiet machine.** The new comparisons were taken
-   on a shared, heavily loaded host. Treat cycles as approximate and repeat on
-   a quiet machine before relying on small differences.
-3. **Workloads where threaded executes more instructions than switch.** Median
-   `closures` is +1.0% (3,015.5M versus 2,985.5M), `file_lines` +0.4% and
-   `iobench` +0.4%. Profile the residual closure and I/O paths rather than
-   assuming a cycle regression; hash seeds, temporary files and GC can affect
-   the counts. The earlier table and concat blockers have been addressed.
+## 2. Tables, globals and library calls
 
-## 2. Lua-to-Lua calls
+- **Globals:** short-string global reads fell 246.7M → 192.7M (reference
+  174.6–192.6M); primitive `SETTABUP` 380–400M → 248–268M (198–216M).
+  Remaining hit costs per iteration are 65–76 versus 59–68 for reads and
+  93–103 versus 71–80 for existing-key writes. Reads must handle open and
+  closed upvalues and non-string constants from unvalidated bytecode. Writes
+  must preserve key/value barriers, saved PC, top and trap on the finish path.
+- **Arrays:** `array_insert` fell 649.5M → 613.5M (reference 572.5M); an
+  insert-and-read pair costs 197 versus 179 instructions. Look for broader
+  `SETTABLE`/`GETTABLE` and immediate-index wins without hurting hash keys.
+- **Sort and API:** `micro/tablesort` improved 6,157.8M → 3,616.3M (reference
+  4,523M); `tables/tablesort` 1,723M → 1,020M (1,269M). A Lua comparator
+  fell 635M → 518M (505M), while `__lt` sort fell 1,093M → 983M (826M,
+  +19%). Profile `callbinTM`, metamethod lookup and re-entrant callbacks.
+  A math.min/max probe improved 1,089.5M → 993.5M but reference is 776.5M;
+  check shared API/call costs, not just sort.
+- **Tried and dropped:** the first variable-key array split raised integer-hash
+  writes 236.6M → 286.6M and generic keys by 38M. The first global-write split
+  repeated the pre-set on misses and raised new empty environments 483.6M →
+  512.2M. Inlining numeric ordering inside `vm_lessthan` regressed switch I/O
+  code generation: the `iobench` minimum moved 9,249.9M → 9,254.2M.
 
-A one-argument call loop (`local function f(x) return x end; for i = 1, N do
-f(i) end`) costs roughly 217 instructions per iteration with the threaded
-default against 240 with the switch and 194 in reference. In the new five-run
-comparison, approximate median cycles are 113.6M versus 90.4M for the
-two-million-call probe, and 503.6M versus 431.4M for `fib(32)`.
+## 3. Memory, strings and collection
 
-The following callgrind breakdown is **historical switch data**, not a breakdown
-of the threaded default; obtain a new threaded profile before choosing a lever:
+Overlapping-word `mem_eq` reduced tablechurn by 22M and strpattern by 15M
+instructions. `api_tolstring` now checks GC after rooting a converted number:
+numeric `table.concat` sampled peak fell 7,362 → 1,918 KiB (reference 1,188)
+and the intern table 119,944 → 229 strings (reference 230).
 
-| Piece | Switch | Reference |
-|---|---:|---:|
-| Instruction fetch and dispatch (5 per iteration) | 60 | 27 |
-| Frame entry and re-entry | 47 | 26 |
-| `CALL` handler | 31 | 23 |
-| `RETURN1`, result discarded | 20 | 19 |
-| Two `MOVE`s | 20 | 28 |
-| Numeric `FORLOOP` | 24 | 23 |
-| Frame setup (`do_precall_vm`) | 38 | 48 |
+- **Open: string garbage and accounting.** `strconcat` sampled peak remains
+  25,448 KiB versus 14,012 KiB. At the final atomic → sweep the port has
+  157,408 interned strings versus reference's 215,384, then grows to 320,742
+  strings / 524,288 buckets versus 221,803 / 262,144. Minor, major sweep and
+  major propagate steps were 53/53, 180/247 and 8/9 respectively (port/ref).
+  A forced-full-GC control went 252,184 → 200,216 versus 201,075 → 200,215:
+  investigate why sweep timing leaves more real garbage. Reference also
+  transfers a spilled aux buffer into an `LSTRMEM` external string, uncounted
+  by `collectgarbage("count")`, and charges a GC step; the port copies it to
+  a counted string (+4.34 MB). After full GC the counted heap still differs by
+  about 1.6 MB, about eight bytes per live short string (32-byte header versus
+  24). Explore ownership with short-string normalization, allocation failure
+  and finalizers, and compact short strings, without hot-path regressions.
+- **Intern chains:** an old profile claimed 3× reference per chain lookup, but
+  a 200k-lookup aggregate probe used 32.8M versus reference's 37.4M. This does
+  not isolate the chain step, so the 3× claim is not reproduced.
+- **Tried and dropped:** a 24-byte header raised `strconcat` 657.7M → 709.4M,
+  `tablechurn` 3,751.8M → 4,080.2M and regressed hashes due to short/long
+  length dispatch. A long-buffer external-transfer prototype reduced peak
+  25,448 → 21,207 KiB but raised `strconcat` 657.6M → 665.5M and tablechurn
+  3,729.9M → 3,754.1M, and lacked short external-string semantics. An older
+  24-byte-header experiment also regressed hashes before allocator fix 1055a5c.
 
-- **Dispatch (switch):** each fetch was 12 instructions against about 5. Part of
-  that is inherent: Odin's `switch` compiles to a PIE jump-table sequence
-  (`lea`/`movslq`/`add`/`jmp`) where reference uses computed `goto`. The rest is
-  trap handling and a spill reload on the shared path. The threaded interpreter
-  removes much of this cost.
-- **Frame entry and re-entry (switch profile):** each entry spilled the frame
-  index and multiplied it by the 56-byte frame stride. It then reloaded
-  `L.stack`, `L.frames`, `func` and `savedpc`, the closure, prototype, constants
-  and code, and converted the saved PC index to a pointer. Frames stay in an
-  index-addressed array
-  (Decision 3), so some of this is structural; redundant reloads between the
-  call and return sides are not.
-- **`CALL`:** compare the current threaded path step by step with reference's
-  `OP_CALL`: the `L.top` and saved-PC stores, the result-count encoding and the
-  interrupt poll.
-- **Tried and dropped:**
-  - a frame pointer local to `vm_execute`;
-  - 64-byte frames, to turn the multiply into a shift (3 more instructions per
-    call);
-  - re-deriving the closure in each handler;
-  - moving the trace fetch out of line;
-  - native precall as a separate out-of-line procedure (25 more instructions per
-    native call).
+## 4. Hosted libraries and correctness
 
-  The commit bodies of 65e55dc, e3fafd4, 6481741, 68f45c9 and 3e82229 have the
-  measurements.
+- **OS:** Linux's bounded timezone cache reduced local `os.date` 72,166M →
+  19,284M (reference 20,808M, `TZ=America/Chicago`), `os.date("*t")` 3,161M
+  → 503M (456M), and `os.time(table)` 4,048M → 864.5M (447.6M). `getenv`
+  fell 2,496M → 1,378M (1,032M). The remaining table-to-time and getenv gaps
+  merit profiling. The cache rechecks `TZ`, re-stats `/etc/localtime` when
+  unset, and falls back to the scoped loader for oversized zones; Windows is
+  unchanged. Pre-existing differences from glibc remain for POSIX DST rules
+  before 1970, some invalid TZ names with alphabetic prefixes, and some
+  `mktime` `isdst`/fold/gap cases. The scoped fallback can re-read a changed
+  named file where glibc retains its cached copy.
+- **Streams:** `file_lines` improved 767.7M → 729.3M (reference 712.7M) and
+  `iobench` 9,248M → 8,583M (8,012M). Earlier `file_lines` cycles were about
+  1.2× reference, with roughly 750k versus 23k cache misses and 2.68M versus
+  1.46M L1 misses. Samples clustered near the stream mutex's atomic exchange;
+  that is not an established cause and needs a quiet machine. The possible
+  threaded `iobench` minimum shift 8,582.7M → 8,641.1M needs a larger seed
+  distribution; its threaded/switch residual is unattributed.
+  The former stream-test flake was test isolation, not incorrect locking:
+  process-wide `flush_all` could flush another test's deliberately failing pipe
+  or `/dev/full` stream before its explicit flush. A test mutex and a
+  cross-thread error-reporting test fix and cover this. Forced interleaving
+  failed 20/20 before the fix; natural reproduction was 0/200 both before and
+  after. The full current matrix passed, but that is not a flake frequency proof.
+- **Math and patterns:** contextless transcendental callbacks reduced
+  `math_transcend` 1,359.9M → 1,201.8M (reference 1,228.9M); results are
+  bit-identical to the previous implementation over 1,568,070 raw patterns
+  (`tests/transcend_bits.lua`), not necessarily to platform libm. Patterns
+  were unchanged: `strpattern` remains about +34% instructions with earlier
+  approximate cycles below reference, so prioritize broader wins first.
+- **Formatting:** macOS/BSD number formatting follows their `vfprintf` source
+  (54f0160) but has not run there. Compare `tests/format_diff.lua` with a
+  reference build on each host as described in [BUILDING.md](../BUILDING.md).
 
-## 3. Other interpreter and library gaps
+## 5. Validation and portability
 
-Roughly in order of how broadly they would help:
-
-- **Global variable access:** a `y = x` loop on a global (`GETTABUP` with a
-  constant short-string key on `_ENV`) executes 246.7M instructions, against
-  reference's 174.6M minimum and 192.6M median (+41% and +28% respectively).
-  Hash-seed variability makes single ratios unreliable. Compare against
-  `luaV_fastget`/`luaH_getshortstr`.
-- **`table.sort`:** about +36% instructions, with approximate cycle medians of
-  1,537.6M versus 1,290.1M. As in reference, every
-  element read, write and comparison goes through the embedding API
-  (`api_geti`, `api_seti`, `api_compare`), so the per-call cost of those entry
-  points is the likely lever.
-- **Numeric loops:** `intloop` about +23%, `floatloop` +12%, `il` +9% and the empty
-  loop +18% instructions. Mostly dispatch and the `FORLOOP` back edge.
-- **Array part:** `array_insert` about +13% instructions, with approximate
-  cycle medians of 127.9M versus 123.5M: the `SETI`/`GETI` paths on 5.5's
-  split array layout.
-- **`file:lines()` and buffered reads:** about +8% instructions; approximate
-  cycle medians are 203.5M versus 164.5M. Cycle and I/O variation needs a
-  quieter measurement and cache-counter profile.
-- **`os.date` in local time:** 3.2× the instructions of reference; UTC `os.date`
-  is already at parity. A historical profile put 55% of the cost in locating the zone file
-  (`local_zone_file`) and finding the transition (`tzif_transition`), both
-  repeated on every call. Caching the located zone and the last transition is
-  the obvious lever. It must still notice a changed `TZ`, as the C library
-  does for reference.
-- **`os.getenv`:** 2.4× the instructions of reference in this environment;
-  lookup cost depends on environment layout, and this includes VM lookups.
-- **`math` transcendental functions:** about +11% instructions, spent in the
-  pure-Odin libm routines.
-- **Lua patterns:** `strpattern` executes about 34% more instructions, but its
-  approximate cycle median is 1,048.9M versus 1,192.1M, so this is low priority.
-
-## 4. Memory and the collector
-
-- **Peak heap on string building:** a historical switch build sampled
-  `collectgarbage("count")` every 1,000 instructions during `strconcat` and
-  showed a peak of 25,449 KiB against 14,012 KiB in reference (the sampling hook
-  perturbs this a little). The intern table ended at 320,742 strings in 524,288
-  buckets, against 244,478 strings in
-  262,144. Our collector is retaining more garbage strings at that point.
-  Compare the pacing (debt, step size, generational thresholds) step by step
-  with `lgc.c`. 2dc564b fixed two pacing differences; there may be more. Recheck
-  this measurement with the threaded default and its newer concat path.
-- **Intern-table lookups:** a historical switch profile found walking an intern
-  chain cost about 3× reference per lookup, although the hash, growth thresholds
-  and chain lengths (1.145 nodes per hit against 1.144) all match. Our string
-  header is 32 bytes against reference's 24. A 24-byte header helped `strconcat`
-  but cost instructions on
-  the hash workloads; that was measured before the allocator fix (1055a5c).
-  Retry it with the current default and allocator.
-- **32-bit targets** are not supported: the kernel's layout assertions require
-  64-bit. Supporting them would need the object layouts, the hosted allocator's
-  alignment guarantees and the vararg-count width revisited.
-
-## 5. Validation and robustness
-
-- **Number formatting on macOS and the BSDs** follows their `vfprintf` source
-  (54f0160); it has not been run there. Run `tests/format_diff.lua` against a
-  reference build on each, as [BUILDING.md](../BUILDING.md) describes for Linux.
-- **Two stream tests failed together** in two separate parallel stress +
-  AddressSanitizer runs on a heavily loaded machine:
-  `stream_partial_flush_discards_whole_buffer` and `stream_concurrent_states`.
-  Five reruns passed. The working hypothesis is a concurrent `flush_all`
-  touching the deliberately full pipe one of them uses. Find the cause before it
-  becomes a flaky failure.
-- The runtime validation of the threaded interpreter on other platforms
-  (section 1) also exercises the hosted allocator's direct `malloc` path on
-  macOS (1055a5c), which has only been cross-compiled there.
+- Run the threaded default on Windows x64, Linux arm64 and macOS arm64. They
+  were cross-compiled to objects only; runtime testing was skipped by the
+  user's decision. macOS also needs runtime validation of the hosted allocator's
+  direct malloc path (1055a5c).
+- Repeat cycle measurements on a quiet machine, including the stream cache
+  counters and seed-sensitive I/O. On this host a small cycle difference is not
+  conclusive.
+- Support for **32-bit targets** requires revisiting object layouts, hosted
+  allocator alignment and vararg-count width; current layout assertions require
+  64-bit targets.
+- Compiler checks now emit no warnings. Parser and aux-buffer lifetime warnings
+  were false positives silenced explicitly with lifetime comments; `jmp.odin`
+  shim warnings use byte-identical encodings, and `check.sh` no longer passes
+  kernel defines to the generator. Preserve these lifetime and byte-encoding
+  constraints if the affected code changes.
