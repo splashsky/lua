@@ -2091,6 +2091,30 @@ when VM_THREADED {
 		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
 	}
 
+	vm_thread_enternew :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		if L.hookmask != 0 {
+			return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		base = L.frames[ci_idx].func + 1
+		regs = ([^]StackValue)(&L.stack[base])
+		cl = (^LClosure)(regs[-1].val.value_.gc)
+		pc = code
+		trap = 0
+		next_i := pc[0]
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}
+
 	vm_thread_enterhook :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
 		context = ctx^
 		pc := pc_arg
@@ -4392,7 +4416,7 @@ when VM_THREADED {
 				L.top = top
 			}
 			ci_idx = next
-			return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+			return #must_tail vm_thread_enternew(L, pc, regs, cl, p.code, ci_idx, trap, ctx, i)
 		}
 	}
 

@@ -112,7 +112,7 @@ emit_indented :: proc(b: ^strings.Builder, s: string) {
 
 emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	noinline := ""
-	if name == "vm_thread_enter" || name == "vm_thread_trace" || name == "vm_thread_poll" ||
+	if name == "vm_thread_enter" || name == "vm_thread_enternew" || name == "vm_thread_trace" || name == "vm_thread_poll" ||
 	   name == "vm_thread_CALL_slow" || name == "vm_thread_CALL_precalled" ||
 	   name == "vm_thread_CALL_lcf" || name == "vm_thread_CALL_ccl" ||
 	   name == "vm_thread_RETURN0_slow" || name == "vm_thread_RETURN1_slow" ||
@@ -288,6 +288,18 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src, 
 					base = L.frames[ci_idx].func + 1
 					regs = ([^]StackValue)(&L.stack[base])`, "return #must_tail vm_thread_enterhook(" + ARGS + ")")
 	emit_proc(&b, "vm_thread_enter", fmt.tprintf("%s\n%s", dedent(entry), dispatch), true)
+	// An inline Lua precall has initialized a fresh frame, has not called out
+	// or moved either array, and already loaded the callee prototype. Its first
+	// PC is zero and its trap is clear. Hooked calls take the ordinary entry.
+	emit_proc(&b, "vm_thread_enternew", fmt.tprintf(`if L.hookmask != 0 {{
+	return #must_tail vm_thread_enter(%s)
+}}
+base = L.frames[ci_idx].func + 1
+regs = ([^]StackValue)(&L.stack[base])
+cl = (^LClosure)(regs[-1].val.value_.gc)
+pc = code
+trap = 0
+%s`, ARGS, next), true)
 	emit_proc(&b, "vm_thread_enterhook", fmt.tprintf("%s\n%s", `do_hookcall(L, ci_idx)
 base = L.frames[ci_idx].func + 1
 regs = ([^]StackValue)(&L.stack[base])`, dispatch))
@@ -576,7 +588,7 @@ trap = L.frames[ci_idx].u.l.trap
 		L.top = top
 	}
 	ci_idx = next
-	return #must_tail vm_thread_enter(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+	return #must_tail vm_thread_enternew(L, pc, regs, cl, p.code, ci_idx, trap, ctx, i)
 }
 `
 			terminal = true
