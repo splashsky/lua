@@ -20,8 +20,9 @@ API_CHECKS :: #config(API_CHECKS, true)
 
 // The threaded handlers need preserve/none tail calls and the supported jump shim.
 VM_THREADED_SUPPORTED :: ODIN_ARCH == .amd64 || ODIN_ARCH == .arm64
-// Experimental tail-call-threaded dispatch; the switch VM remains the default.
-VM_THREADED :: #config(VM_THREADED, false)
+// Default to threaded where supported; the switch serves other targets and is
+// the source from which the threaded handlers are generated.
+VM_THREADED :: #config(VM_THREADED, VM_THREADED_SUPPORTED)
 #assert(!VM_THREADED || VM_THREADED_SUPPORTED, "VM_THREADED requires amd64 or arm64")
 
 // Test-only analogue of reference HARDSTACKTESTS; see realloc_stack and realloc_ci.
