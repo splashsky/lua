@@ -74,27 +74,34 @@ Windows (PowerShell):
 
 Binaries land in `build/out/`, named after the brand (`lua` / `luac` by default).
 
-### Experimental threaded VM
+### Interpreter selection
 
-The switch interpreter remains the default. To build and test the experimental
-tail-call-threaded interpreter, set `VM_THREADED=1` for the wrappers:
+The tail-call-threaded interpreter is the default on amd64 and arm64. The switch
+is selected automatically on other architectures and can be selected explicitly
+for comparison or debugging:
 
 ```sh
-VM_THREADED=1 bash build/build.sh all
-VM_THREADED=1 bash build/test.sh --stress --asan
-VM_THREADED=1 STRESS=1 ASAN=1 bash build/puc.sh
-VM_THREADED=1 REFLUAC=/path/to/luac bash build/clitest.sh
-VM_THREADED=1 bash build/rebrand-smoke.sh
-VM_THREADED=1 bash build/build.sh freestanding
+VM_THREADED=0 bash build/build.sh all
+VM_THREADED=0 bash build/test.sh --stress --asan
+VM_THREADED=0 STRESS=1 ASAN=1 bash build/puc.sh
+VM_THREADED=0 REFLUAC=/path/to/luac bash build/clitest.sh
+VM_THREADED=0 bash build/rebrand-smoke.sh
+VM_THREADED=0 bash build/build.sh freestanding
 ```
 
 All wrappers accept `VM_THREADED=1` for threaded and `VM_THREADED=0` for switch;
-unset it to use the build default (currently switch). Any other value, including
+unset it to use the architecture-dependent default. Any other value, including
 an empty value, is rejected. On Windows set `$env:VM_THREADED = '1'` or `'0'`,
 or remove it with `Remove-Item Env:VM_THREADED`. For direct Odin commands use
 `-define:VM_THREADED=true` or `-define:VM_THREADED=false`. The PUC wrapper gives
 explicitly selected binaries distinct `-threaded` or `-switch` names, including
 in relocation and memory-checker modes; an unset variable uses the unsuffixed name.
+Forcing threaded on architectures other than amd64 or arm64 is rejected. Automatic
+switch selection does not imply the rest of the runtime supports those targets.
+
+Threaded runtime validation has only been performed on Linux x86-64. Windows x64,
+Linux arm64 and macOS arm64 have been cross-checked, but the user chose to skip
+their runtime validation; they remain an unvalidated gap.
 
 The switch opcode bodies are the source of the threaded handlers. After changing
 them, run `bash build/generate-threaded.sh` or `.\build\generate-threaded.ps1` on
