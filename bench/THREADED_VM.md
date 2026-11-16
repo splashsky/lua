@@ -7,6 +7,11 @@
 > but not run by the user's decision. The remaining work is in
 > [docs/FUTURE_WORK.md](../docs/FUTURE_WORK.md).
 
+Default-mode object builds succeeded for Linux arm64, Windows x64, macOS arm64,
+and freestanding amd64 SysV, amd64 Win64 and arm64. The generated `MOVE`
+handler ends in an indirect `jmp` on amd64 and `br` on arm64 in those objects.
+Inspecting the object code is not runtime validation.
+
 ## Current comparison: 2026-11-15
 
 On an AMD Ryzen 9 7950X, Linux x86-64, Odin `dev-2026-11-nightly:9a69916`,
