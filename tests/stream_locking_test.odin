@@ -100,6 +100,66 @@ stream_single_byte_read_matches_getc :: proc(t: ^testing.T) {
 	}
 }
 
+@(test)
+stream_read_until_matches_getc :: proc(t: ^testing.T) {
+	temp, err := os.create_temp_file("", "lang-until-*")
+	if !testing.expect(t, err == nil) do return
+	path := strings.clone(os.name(temp))
+	os.close(temp)
+	defer delete(path)
+	defer os.remove(path)
+	w := stream.open(path, "wb")
+	if !testing.expect(t, w != nil) do return
+	data := []u8{'a', '\n', '\r', '\n', 'b', '\r', 'c', 0x1a, '\n', 'd'}
+	testing.expect(t, stream.write(w, data) == len(data))
+	testing.expect(t, stream.close(w))
+	modes := []string{"rb", "r"}
+	delimiters := []u8{'\n', '\r', 0x1a, 'b', 'z'}
+	sizes := []int{1, 2, 7}
+	for mode in modes {
+		for delimiter in delimiters {
+			for size in sizes {
+				a, b := stream.open(path, mode), stream.open(path, mode)
+				if !testing.expect(t, a != nil && b != nil) {
+					if a != nil do stream.close(a)
+					if b != nil do stream.close(b)
+					return
+				}
+				testing.expect(t, stream.setvbuf(a, .Full, 5) && stream.setvbuf(b, .Full, 5))
+				for {
+					actual, expected: [7]u8
+					n, found := stream.read_until(a, actual[:size], delimiter)
+					count := 0
+					want_found := false
+					for count < size {
+						c := stream.getc(b)
+						if c == stream.EOF do break
+						expected[count] = u8(c)
+						count += 1
+						if u8(c) == delimiter {
+							want_found = true
+							break
+						}
+					}
+					if !testing.expect(t, n == count && found == want_found && string(actual[:n]) == string(expected[:count]), "bulk delimiter matches getc") do break
+					pa, oka := stream.tell(a)
+					pb, okb := stream.tell(b)
+					testing.expect(t, oka && okb && pa == pb && stream.feof(a) == stream.feof(b), "bulk position and EOF match getc")
+					if n == 0 do break
+					last := i32(expected[count - 1])
+					testing.expect(t, stream.ungetc(last, a) == last && stream.ungetc(last, b) == last)
+					pa, oka = stream.tell(a)
+					pb, okb = stream.tell(b)
+					testing.expect(t, oka && okb && pa == pb, "bulk pushback position matches getc")
+					testing.expect(t, stream.getc(a) == last && stream.getc(b) == last)
+				}
+				testing.expect(t, stream.close(a))
+				testing.expect(t, stream.close(b))
+			}
+		}
+	}
+}
+
 Stream_Flag_Observer :: struct {
 	barrier: ^sync.Barrier,
 	stream:  ^stream.Stream,

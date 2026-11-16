@@ -718,24 +718,29 @@ read_bulk :: proc(s: ^Stream, dst: []u8, stop_at_delimiter: bool, delimiter: u8)
 		span := s.read_buffer[s.read_index:s.read_index + available]
 		if stop_at_delimiter {
 			if i := bytes.index_byte(span, delimiter); i >= 0 {
-				take = i
-				special = true
+				// The delimiter is an ordinary raw byte unless Windows text
+				// translation below finds a CR or Ctrl-Z at or before it. Include
+				// it in the copy and cookie update instead of calling getc again.
+				take = i + 1
+				found = true
 			}
 		}
 		when ODIN_OS == .Windows {
 			if s.text_mode {
-				// Search only before an already-found delimiter. In the usual
+				// Search only through an already-found delimiter. In the usual
 				// line-reading case that is a few dozen bytes, rather than
 				// rescanning the rest of an 8 KiB buffer for every line.
 				text_span := span[:take]
 				if i := bytes.index_byte(text_span, '\r'); i >= 0 {
 					take = i
 					special = true
+					found = false
 					text_span = text_span[:i]
 				}
 				if i := bytes.index_byte(text_span, 0x1a); i >= 0 {
 					take = i
 					special = true
+					found = false
 				}
 			}
 		}
@@ -750,7 +755,7 @@ read_bulk :: proc(s: ^Stream, dst: []u8, stop_at_delimiter: bool, delimiter: u8)
 			s.last_after = s.raw_cursor
 			n += take
 		}
-		if n == len(dst) {
+		if found || n == len(dst) {
 			return
 		}
 		if special {
@@ -780,8 +785,7 @@ read_bulk :: proc(s: ^Stream, dst: []u8, stop_at_delimiter: bool, delimiter: u8)
 					continue
 				}
 			}
-			// getc consumes the delimiter itself and performs CRLF/Ctrl-Z
-			// translation when the raw byte was special only because of text mode.
+			// getc performs CRLF/Ctrl-Z translation at a special raw byte.
 			c := getc_unlocked(s)
 			if c == EOF {
 				return
