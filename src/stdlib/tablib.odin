@@ -196,7 +196,7 @@ table_concat :: proc "c" (Lp: rawptr) -> i32 {
 	sep := aux_optlstring(L, 2, "")
 	i := aux_optinteger(L, 3, 1)
 	last = aux_optinteger(L, 4, last)
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this callback
 	for ; i < last; i += 1 {
 		addfield(L, &b, i)
 		aux_addlstring(&b, transmute([]u8)sep)

@@ -143,7 +143,7 @@ str_reverse :: proc "c" (Lp: rawptr) -> i32 {
 	s := transmute([]u8)aux_checklstring(L, 1)
 	l := len(s)
 	b: Buffer
-	p := aux_buffinitsize(L, &b, uint(l))
+	p := aux_buffinitsize(L, (^Buffer)(rawptr(&b)), uint(l)) // placeholder lives within this callback
 	for i in 0 ..< l {
 		p[i] = s[l - i - 1]
 	}
@@ -158,7 +158,7 @@ str_lower :: proc "c" (Lp: rawptr) -> i32 {
 	s := transmute([]u8)aux_checklstring(L, 1)
 	l := len(s)
 	b: Buffer
-	p := aux_buffinitsize(L, &b, uint(l))
+	p := aux_buffinitsize(L, (^Buffer)(rawptr(&b)), uint(l)) // placeholder lives within this callback
 	for i in 0 ..< l {
 		p[i] = u8(kernel.to_lower(int(s[i])))
 	}
@@ -173,7 +173,7 @@ str_upper :: proc "c" (Lp: rawptr) -> i32 {
 	s := transmute([]u8)aux_checklstring(L, 1)
 	l := len(s)
 	b: Buffer
-	p := aux_buffinitsize(L, &b, uint(l))
+	p := aux_buffinitsize(L, (^Buffer)(rawptr(&b)), uint(l)) // placeholder lives within this callback
 	for i in 0 ..< l {
 		p[i] = u8(kernel.to_upper(int(s[i])))
 	}
@@ -199,7 +199,7 @@ str_rep :: proc "c" (Lp: rawptr) -> i32 {
 	} else {
 		totallen := uint(n) * (length + lsep) - lsep
 		b: Buffer
-		p := aux_buffinitsize(L, &b, totallen)
+		p := aux_buffinitsize(L, (^Buffer)(rawptr(&b)), totallen) // placeholder lives within this callback
 		off := 0
 		// First n-1 copies each followed by the separator...
 		for k := n; k > 1; k -= 1 {
@@ -246,7 +246,7 @@ str_char :: proc "c" (Lp: rawptr) -> i32 {
 	L := state(Lp)
 	n := kernel.api_gettop(L)
 	b: Buffer
-	p := aux_buffinitsize(L, &b, uint(n))
+	p := aux_buffinitsize(L, (^Buffer)(rawptr(&b)), uint(n)) // placeholder lives within this callback
 	for i in 1 ..= n {
 		c := kernel.Unsigned(aux_checkinteger(L, i))
 		aux_argcheck(L, c <= 255, i, "value out of range")
@@ -1164,7 +1164,7 @@ str_gsub :: proc "c" (Lp: rawptr) -> i32 {
 		"string/function/table",
 	)
 	b: Buffer
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this callback
 	pp := p
 	if anchor {
 		pp = p[1:]
@@ -1917,7 +1917,7 @@ str_format :: proc "c" (Lp: rawptr) -> i32 {
 	arg := 1
 	sf := transmute([]u8)aux_checklstring(L, 1)
 	b: Buffer
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this callback
 	i := 0
 	for i < len(sf) {
 		if sf[i] != L_ESC {
@@ -2244,7 +2244,7 @@ str_pack :: proc "c" (Lp: rawptr) -> i32 {
 	totalsize: uint = 0
 	kernel.api_pushnil(L) // separate arguments from the buffer
 	b: Buffer
-	aux_buffinit(L, &b)
+	aux_buffinit(L, (^Buffer)(rawptr(&b))) // placeholder lives within this callback
 	pos := 0
 	for pos < flen {
 		ntoalign: uint

@@ -86,9 +86,13 @@ when ODIN_ARCH == .amd64 {
 		// Win64's second integer argument is EDX. Restore every nonvolatile
 		// register, map a requested zero result to one as C longjmp does, then
 		// install the saved stack and branch instead of returning normally.
+		// Odin's dead-write analysis cannot see register uses after the jump.
+		// Emit the warned restores as bytes, tied to the fixed RCX buffer input;
+		// explicit clobbers retain the compiler's original register contract.
 		jmp_long :: #force_no_inline proc "c" (buf: ^Jmp_Buf, value: i32) -> ! {
 			asm(buf: ^Jmp_Buf, value: i32) -> ! [
 				buf = %rcx, value = %edx, #clobber memory, #volatile,
+				#clobber %rbx, #clobber %rbp, #clobber %rdi, #clobber %rsi,
 			] {
 				movdqu %xmm6,  [buf +  80]
 				movdqu %xmm7,  [buf +  96]
@@ -100,10 +104,10 @@ when ODIN_ARCH == .amd64 {
 				movdqu %xmm13, [buf + 192]
 				movdqu %xmm14, [buf + 208]
 				movdqu %xmm15, [buf + 224]
-				mov %rbx, [buf +  0]:u64
-				mov %rbp, [buf +  8]:u64
-				mov %rdi, [buf + 16]:u64
-				mov %rsi, [buf + 24]:u64
+				#byte 0x48, 0x8b, 0x19 // mov rbx, [rcx]
+				#byte 0x48, 0x8b, 0x69, 0x08 // mov rbp, [rcx+8]
+				#byte 0x48, 0x8b, 0x79, 0x10 // mov rdi, [rcx+16]
+				#byte 0x48, 0x8b, 0x71, 0x18 // mov rsi, [rcx+24]
 				mov %r12, [buf + 32]:u64
 				mov %r13, [buf + 40]:u64
 				mov %r14, [buf + 48]:u64
@@ -111,9 +115,9 @@ when ODIN_ARCH == .amd64 {
 				mov %eax, value
 				test %eax, %eax
 				jnz .nonzero
-				mov %eax, 1
+				#byte 0xb8, 0x01, 0x00, 0x00, 0x00 // mov eax, 1
 			.nonzero:
-				mov %rsp, [buf + 64]:u64
+				#byte 0x48, 0x8b, 0x61, 0x40 // mov rsp, [rcx+64]
 				jmp [buf + 72]:u64
 			}(buf, value)
 		}
@@ -149,12 +153,15 @@ when ODIN_ARCH == .amd64 {
 			}()
 		}
 
+		// As in the Win64 shim, the warned restores are encoded against the fixed
+		// RDI buffer input and their nonvolatile-register clobbers are explicit.
 		jmp_long :: #force_no_inline proc "c" (buf: ^Jmp_Buf, value: i32) -> ! {
 			asm(buf: ^Jmp_Buf, value: i32) -> ! [
 				buf = %rdi, value = %esi, #clobber memory, #volatile,
+				#clobber %rbx, #clobber %rbp,
 			] {
-				mov %rbx, [buf +  0]:u64
-				mov %rbp, [buf +  8]:u64
+				#byte 0x48, 0x8b, 0x1f // mov rbx, [rdi]
+				#byte 0x48, 0x8b, 0x6f, 0x08 // mov rbp, [rdi+8]
 				mov %r12, [buf + 16]:u64
 				mov %r13, [buf + 24]:u64
 				mov %r14, [buf + 32]:u64
@@ -162,9 +169,9 @@ when ODIN_ARCH == .amd64 {
 				mov %eax, value
 				test %eax, %eax
 				jnz .nonzero
-				mov %eax, 1
+				#byte 0xb8, 0x01, 0x00, 0x00, 0x00 // mov eax, 1
 			.nonzero:
-				mov %rsp, [buf + 48]:u64
+				#byte 0x48, 0x8b, 0x67, 0x30 // mov rsp, [rdi+48]
 				jmp [buf + 56]:u64
 			}(buf, value)
 		}
@@ -214,9 +221,12 @@ when ODIN_ARCH == .amd64 {
 	// X0 and W1 carry the two arguments. X16 is an ABI scratch register, so it
 	// keeps the saved SP until all buffer reads finish; the restored LR itself
 	// is the branch target. Only then do we place longjmp's result in W0.
+	// Encode the SP restore and its X16 load to avoid false dead-write warnings;
+	// preserve their original clobbers, with the buffer fixed in X0.
 	jmp_long :: #force_no_inline proc "c" (buf: ^Jmp_Buf, value: i32) -> ! {
 		asm(buf: ^Jmp_Buf, value: i32) -> ! [
 			buf = %x0, value = %w1, #clobber memory, #volatile,
+			#clobber %x16, #clobber %sp,
 		] {
 			ldp %x19, %x20, [buf +   0]
 			ldp %x21, %x22, [buf +  16]
@@ -224,7 +234,7 @@ when ODIN_ARCH == .amd64 {
 			ldp %x25, %x26, [buf +  48]
 			ldp %x27, %x28, [buf +  64]
 			ldp %x29, %x30, [buf +  80]
-			ldr %x16, [buf +  96]
+			#byte 0x10, 0x30, 0x40, 0xf9 // ldr x16, [x0, #96]
 			#byte 0x08, 0xa4, 0x46, 0x6d // ldp d8,  d9,  [x0, #104]
 			#byte 0x0a, 0xac, 0x47, 0x6d // ldp d10, d11, [x0, #120]
 			#byte 0x0c, 0xb4, 0x48, 0x6d // ldp d12, d13, [x0, #136]
@@ -233,7 +243,7 @@ when ODIN_ARCH == .amd64 {
 			cbnz %w0, .nonzero
 			mov %w0, 1
 		.nonzero:
-			mov %sp, %x16
+			#byte 0x1f, 0x02, 0x00, 0x91 // mov sp, x16
 			br %x30
 		}(buf, value)
 	}
