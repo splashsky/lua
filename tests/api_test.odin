@@ -349,6 +349,26 @@ test_api_arith_and_compare :: proc(t: ^testing.T) {
 	testing.expect(t, !kernel.api_compare(L, -1, -2, kernel.OPLE)) // !(20 <= 10)
 }
 
+@(test)
+test_api_compare_mixed_numbers :: proc(t: ^testing.T) {
+	L := api_new()
+	defer kernel.close_state(L)
+	// This integer is not exactly representable as a double. Both comparison
+	// directions must avoid rounding it to the neighboring floating value.
+	kernel.api_pushinteger(L, 9007199254740993)
+	kernel.api_pushnumber(L, 9007199254740992.0)
+	testing.expect(t, !kernel.api_compare(L, 1, 2, kernel.OPLT))
+	testing.expect(t, kernel.api_compare(L, 2, 1, kernel.OPLT))
+	kernel.api_pushinteger(L, min(i64))
+	kernel.api_pushnumber(L, -9223372036854775808.0)
+	testing.expect(t, !kernel.api_compare(L, 3, 4, kernel.OPLT))
+	testing.expect(t, !kernel.api_compare(L, 4, 3, kernel.OPLT))
+	kernel.api_pushinteger(L, max(i64))
+	kernel.api_pushnumber(L, 9223372036854775808.0)
+	testing.expect(t, kernel.api_compare(L, 5, 6, kernel.OPLT))
+	testing.expect(t, !kernel.api_compare(L, 6, 5, kernel.OPLT))
+}
+
 // ---------------------------------------------------------------------------
 // Full userdata with user values
 // ---------------------------------------------------------------------------

@@ -234,7 +234,9 @@ lessequalothers :: proc(L: ^State, l, r: ^TValue) -> bool {
 // Full `l < r` -- reference Lua's `luaV_lessthan`.
 vm_lessthan :: proc(L: ^State, l, r: ^TValue) -> bool {
 	if is_number(l) && is_number(r) {
-		return LTnum(l, r)
+		// Keep the exact int/float comparison rules while allowing callers of
+		// the checked API to fold the common same-type numeric cases.
+		return #force_inline LTnum(l, r)
 	}
 	return lessthanothers(L, l, r)
 }
