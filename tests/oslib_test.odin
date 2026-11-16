@@ -121,6 +121,35 @@ oslib_getenv_and_clock :: proc(t: ^testing.T) {
 }
 
 @(test)
+oslib_getenv_values :: proc(t: ^testing.T) {
+	empty :: "LUA_ODIN_GETENV_EMPTY_784C"
+	value :: "LUA_ODIN_GETENV_VALUE_784C"
+	if !testing.expect(t, os.set_env(empty, "") == nil) do return
+	defer os.unset_env(empty)
+	if !testing.expect(t, os.set_env(value, "hello") == nil) do return
+	defer os.unset_env(value)
+	L := oslib_state()
+	defer kernel.close_state(L)
+	st := oslib_run(L, `
+		assert(os.getenv('LUA_ODIN_GETENV_EMPTY_784C') == '')
+		assert(os.getenv('LUA_ODIN_GETENV_VALUE_784C') == 'hello')
+		assert(os.getenv('LUA_ODIN_GETENV_ABSENT_784C') == nil)
+		assert(not pcall(os.getenv, {}))
+	`)
+	if st != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "getenv empty, present, absent and invalid values: %s", msg)
+	}
+	when ODIN_OS == .Linux {
+		st = oslib_run(L, `
+			assert(os.getenv('LUA_ODIN_GETENV_VALUE_784C\0ignored') == 'hello')
+			assert(os.getenv('') == nil)
+		`)
+		testing.expect(t, st == .Ok, "POSIX getenv interprets the name as a C string")
+	}
+}
+
+@(test)
 oslib_date_bad_specifier :: proc(t: ^testing.T) {
 	L := oslib_state()
 	defer kernel.close_state(L)

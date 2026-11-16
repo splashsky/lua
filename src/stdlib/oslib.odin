@@ -21,6 +21,7 @@ package stdlib
 import "base:runtime"
 import "core:os"
 import "core:time"
+import posix "core:sys/posix"
 import win32 "core:sys/windows"
 import host "lang:host"
 import kernel "lang:kernel"
@@ -952,7 +953,20 @@ os_getenv :: proc "c" (Lp: rawptr) -> i32 {
 	context = runtime.default_context()
 	L := state(Lp)
 	name := aux_checkstring(L, 1)
-	if !aux_getenv_push(L, name) do kernel.api_pushnil(L)
+	when ODIN_OS == .Linux && !ODIN_NO_CRT {
+		// aux_checkstring returns a rooted Lua string with a trailing NUL.
+		// Like reference Lua, pass it directly to the host and copy the result
+		// into Lua before the GC check can run a finalizer. This also preserves
+		// getenv's first-NUL handling for names containing embedded zeroes.
+		value := posix.getenv(cstring(raw_data(name)))
+		if value == nil {
+			kernel.api_pushnil(L)
+		} else {
+			kernel.api_pushstring(L, string(value))
+		}
+	} else {
+		if !aux_getenv_push(L, name) do kernel.api_pushnil(L)
+	}
 	return 1
 }
 
