@@ -4,24 +4,40 @@ A faithful, from-scratch, **branding-agnostic** language runtime in
 **standard-library-only [Odin](https://odin-lang.org/)**, whose default profile is
 a reimplementation of **Lua 5.5.1**.
 
-The goal is *correctness first*: an implementation whose observable behavior matches
-reference Lua as closely as we can make it — same language semantics, same garbage
-collection behavior (incremental + generational), and byte-compatible bytecode.
-Performance changes are measured against reference and must preserve correctness.
+The goal is *correctness first*: observable behavior that matches reference Lua
+as closely as we can make it — the same language semantics, the same garbage
+collection behavior (incremental and generational), and byte-compatible
+bytecode. Performance changes are measured against reference and must preserve
+correctness.
 
 The implementation is self-contained: no C source is vendored and we never link
 against reference Lua. Correctness is proved against the official PUC-Rio 5.5 test
 suite under [`tests/puc/`](tests/puc/), run verbatim. Differential and benchmark
-comparisons against a reference `lua`/`luac` binary are still supported — you point
-the scripts at a build of your own (see [BUILDING.md](BUILDING.md)).
+comparisons against a reference `lua`/`luac` you build yourself are supported
+(see [BUILDING.md](BUILDING.md)).
+
+## Status
+
+- The runtime and standard libraries pass the PUC-Rio suite and the unit tests
+  on Linux x86-64, in both interpreters, including forced stack relocation under
+  AddressSanitizer.
+- A tail-call-threaded interpreter is the default on amd64 and arm64; the switch
+  interpreter is used on other architectures and with `VM_THREADED=0`. The
+  threaded interpreter has been run only on Linux x86-64; Windows x64, Linux arm64
+  and macOS arm64 are cross-compiled but not yet run.
+- Against reference Lua 5.5.1 on Linux x86-64, the default executes no more
+  instructions than reference on simple calls, string building, tables, sorting,
+  local dates and number formatting. The largest remaining gaps are Lua patterns
+  (+34%), `os.getenv` (+26%), integer loops (+22%) and deep recursion (`fib`,
+  +16%). Measurements and plans are in [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md).
 
 ## Branding is a build-time choice
 
 Nothing in the source hardcodes the name of the language it implements. The
 kernel uses neutral subsystem names (`api_*`, `code_*`, `table_*`, `State`),
-and every user-visible name — the `_VERSION` string, the banner, the bytecode
-signature, the source-file extension, the environment-variable prefix, the
-`package.path` templates, the program names — is a `#config` constant in
+and every user-visible name — `_VERSION`, the banner, the bytecode signature, the
+source extension, the environment prefix, the `package.path` templates, the
+program names — is a `#config` constant in
 [`src/kernel/brand.odin`](src/kernel/brand.odin):
 
 ```sh
@@ -30,15 +46,8 @@ BRAND=moon ./build/build.sh all     # moon / moonc, _VERSION "Moon 5.5", *.moon
 ```
 
 The defaults reproduce Lua 5.5.1 exactly, so a plain build is the one the
-PUC-Rio suite validates. `build/rebrand-smoke.*` proves the other direction.
-See [BUILDING.md](BUILDING.md#branding) for every knob.
-
-## Status
-
-The runtime and standard libraries pass the PUC-Rio suite on Linux x86-64 in
-both VM modes, including relocation and sanitizer configurations. Other threaded
-targets still need runtime validation. See the project docs for the architecture,
-measurements and remaining work.
+PUC-Rio suite validates; `build/rebrand-smoke.*` checks the other direction. See
+[BUILDING.md](BUILDING.md#branding) for every knob.
 
 ## Layout
 
@@ -46,17 +55,19 @@ measurements and remaining work.
 src/        Our Odin implementation.
   kernel/   The kernel: one Odin package (the core is mutually recursive).
   stdlib/   Standard libraries, written against the public embedding API.
+  stream/   Hosted buffered streams shared by io and the programs.
   compiler/ The bytecode compiler/dumper (package main).
   main.odin The standalone interpreter/REPL (package main).
 tests/      Odin unit tests, plus the vendored PUC-Rio 5.5 suite under tests/puc.
+bench/      Benchmark harness and instruction-count probes.
 build/      Build/test scripts (tracked) and build output (ignored).
-docs/       Architecture and design notes.
+tools/      The threaded-VM generator and verification harnesses.
+docs/       Architecture notes and future work.
 ```
 
-For *why* the kernel is a single package and how error handling / coroutines use
-`longjmp` and explicit frames, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Planned
-work, mostly performance, and the measurements behind it are in
-[docs/FUTURE_WORK.md](docs/FUTURE_WORK.md).
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains why the kernel is one
+package, how errors and coroutines use `longjmp` and explicit frames, and how the
+threaded interpreter is generated from the switch.
 
 ## Building & testing
 
@@ -72,157 +83,57 @@ See [BUILDING.md](BUILDING.md). Quick version:
 .\build\test.ps1
 ```
 
-The tail-call-threaded VM is the default on amd64 and arm64; other architectures
-select the switch automatically. Set `VM_THREADED=0` for the switch in the
-wrappers, or pass `-define:VM_THREADED=false` to Odin directly. The threaded VM
-has been runtime-tested only on Linux x86-64; Windows x64, Linux arm64 and macOS
-arm64 were cross-compiled to objects but not run. See [BUILDING.md](BUILDING.md#interpreter-selection).
+`./build/build.sh freestanding` builds a relocatable bare-metal object with the
+kernel and the base, coroutine, math, string, table and utf8 libraries; the
+embedder supplies the allocator. See [BUILDING.md](BUILDING.md#freestanding-object).
 
 ## Interactive line editing
 
-When both standard input and standard output are terminals, the hosted `lua`
-REPL uses a native, libc-free editor. Windows uses `ReadConsoleInputW` key
-records; Linux uses the kernel termios/ioctl/read interfaces. Darwin and BSD
-currently fall back explicitly to the plain line reader because their terminal
-ABIs differ from Linux. Redirected input/output and `TERM=dumb` also use the
-plain reader.
-
-The editor supports Left/Right/Up/Down, Home, End, Delete, Backspace, Ctrl-A,
-Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W, and Ctrl-L. History is session-only and stores
-each complete logical statement, including continuation lines. Editing is
-horizontally scrolled within one physical row; the final terminal column is
-reserved to avoid ambiguous automatic wrapping.
-
-Lines are limited to 511 input bytes, matching `MAXINPUT`; additional input
-rings the terminal bell. The editor uses fixed storage while raw mode is active,
-so allocation failure cannot strand the terminal there. Tab is displayed as
-four spaces but remains one tab byte. Ctrl-D means EOF on an empty line and
-forward-delete otherwise. On Windows Ctrl-Z means EOF on an empty line and is
-ignored on a non-empty line.
-
-Movement and deletion preserve arbitrary bytes and operate on valid UTF-8 code
-points (an invalid byte is one editable unit). Control and invalid bytes are
-rendered visibly rather than executed. ASCII display and cursor placement are
-correct. General Unicode cell width is intentionally not claimed: without a
-`wcwidth`-style table, combining marks and wide characters can misplace the
-cursor during redraw.
-
-Terminal restoration is best-effort for every normal return, protected Lua
-error, `os.exit`, and hosted fatal exit. No program can restore terminal state
-after `SIGKILL`, Windows `TerminateProcess`, power loss, or an equivalent
-unrecoverable process termination.
-
-### Freestanding / bare metal
-
-Odin's native `ODIN_OS == .Freestanding` switch selects a bare-metal build
-automatically; there is no project-specific `-define:` to keep in sync. Build a
-relocatable object (not an executable) with:
-
-```sh
-./build/build.sh freestanding
-# or, on Windows:
-.\build\build.ps1 freestanding
-```
-
-This emits one `build/out/<brand>-freestanding.o` on Unix or
-`build/out/<brand>-freestanding.obj` on Windows (`lua-freestanding.*` by
-default) for `freestanding_amd64_sysv`.
-Set `FREESTANDING_TARGET` on Unix or pass
-`-FreestandingTarget` in PowerShell to choose another Odin freestanding target.
-The exact flags are `-target:<target> -no-crt -default-to-nil-allocator
--no-entry-point -build-mode:obj -use-single-module`.
-For Odin's `freestanding_amd64_win64` and `freestanding_amd64_mingw`
-subtargets the wrappers additionally set
-`-define:FREESTANDING_WIN64_ABI=true`; Odin exposes the freestanding OS
-automatically but currently exposes no compile-time sub-ABI value for the
-assembly jump shim.
-
-The current libc-free jump implementation supports amd64 (SysV and Win64 ABIs)
-and arm64. Odin's freestanding arm32, riscv64, wasm32, and wasm64p32 targets
-remain honest compile-time failures until `jmp_set`/`jmp_long` exist for those
-architectures. Odin also cannot currently produce a cross-compiled static
-library for freestanding amd64, so the supported deliverable is the object file.
-
-The object contains the kernel and base, coroutine, math, string, table, and
-utf8 libraries. `io`, `os`, `package`, the interactive debug library, the stream
-platform layer, and the two standalone programs are omitted because bare metal has
-no filesystem, environment, process, or terminal. Base therefore also omits
-`print`, `loadfile`, and `dofile`; `load` from memory remains available.
-
-There is deliberately no default allocator in this configuration. The embedder
-must provide a `kernel.Allocator` callback and userdata to `kernel.new_state`,
-plus any board-specific panic/reset behavior it needs. Odin's default allocator
-is set to nil so an accidental implicit Odin allocation cannot masquerade as a
-working heap.
-
-For object-file consumers, the artifact exports
-`lang_freestanding_newstate(alloc, ud)` and `lang_freestanding_close(L)`. The
-constructor rejects a nil callback and opens the freestanding library set.
+When standard input and output are both terminals, the hosted REPL uses a
+native, libc-free line editor on Windows and Linux (Darwin and the BSDs use the
+plain reader, as do redirected streams and `TERM=dumb`). It supports the arrow
+keys, Home, End, Delete, Backspace, Ctrl-A/E/K/U/W/L and session history of
+complete statements, edits UTF-8 code points, and limits lines to 511 bytes
+(`MAXINPUT`). Wide and combining characters can misplace the cursor, since no
+`wcwidth` table is used. The terminal is restored on every normal exit, error,
+`os.exit` and fatal exit, but not after `SIGKILL` or an equivalent.
 
 ## Intentional deviations from reference Lua
 
 Kept deliberately small and always documented:
 
 - **Native modules:** `require` / `package.loadlib` load **Odin-native** dynamic
-  modules instead of C `luaopen_*` modules (std-lib-only Odin has no C ABI loader).
-  Lua-source module loading works normally.
-- **Locale collation** falls back to byte order (no `strcoll`/`setlocale`).
-- **OS locale support is the C locale only.** `os.setlocale` accepts `"C"`,
-  `"POSIX"`, and `""`; other locale names return nil. Consequently
-  `os.date` uses fixed English C-locale names and C-locale `%c`/`%x`/`%X`
-  forms instead of the machine's localized names.
-- **OS error text** comes from Odin's `core:os`, so wording and capitalization
-  can differ from the C runtime's `strerror` text while the Lua result shape
-  remains `nil, message, code`.
-- **Number formatting uses a fixed C locale and platform rules, without libc.**
-  Linux follows glibc's signed NaNs, hexadecimal subnormals and `%a` modifiers.
-  Windows keeps the Lua C89 `%a` fallback and UCRT non-finite spellings; the
-  `%#g` leading-zero significant-digit bug is fixed on every target. Freestanding
-  uses the same fixed Windows-style rules. Apple and FreeBSD `vfprintf`/`__hdtoa`
-  source describes unsigned NaNs and normalized hexadecimal subnormals; NetBSD
-  suppresses NaN signs too, while OpenBSD retains them. Those BSD/macOS paths are
-  based on source reading, not runtime validation, and other libc details may
-  differ. Linux builds against a non-glibc libc still use the glibc rules. The
-  relevant source paths are [UCRT `cvt.cpp`](https://github.com/huangqinjin/ucrt/blob/master/convert/cvt.cpp),
-  [FreeBSD `vfprintf.c`](https://github.com/freebsd/freebsd-src/blob/main/lib/libc/stdio/vfprintf.c)
-  and [Apple `vfprintf.c`](https://github.com/apple-oss-distributions/Libc/blob/main/stdio/FreeBSD/vfprintf.c).
-- **Local time:** Windows uses the configured OS time zone and its DST
-  transition rules. Hosted POSIX targets read `TZ` (an absolute or
-  `:`-prefixed TZif path, a zone name under `TZDIR` or the usual zoneinfo
-  directories, or a POSIX rule such as `EST5EDT,M3.2.0,M11.1.0`) and otherwise
-  read `/etc/localtime`. TZif v1/v2/v3 transition tables, abbreviations, and
-  v2/v3 trailing rules are supported. POSIX rules support alphabetic or
-  `<quoted>` names, `hh[:mm[:ss]]` offsets, and `Jn`, `n`, or `Mm.w.d`
-  transitions with optional `/time`; DST strings without explicit transition
-  rules are rejected because POSIX leaves their default implementation-defined.
-  An unreadable or unsupported zone still falls back to UTC. For `os.time`, an
-  unspecified repeated hour chooses standard time, and an unspecified skipped
-  hour normalizes forward; an explicit `isdst` chooses that offset's side.
-  The parser is unit-tested from constructed byte images. Local-time round trips
-  and the PUC date tests have run on Linux; macOS end-to-end behavior remains
-  unvalidated.
-- **Transcendental functions may differ from the platform's libm in the last
-  bit.** `sin`, `cos`, `tan`, `exp` and `pow` are our own pure-Odin
-  implementations, checked against reference over 91,606 evaluations at a
-  worst case of 1 ulp. Platform libm implementations differ from each other by
-  about as much, and the PUC-Rio `math.lua` suite passes either way; the numbers
-  that Lua programs actually round-trip -- `tostring`, `%q`, `string.format` --
-  follow the platform formatting rules described above.
-- **`io.popen` is available on Windows and Linux without a C runtime.** Windows
-  uses anonymous KERNEL32 pipes and `cmd.exe /c`; Linux uses syscall-backed
-  pipes and `/bin/sh -c`. Other hosted targets retain Lua's explicit
-  `"'popen' not supported"` fallback until their process ABIs are implemented. Reference Lua permits this to fail, and it reports as much.
+  modules instead of C `luaopen_*` modules (standard-library-only Odin has no C
+  ABI loader). Lua-source modules load normally.
+- **Locale:** only the C locale. Collation is byte order, `os.setlocale` accepts
+  `"C"`, `"POSIX"` and `""`, and `os.date` uses C-locale names and formats.
+- **OS error text** comes from Odin's `core:os`, so wording can differ from
+  `strerror`; the result shape stays `nil, message, code`.
+- **Number formatting follows the platform's C library rules without linking
+  it.** Linux follows glibc (signed NaNs, hexadecimal subnormals, `%a`); Windows
+  and freestanding follow UCRT's spellings and Lua's C89 `%a` fallback; macOS and
+  the BSDs follow their `vfprintf` sources, which have not been run there. The
+  `%#g` leading-zero bug is fixed everywhere.
+- **Local time:** Windows uses the OS time zone. POSIX hosts read `TZ` (a TZif
+  path, a zone name under `TZDIR` or the usual zoneinfo directories, or a POSIX
+  rule) and otherwise `/etc/localtime`; TZif v1–v3 and POSIX rules with explicit
+  transitions are supported, and an unreadable zone falls back to UTC. For
+  `os.time`, an ambiguous repeated hour chooses standard time and a skipped hour
+  normalizes forward. Some edge cases differ from glibc; see
+  [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md). Local time has been checked
+  end to end on Linux only.
+- **Transcendental functions** (`sin`, `cos`, `tan`, `exp`, `pow`) are pure Odin
+  and may differ from the platform libm in the last bit; they were checked
+  against reference over 91,606 evaluations at a worst case of 1 ulp.
+- **`io.popen`** works on Windows and Linux without a C runtime; other hosted
+  targets report Lua's `"'popen' not supported"`, which reference permits.
 
-Two more, inherited from the platform rather than from our own choices:
-`files.lua` in the PUC-Rio suite stops on Windows at its `/dev/null` test, since
-that Unix device does not exist there and reference Lua fails identically — and
-on macOS it stops slightly later at `/dev/full`, which is a Linux-only device;
-only Linux runs that file to completion. The other is the `T` internal C test
-library the suite optionally uses, which is absent and which the suite itself
-handles. Both are covered in `tests/puc/README.md`.
+The PUC-Rio suite's `files.lua` stops at the `/dev/null` and `/dev/full` tests on
+Windows and macOS, as reference Lua does there, and the suite's optional internal
+`T` library is absent; see [tests/puc/README.md](tests/puc/README.md).
 
 ## License
 
 The PUC-Rio Lua test suite vendored under `tests/puc/` is distributed under Lua's
-MIT license; the full notice is reproduced in `tests/puc/README.md`. This
-reimplementation's license is TBD.
+MIT license; the full notice is in `tests/puc/README.md`. This reimplementation's
+license is TBD.
