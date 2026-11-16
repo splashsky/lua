@@ -8,6 +8,11 @@ import "core:thread"
 import kernel "lang:kernel"
 import stream "lang:stream"
 
+// flush_all affects every stream in the process. Keep tests that deliberately
+// buffer failing writes separate from the test that calls it repeatedly; the
+// worker threads inside that test still run concurrently with each other.
+stream_flush_test_mutex: sync.Mutex
+
 Stream_Error_Test :: struct {
 	barrier: sync.Barrier,
 	isolated: bool,
@@ -67,6 +72,8 @@ stream_test_reopen :: proc() -> bool {
 @(test)
 stream_concurrent_states :: proc(t: ^testing.T) {
 	when (ODIN_OS == .Windows || ODIN_OS == .Linux) && thread.IS_SUPPORTED {
+		sync.mutex_lock(&stream_flush_test_mutex)
+		defer sync.mutex_unlock(&stream_flush_test_mutex)
 		WORKERS :: 8
 		ITERATIONS :: 80
 		shared := stream.tmpfile()

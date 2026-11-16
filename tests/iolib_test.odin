@@ -8,6 +8,7 @@ package tests
 // Files are removed at the end of each chunk so the tests leave no residue.
 
 import "core:os"
+import "core:sync"
 import "core:testing"
 import kernel "lang:kernel"
 import stdlib "lang:stdlib"
@@ -261,6 +262,8 @@ io_error_paths :: proc(t: ^testing.T) {
 @(test)
 io_flush_device_errors :: proc(t: ^testing.T) {
 	when ODIN_OS == .Linux {
+		sync.mutex_lock(&stream_flush_test_mutex)
+		defer sync.mutex_unlock(&stream_flush_test_mutex)
 		if !os.exists("/dev/null") || !os.exists("/dev/full") {
 			return
 		}

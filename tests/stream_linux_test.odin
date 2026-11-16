@@ -3,12 +3,16 @@
 package tests
 
 import "core:os"
+import "core:sync"
 import "core:testing"
+import "core:thread"
 import linux "core:sys/linux"
 import stream "lang:stream"
 
 @(test)
 stream_failed_flush_paths :: proc(t: ^testing.T) {
+	sync.mutex_lock(&stream_flush_test_mutex)
+	defer sync.mutex_unlock(&stream_flush_test_mutex)
 	if !os.exists("/dev/full") || !os.exists("/dev/null") {
 		return
 	}
@@ -85,6 +89,8 @@ stream_failed_flush_paths :: proc(t: ^testing.T) {
 
 @(test)
 stream_partial_flush_discards_whole_buffer :: proc(t: ^testing.T) {
+	sync.mutex_lock(&stream_flush_test_mutex)
+	defer sync.mutex_unlock(&stream_flush_test_mutex)
 	// A nonblocking pipe accepts a partial write and then returns EAGAIN. After
 	// draining its accepted prefix, a second flush must not resend the tail.
 	fds: [2]linux.Fd
@@ -136,4 +142,36 @@ stream_partial_flush_discards_whole_buffer :: proc(t: ^testing.T) {
 	testing.expect(t, stream.write(s, []u8{'z'}) == 1 && stream.flush(s))
 	n, read_err = os.read(reader, data[:int(capacity)])
 	testing.expect(t, read_err == nil && n == 1 && data[0] == 'z', "only new data reaches the pipe")
+}
+
+Stream_Flush_Observation :: struct {
+	ok:  bool,
+	err: os.Error,
+}
+
+@(test)
+stream_flush_all_reports_other_stream_failure :: proc(t: ^testing.T) {
+	when thread.IS_SUPPORTED {
+		sync.mutex_lock(&stream_flush_test_mutex)
+		defer sync.mutex_unlock(&stream_flush_test_mutex)
+		if !os.exists("/dev/full") do return
+		s := stream.open("/dev/full", "w")
+		if !testing.expect(t, s != nil, "open /dev/full") do return
+		defer stream.close(s)
+		testing.expect(t, stream.write(s, []u8{'x'}) == 1)
+		observation: Stream_Flush_Observation
+		flusher := thread.create(proc(th: ^thread.Thread) {
+			result := (^Stream_Flush_Observation)(th.data)
+			stream.clear_error()
+			result.ok = stream.flush_all()
+			result.err = stream.last_error()
+		})
+		flusher.data = &observation
+		thread.start(flusher)
+		thread.destroy(flusher)
+		code, ok := os.is_platform_error(observation.err)
+		testing.expect(t, !observation.ok && ok && code == 28, "global flush reports the other stream's ENOSPC")
+		testing.expect(t, stream.ferror(s), "global flush sets the stream error")
+		testing.expect(t, stream.flush(s), "failed global flush discarded the pending bytes")
+	}
 }
