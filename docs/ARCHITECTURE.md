@@ -29,6 +29,21 @@ until you know why they are the way they are.
                 +------------------------------------+
 ```
 
+### Hosted buffered streams
+
+The hosted I/O library shares `src/stream/` with the command-line programs.
+Each stream serializes operations with its own mutex; `flush_all` pins streams
+from a separately locked process-wide list before taking their mutexes. It can
+therefore flush a different state's stream between two public operations. EOF
+and error indicators are atomic, and the last OS error is thread-local.
+
+Bulk delimiter reads copy ordinary bytes, including the delimiter, while holding
+the stream mutex and update position and pushback cookies as `getc` would.
+Windows text translation still handles CRLF, Ctrl-Z, and saved lookahead. For
+lines and bounded reads that fit the Lua buffer's initial scratch area, the I/O
+library retains its stack placeholder through string creation and replaces it
+with the result; longer reads retain the growable, to-be-closed buffer path.
+
 ## Decision 1 — the kernel is a *single* Odin package
 
 In C, Lua's kernel is a pile of `.c`/`.h` files that freely `#include` one another:
