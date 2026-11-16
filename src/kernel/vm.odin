@@ -2304,6 +2304,82 @@ when VM_THREADED {
 		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
 	}
 
+	vm_thread_geti_slow :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		context = ctx^
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		ra := base + getarg_A(i)
+		rb := &regs[getarg_B(i)].val
+		vm_geti(L, ci_idx, vm_pc_index(pc, code), rb, Integer(getarg_C(i)), ra)
+		trap = L.frames[ci_idx].u.l.trap
+
+		if trap != 0 {
+			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		next_i := pc[0]
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}
+
+	vm_thread_seti_slow :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		context = ctx^
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		ra := &regs[getarg_A(i)].val
+		rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+		vm_seti(L, ci_idx, vm_pc_index(pc, code), ra, Integer(getarg_B(i)), rc)
+		trap = L.frames[ci_idx].u.l.trap
+
+		if trap != 0 {
+			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		next_i := pc[0]
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}
+
+	vm_thread_seti_collect :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
+		pc := pc_arg
+		regs := regs_arg
+		cl := cl_arg
+		k := cl.p.k
+		code := code_arg
+		base := int((uintptr(regs) - uintptr(L.stack)) / size_of(StackValue))
+		ci_idx := ci_idx_arg
+		trap := trap_arg
+		i := i_arg
+		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
+		ra := &regs[getarg_A(i)].val
+		rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+		h := (^Table)(ra.value_.gc)
+		if (is_black(obj2gco(h)) && keepinvariant(L.g)) || table_fastseti(h, Integer(getarg_B(i)), rc) != HOK {
+			return #must_tail vm_thread_seti_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+
+		if trap != 0 {
+			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		next_i := pc[0]
+		pc = vm_pc_add(pc, 1)
+		return #must_tail vm_thread_table[int(get_opcode(next_i))](L, pc, regs, cl, code, ci_idx, trap, ctx, next_i)
+	}
+
 	vm_thread_settable_slow :: #force_no_inline proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
 		pc := pc_arg
 		regs := regs_arg
@@ -2774,7 +2850,6 @@ when VM_THREADED {
 	}
 
 	vm_thread_GETI :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
-		context = ctx^
 		pc := pc_arg
 		regs := regs_arg
 		cl := cl_arg
@@ -2785,11 +2860,10 @@ when VM_THREADED {
 		trap := trap_arg
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
-		ra := base + getarg_A(i)
-		rb := stack_value(L, base + getarg_B(i))
-		vm_geti(L, ci_idx, vm_pc_index(pc, code), rb, Integer(getarg_C(i)), ra)
-		trap = L.frames[ci_idx].u.l.trap
-
+		rb := &regs[getarg_B(i)].val
+		if base_type(rb) != TTABLE || tag_is_empty(table_fastgeti((^Table)(rb.value_.gc), Integer(getarg_C(i)), &regs[getarg_A(i)].val)) {
+			return #must_tail vm_thread_geti_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
 
 		if trap != 0 {
 			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
@@ -2907,7 +2981,6 @@ when VM_THREADED {
 	}
 
 	vm_thread_SETI :: proc "preserve/none" (L: ^State, pc_arg: [^]Instruction, regs_arg: [^]StackValue, cl_arg: ^LClosure, code_arg: [^]Instruction, ci_idx_arg: int, trap_arg: i32, ctx: ^runtime.Context, i_arg: Instruction) -> i32 {
-		context = ctx^
 		pc := pc_arg
 		regs := regs_arg
 		cl := cl_arg
@@ -2918,11 +2991,17 @@ when VM_THREADED {
 		trap := trap_arg
 		i := i_arg
 		_ = pc; _ = regs; _ = cl; _ = k; _ = code; _ = base; _ = ci_idx; _ = trap; _ = i
-		ra := stack_value(L, base + getarg_A(i))
-		rc := vm_rkc(L, base, k, i)
-		vm_seti(L, ci_idx, vm_pc_index(pc, code), ra, Integer(getarg_B(i)), rc)
-		trap = L.frames[ci_idx].u.l.trap
-
+		ra := &regs[getarg_A(i)].val
+		rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+		if base_type(ra) != TTABLE {
+			return #must_tail vm_thread_seti_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		if is_collectable(rc) {
+			return #must_tail vm_thread_seti_collect(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
+		if table_fastseti((^Table)(ra.value_.gc), Integer(getarg_B(i)), rc) != HOK {
+			return #must_tail vm_thread_seti_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+		}
 
 		if trap != 0 {
 			return #must_tail vm_thread_trace(L, pc, regs, cl, code, ci_idx, trap, ctx, i)

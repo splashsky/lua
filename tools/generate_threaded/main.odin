@@ -121,6 +121,7 @@ emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	   name == "vm_thread_gettabup_generic" || name == "vm_thread_settable_slow" ||
 	   name == "vm_thread_settable_str" || name == "vm_thread_settable_collect" ||
 	   name == "vm_thread_settable_general" ||
+	   name == "vm_thread_geti_slow" || name == "vm_thread_seti_slow" || name == "vm_thread_seti_collect" ||
 	   name == "vm_thread_concat_meta_op" {
 		noinline = "#force_no_inline "
 	}
@@ -162,7 +163,9 @@ rewrite_returns :: proc(s: string, count: ^int) -> string {
 generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src, string_src, mem_src, gc_run_src: string) -> string {
 	review(between(src, "vm_finishget :: proc", "// The VM's table read"), "cff1bbd520882786832a21ed0384f86465f24b06c3359529b1c33691aaac40cf", "vm_finishget")
 	review(between(src, "vm_gettable :: proc(", "\n// OP_GETI"), "ec9fd4cce26c455e29ebb7114d3d5d3afb0778e5210a77e0cebde1f4ac98b628", "vm_gettable")
+	review(between(src, "vm_geti :: #force_inline proc", "// Finish `t[key]"), "e8175bba83c6513e77e7376f03a7782384964eda72bd6b8cae59c0e8713e9d8b", "vm_geti")
 	review(between(src, "vm_settable :: proc(", "// OP_SETI"), "a1d4edb3b18fe00ac7cdd73b9d337146a3fd483f85f51fe791975d69cf929b77", "vm_settable")
+	review(between(src, "vm_seti :: #force_inline proc", "// ---------------------------------------------------------------------------\n// Length"), "e5368f3f920dd3090fe5515a86cf557df4167612d1e9c3a76cdeca4ab380e9d5", "vm_seti")
 	review(between(src, "vm_objlen :: proc", "// Convert a number"), "6dce8953407021af089dcb4488b6b4405f3188d3adaef914be3d5623322f4a5f", "vm_objlen")
 	review(between(src, "object_tostring :: proc", "// ---------------------------------------------------------------------------\n// Closures"), "02bc30ebd9b6ec705ede7d28d63829ed0df6563821592934cb8ce452d774de3c", "concatenation helpers")
 	review(between(string_src, "growstrtab :: proc", "// Create a string from an Odin string value."), "edf12cbe60c3a58895cf9f46c0fc2cb894d1fb258a2ed1a6faa1d7201f419dc2", "string creation")
@@ -241,6 +244,8 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src, 
 			review(dedent(bodies[i]), "d8aabd0aa23242e61c456baa9df849155350805909c659141b91f482c0d7c764", name)
 		case "GETTABUP":
 			review(dedent(bodies[i]), "f138ebbf35d575849526c5754224da633e610e4c28a60c07d87c43ecba0673de", name)
+		case "GETI":
+			review(dedent(bodies[i]), "d0bd52a1b573b15681b81234a6e362ea7b8c18198102310f721c8387f50d92f9", name)
 		case "SETTABUP":
 			review(dedent(bodies[i]), "7eb8ea70cc4784d8da02246440e789cbc8583026e45ed7d6cf5fd7c58250f913", name)
 		case "GETFIELD":
@@ -249,6 +254,8 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src, 
 			review(dedent(bodies[i]), "39e424fc0fd75088480a9c666127dbe3c61276c95fd545dfaa3fc87ad7f390ee", name)
 		case "SETTABLE":
 			review(dedent(bodies[i]), "e0f68192d60522d4f6fec4cef9ed4ef830f01d593f34ff16e3486ea754471c4f", name)
+		case "SETI":
+			review(dedent(bodies[i]), "8595bb869920097e3db285b89381b9b06515928cd886d33cd4605829975d9080", name)
 		case "CONCAT":
 			review(dedent(bodies[i]), "77a16174a48fbd411dcdc831220bf7e79b3c1bf6a6aa6215f52935f4d1882155", name)
 		case "SELF":
@@ -342,6 +349,23 @@ if tag_is_empty(table_get((^Table)(rb.value_.gc), rc, &regs[getarg_A(i)].val)) {
 	return #must_tail vm_thread_gettable_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 }
 `, dispatch), true)
+	emit_proc(&b, "vm_thread_geti_slow", fmt.tprintf("%s\n%s", `ra := base + getarg_A(i)
+rb := &regs[getarg_B(i)].val
+vm_geti(L, ci_idx, vm_pc_index(pc, code), rb, Integer(getarg_C(i)), ra)
+trap = L.frames[ci_idx].u.l.trap
+`, dispatch))
+	emit_proc(&b, "vm_thread_seti_slow", fmt.tprintf("%s\n%s", `ra := &regs[getarg_A(i)].val
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+vm_seti(L, ci_idx, vm_pc_index(pc, code), ra, Integer(getarg_B(i)), rc)
+trap = L.frames[ci_idx].u.l.trap
+`, dispatch))
+	emit_proc(&b, "vm_thread_seti_collect", fmt.tprintf("%s\n%s", `ra := &regs[getarg_A(i)].val
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+h := (^Table)(ra.value_.gc)
+if (is_black(obj2gco(h)) && keepinvariant(L.g)) || table_fastseti(h, Integer(getarg_B(i)), rc) != HOK {
+	return #must_tail vm_thread_seti_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`, dispatch), true)
 	// Keep ordinary ABI calls off the array and integer-hash write paths.
 	emit_proc(&b, "vm_thread_settable_slow", fmt.tprintf("%s\n%s", `ra := &regs[getarg_A(i)].val
 rb := &regs[getarg_B(i)].val
@@ -432,6 +456,13 @@ if is_integer(rc) {
 }
 `
 		}
+		if name == "GETI" {
+			body = `rb := &regs[getarg_B(i)].val
+if base_type(rb) != TTABLE || tag_is_empty(table_fastgeti((^Table)(rb.value_.gc), Integer(getarg_C(i)), &regs[getarg_A(i)].val)) {
+	return #must_tail vm_thread_geti_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`
+		}
 		if name == "SETTABLE" {
 			body = `ra := &regs[getarg_A(i)].val
 rb := &regs[getarg_B(i)].val
@@ -459,6 +490,20 @@ if Unsigned(key) - 1 >= Unsigned(h.asize) {
 	}
 } else if table_fastseti(h, key, rc) != HOK {
 	return #must_tail vm_thread_settable_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`
+		}
+		if name == "SETI" {
+			body = `ra := &regs[getarg_A(i)].val
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+if base_type(ra) != TTABLE {
+	return #must_tail vm_thread_seti_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+if is_collectable(rc) {
+	return #must_tail vm_thread_seti_collect(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+if table_fastseti((^Table)(ra.value_.gc), Integer(getarg_B(i)), rc) != HOK {
+	return #must_tail vm_thread_seti_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
 }
 `
 		}
@@ -676,7 +721,7 @@ trap = L.frames[ci_idx].u.l.trap
 			terminal = true
 		}
 		if !terminal {body = fmt.tprintf("%s%s", body, dispatch)}
-		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "SETTABLE" || name == "SELF" || name == "CALL" || name == "LEN" || name == "CONCAT" || name == "MODK" || name == "IDIVK")
+		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "GETI" || name == "SETTABLE" || name == "SETI" || name == "SELF" || name == "CALL" || name == "LEN" || name == "CONCAT" || name == "MODK" || name == "IDIVK")
 	}
 	if transitions != 6 || returns != 4 {fail(fmt.tprintf("unexpected frame transitions: %d, returns: %d", transitions, returns))}
 	emit_proc(&b, "vm_thread_invalid", fmt.tprintf("%s\n%s", dedent(invalid), dispatch))

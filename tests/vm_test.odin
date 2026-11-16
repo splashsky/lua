@@ -469,6 +469,60 @@ vm_variable_table_reads :: proc(t: ^testing.T) {
 	testing.expect(t, kernel.api_toboolean(L, -1))
 }
 
+// Immediate integer access covers array and hash hits, holes, aliased result
+// registers, barrier-requiring values and yielding integer metamethods.
+@(test)
+vm_immediate_integer_table_access :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local t = {42}
+		local alias = t
+		alias = alias[1]
+		assert(alias == 42)
+		t[0] = 9; t[255] = 10
+		assert(t[0] == 9 and t[255] == 10)
+		t[1] = nil; assert(t[1] == nil)
+		t[1] = 7; assert(t[1] == 7)
+		for _, mode in ipairs({'incremental', 'generational'}) do
+		  collectgarbage(mode)
+		  collectgarbage('collect')
+		  for i = 1, 100 do
+		    t[1] = {i}
+		    collectgarbage('step')
+		    assert(t[1][1] == i)
+		  end
+		end
+		local mt = {
+		  __index = function(_, k) coroutine.yield('get', k); collectgarbage('collect'); return 81 end,
+		  __newindex = function(tab, k, v)
+		    coroutine.yield('set', k, v); collectgarbage('collect'); rawset(tab, k, v)
+		  end,
+		}
+		local tab = setmetatable({}, mt)
+		local get = coroutine.create(function() return tab[2] end)
+		local ok, what, key = coroutine.resume(get)
+		assert(ok and what == 'get' and key == 2)
+		local done, value = coroutine.resume(get)
+		assert(done and value == 81)
+		local child = {}
+		local put = coroutine.create(function() tab[2] = child; return tab[2] end)
+		local ok2, what2, key2, seen = coroutine.resume(put)
+		assert(ok2 and what2 == 'set' and key2 == 2 and seen == child)
+		local done2, result = coroutine.resume(put)
+		assert(done2 and result == child)
+		assert(not pcall(function() local a = false; return a[1] end))
+		assert(not pcall(function() local a = false; a[1] = 1 end))
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
 // SETTABLE also handles integer-hash and non-string hash keys. Its cold
 // fallbacks must preserve the key and value across a yielding __newindex.
 @(test)
