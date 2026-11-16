@@ -10,13 +10,14 @@
 #     ./build/build.sh all              # the default Lua 5.5.1 profile
 #     BRAND=moon ./build/build.sh all   # a `moon`/`.moon`/`MOON_*` build
 #
-# BRAND=lua (the default) deliberately emits *no* defines at all, so the default
-# build is byte-for-byte the one the PUC-Rio suite validates.
+# BRAND=lua (the default) deliberately emits no branding defines, so the
+# default brand is the one the PUC-Rio suite validates.
 #
 # Individual knobs can still be overridden: BRAND_DISPLAY, SOURCE_EXT,
-# ENV_PREFIX. VM_THREADED selects the interpreter in every wrapper: 1 for
-# threaded, 0 for switch, or unset for threaded on amd64/arm64 and switch
+# ENV_PREFIX. VM_THREADED selects the interpreter in single-mode wrappers: 1
+# for threaded, 0 for switch, or unset for threaded on amd64/arm64 and switch
 # elsewhere. Forcing threaded on an unsupported architecture is rejected.
+# check.sh and vm-compare.sh explicitly handle both modes.
 #
 # Source this file, then use $BRAND_DEFINES (an array), $BRAND_EXE and
 # $BRAND_COMPILER_EXE.

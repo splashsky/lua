@@ -89,9 +89,11 @@ VM_THREADED=0 bash build/rebrand-smoke.sh
 VM_THREADED=0 bash build/build.sh freestanding
 ```
 
-All wrappers accept `VM_THREADED=1` for threaded and `VM_THREADED=0` for switch;
-unset it to use the architecture-dependent default. Any other value, including
-an empty value, is rejected. On Windows set `$env:VM_THREADED = '1'` or `'0'`,
+Single-mode build and test wrappers accept `VM_THREADED=1` for threaded and
+`VM_THREADED=0` for switch; unset it to use the architecture-dependent default.
+`build/check.*` checks both modes and `build/vm-compare.sh` builds both modes
+explicitly. Any other value, including an empty value, is rejected. On Windows
+set `$env:VM_THREADED = '1'` or `'0'`,
 or remove it with `Remove-Item Env:VM_THREADED`. For direct Odin commands use
 `-define:VM_THREADED=true` or `-define:VM_THREADED=false`. The PUC wrapper gives
 explicitly selected binaries distinct `-threaded` or `-switch` names, including
@@ -158,8 +160,8 @@ BRAND=moon ./build/build.sh all       # moon, moonc
 .\build\build.ps1 all -Brand moon     # moon.exe, moonc.exe
 ```
 
-`-Brand lua` (the default) passes **no** defines at all, so the default build is
-bit-for-bit the configuration the PUC-Rio suite validates. `-Display`,
+`-Brand lua` (the default) passes no branding defines, so the default brand is
+the configuration the PUC-Rio suite validates. `-Display`,
 `-SourceExt` and `-EnvPrefix` (`BRAND_DISPLAY`, `SOURCE_EXT`, `ENV_PREFIX` on
 Unix) override individual knobs.
 

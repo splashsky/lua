@@ -9,14 +9,14 @@
         .\build\build.ps1 all                 # the default Lua 5.5.1 profile
         .\build\build.ps1 all -Brand moon     # a `moon`/`.moon`/`MOON_*` build
 
-    `-Brand lua` (the default) deliberately emits *no* defines at all, so the
-    default build is byte-for-byte the one the PUC-Rio suite validates.
+    `-Brand lua` (the default) deliberately emits no branding defines, so the
+    default brand is the one the PUC-Rio suite validates.
 
     Individual knobs can still be overridden for full control, e.g.
-    `-Brand moon -SourceExt .mn`. Every wrapper also reads $env:VM_THREADED:
+    `-Brand moon -SourceExt .mn`. Single-mode wrappers read $env:VM_THREADED:
     '1' selects threaded, '0' selects switch, and unset selects threaded on
     amd64/arm64 and switch elsewhere. Other values and unsupported forced
-    threaded builds are rejected.
+    threaded builds are rejected. check.ps1 checks both modes explicitly.
 #>
 
 # The -define: flags for a brand, or an empty array for the default profile.
