@@ -338,14 +338,20 @@ floating-point loops use the ordinary path. The call-hook work at frame entry
 is separated from the no-hook path, with the same base refresh after the hook.
 These rewrites are guarded by the generator.
 
-The threaded CALL handler specializes non-allocating Lua-closure and native
-frame setup. Native call hooks, growth and `__call` remain out of line. A native
-callback can relocate both stacks or install hooks, so its frame is re-derived
-after the call; return hooks, to-be-closed values and result counts other than
-zero or one use the ordinary post-call path. Relocation test mode routes all
-calls through the ordinary helper so its forced moves still happen. The
-specialized helpers are in `vm_threaded_fast.odin`: keeping them out of
-`vm.odin` also avoids a measured switch-VM code-placement regression.
+The threaded CALL handler specializes non-allocating Lua-closure frame setup;
+native calls, growth and `__call` tail-transition to separate handlers so their
+callouts cannot force spills in the Lua path. A freshly initialized Lua frame
+can reuse the already loaded prototype's code for its first entry: no callout
+or relocation occurs between setup and that entry. Hooked calls use the
+ordinary entry instead. Native call hooks and growth remain out of line. Native
+setup retains the encoded CALL result count and captures the caller's frame
+index before the callback; the callback may relocate either stack or install
+hooks, so frames are resolved again afterward. Return hooks, to-be-closed
+values and result counts other than zero or one use the ordinary post-call
+path. Relocation test mode routes all calls through the ordinary helper so its
+forced moves still happen. The specialized helpers are in
+`vm_threaded_fast.odin`: keeping them out of `vm.odin` also avoids a measured
+switch-VM code-placement regression.
 
 Threaded `RETURN0` and `RETURN1` keep their no-hook result movement in the hot
 handler. A pending interrupt or active hook tail-transitions to a separate copy
