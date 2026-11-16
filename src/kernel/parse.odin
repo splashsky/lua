@@ -173,7 +173,9 @@ Dyndata :: struct {
 //
 // `BlockCnt` tracks one lexical block on a stack rooted at `FuncState.bl`; it
 // snapshots the label/goto/variable counts at block entry so scope exit can
-// resolve gotos. Links are removed before return; errors abandon parser state.
+// restore them and resolve gotos. Callers unlink their stack-allocated blocks
+// and function states before returning; an error abandons the whole parser
+// state, which cleanup never reads. Defined in reference Lua's `lparser.c`.
 BlockCnt :: struct {
 	previous:  ^BlockCnt, // enclosing block
 	firstlabel: int, // index of first label in this block
