@@ -424,6 +424,17 @@ allocation types need at most 8-byte alignment. Typical 32-bit heaps provide at
 least 8 bytes, but the kernel's layout assertions currently require 64-bit
 targets. Freestanding builds use only the embedder's allocator.
 
+On hosted Linux with libc, `os.getenv` passes the rooted, NUL-terminated Lua
+argument directly to the host and copies its result into Lua before the GC
+check. Windows and no-CRT builds retain the scoped host-string lookup. Linux
+local date and table-to-time conversions share a bounded static timezone cache:
+a mutex protects its TZif image, POSIX rule and last transition range. The
+current `TZ` is compared on every call; when it is unset, the site default is
+re-statted. Unusually large inputs fall back to the scoped loader. No Lua call
+runs with the mutex held, and zone names are copied before unlocking. This
+storage has process lifetime without a per-state allocation or leak. Other
+hosts retain their existing timezone paths; freestanding excludes the OS library.
+
 On 64-bit targets an `UpVal` is 48 bytes. Its body overlays the open-list links
 with the closed `TValue`; open upvalues retain a thread and full-width index,
 not a movable stack pointer. An `LClosure` has a 32-byte header followed by
