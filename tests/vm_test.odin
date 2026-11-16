@@ -389,6 +389,89 @@ vm_global_read_non_string_constant :: proc(t: ^testing.T) {
 	testing.expect_value(t, kernel.api_tointeger(fx.L, -1), 42)
 }
 
+// Global writes also retain non-string keys in unvalidated bytecode.
+@(test)
+vm_global_write_non_string_constant :: proc(t: ^testing.T) {
+	fx: Parse_Fixture
+	status := compile(&fx, "answer = 42")
+	defer teardown_parser(&fx)
+	testing.expect_value(t, status, kernel.Thread_Status.Ok)
+	if status != .Ok do return
+	p := main_proto(&fx)
+	found := false
+	for i in 0 ..< p.sizecode {
+		if kernel.get_opcode(p.code[i]) == .SETTABUP {
+			kernel.set_int(&p.k[kernel.getarg_B(p.code[i])], 7)
+			found = true
+			break
+		}
+	}
+	testing.expect(t, found)
+	if !found do return
+	kernel.func_initupvals(fx.L, fx.cl)
+	tab := kernel.table_new(fx.L)
+	kernel.set_table(kernel.upval_value(kernel.closure_upvals(fx.cl)[0]), tab)
+	testing.expect_value(t, kernel.api_pcall(fx.L, 0, 0, 0), kernel.Thread_Status.Ok)
+	value: kernel.TValue
+	testing.expect(t, !kernel.tag_is_empty(kernel.table_getint(tab, 7, &value)))
+	testing.expect_value(t, kernel.int_value(&value), 42)
+}
+
+// The global-write fast path must retain GC barriers and the original
+// yielding __newindex path for empty keys and non-table environments.
+@(test)
+vm_global_writes_and_yield :: proc(t: ^testing.T) {
+	L := pkg_state()
+	defer kernel.close_state(L)
+	status := pkg_run(L, `
+		local function closed(env)
+		  local _ENV = env
+		  return function(value) answer = value; return answer end
+		end
+		local function open(env)
+		  local _ENV = env
+		  local function write() answer = 12 end
+		  write(); return answer
+		end
+		assert(open({}) == 12)
+		assert(not pcall(closed(false), 1))
+		for _, mode in ipairs({'incremental', 'generational'}) do
+		  collectgarbage(mode)
+		  local env, write = {}, nil
+		  write = closed(env)
+		  assert(write(42) == 42)
+		  collectgarbage('collect')
+		  for i = 1, 100 do
+		    local child = {i}
+		    assert(write(child) == child)
+		    collectgarbage('step')
+		    assert(env.answer[1] == i)
+		  end
+		  assert(write(nil) == nil and write(7) == 7)
+		end
+		local env = setmetatable({}, {__newindex = function(tab, k, v)
+		  coroutine.yield(k, v)
+		  collectgarbage('collect')
+		  rawset(tab, k, v)
+		end})
+		local child = {}
+		local co = coroutine.create(function() return closed(env)(child) end)
+		local hooks = 0
+		debug.sethook(co, function() hooks = hooks + 1 end, '', 1)
+		local ok, key, value = coroutine.resume(co)
+		assert(ok and key == 'answer' and value == child)
+		local done, result = coroutine.resume(co)
+		assert(done and result == child and env.answer == child and hooks > 0)
+		return true
+	`)
+	if status != .Ok {
+		msg, _ := kernel.api_tolstring(L, -1)
+		testing.expectf(t, false, "chunk failed: %s", msg)
+		return
+	}
+	testing.expect(t, kernel.api_toboolean(L, -1))
+}
+
 // Float FORLOOP uses the current register base, including after calls in its
 // body. Exercise both directions and unordered/infinite arithmetic too.
 @(test)

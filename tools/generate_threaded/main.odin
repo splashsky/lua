@@ -122,6 +122,7 @@ emit_proc :: proc(b: ^strings.Builder, name, body: string, scoped := false) {
 	   name == "vm_thread_settable_str" || name == "vm_thread_settable_collect" ||
 	   name == "vm_thread_settable_general" ||
 	   name == "vm_thread_geti_slow" || name == "vm_thread_seti_slow" || name == "vm_thread_seti_collect" ||
+	   name == "vm_thread_settabup_slow" || name == "vm_thread_settabup_collect" || name == "vm_thread_settabup_finish" ||
 	   name == "vm_thread_concat_meta_op" {
 		noinline = "#force_no_inline "
 	}
@@ -291,7 +292,7 @@ generate :: proc(src, opcode_src, do_src, state_src, tm_src, table_src, gc_src, 
 	dispatch := fmt.tprintf("if trap != 0 {{\n\treturn #must_tail vm_thread_trace(%s)\n}}\n%s", ARGS, next)
 	b := strings.builder_make()
 	strings.write_string(&b, MARKER)
-	strings.write_string(&b, "// Do not edit this region; edit the switch and regenerate.\nwhen VM_THREADED {\n\t#assert(ODIN_ARCH == .amd64 || ODIN_ARCH == .arm64)\n")
+	strings.write_string(&b, "// Do not edit this region; edit the switch and regenerate.\nwhen VM_THREADED {\n\t#assert(ODIN_ARCH == .amd64 || ODIN_ARCH == .arm64)\n\t#assert(MAXHSIZE - 1 + uint(HFIRSTNODE) <= uint(max(i32)))\n")
 	fmt.sbprintf(&b, "\tVM_Thread_Handler :: proc \"preserve/none\" %s\n\tvm_thread_table := [1 << SIZE_OP]VM_Thread_Handler{{\n", SIG)
 	for name in names {fmt.sbprintf(&b, "\t\tvm_thread_%s,\n", name)}
 	for _ in len(names)..<128 {strings.write_string(&b, "\t\tvm_thread_invalid,\n")}
@@ -328,6 +329,35 @@ trap = vm_thread_getslow(L, ci_idx, vm_pc_index(pc, code), upval, rc, ra, ctx)
 rc := &k[getarg_C(i)]
 if !vm_thread_tryget(upval, rc, &regs[getarg_A(i)].val) {
 	return #must_tail vm_thread_gettabup_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`, dispatch), true)
+	emit_proc(&b, "vm_thread_settabup_slow", fmt.tprintf("%s\n%s", `upval := upval_value(closure_upvals(cl)[getarg_A(i)])
+rb := &k[getarg_B(i)]
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+#force_inline vm_settable(L, ci_idx, vm_pc_index(pc, code), upval, rb, rc)
+trap = L.frames[ci_idx].u.l.trap
+`, dispatch))
+	// An unfinished short-string pre-set has a nonnegative hash location. Pass
+	// it in the trap argument; the original setter reloads the trap after the
+	// finish call even when the latter returns without invoking Lua.
+	emit_proc(&b, "vm_thread_settabup_finish", fmt.tprintf("%s\n%s", `upval := upval_value(closure_upvals(cl)[getarg_A(i)])
+rb := &k[getarg_B(i)]
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+L.frames[ci_idx].u.l.savedpc = vm_pc_index(pc, code)
+L.top = L.frames[ci_idx].top
+vm_finishset(L, upval, rb, rc, int(trap))
+trap = L.frames[ci_idx].u.l.trap
+`, dispatch))
+	emit_proc(&b, "vm_thread_settabup_collect", fmt.tprintf("%s\n%s", `upval := upval_value(closure_upvals(cl)[getarg_A(i)])
+rb := &k[getarg_B(i)]
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+h := (^Table)(upval.value_.gc)
+if is_black(obj2gco(h)) && keepinvariant(L.g) {
+	return #must_tail vm_thread_settabup_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+hres := table_psetshortstr(h, str_value(rb), rc)
+if hres != HOK {
+	return #must_tail vm_thread_settabup_finish(L, pc, regs, cl, code, ci_idx, i32(hres), ctx, i)
 }
 `, dispatch), true)
 	// The hot GETTABLE handler tail-transitions to these cold paths, so the
@@ -426,6 +456,23 @@ if type_tag(rc) != VSHRSTR {
 }
 if tag_is_empty(table_getshortstr((^Table)(upval.value_.gc), str_value(rc), &regs[getarg_A(i)].val)) {
 	return #must_tail vm_thread_gettabup_miss(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+`
+		}
+		if name == "SETTABUP" {
+			body = `upval := upval_value(closure_upvals(cl)[getarg_A(i)])
+rb := &k[getarg_B(i)]
+rc := &k[getarg_C(i)] if testarg_k(i) != 0 else &regs[getarg_C(i)].val
+if base_type(upval) != TTABLE || type_tag(rb) != VSHRSTR {
+	return #must_tail vm_thread_settabup_slow(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+h := (^Table)(upval.value_.gc)
+if is_collectable(rc) {
+	return #must_tail vm_thread_settabup_collect(L, pc, regs, cl, code, ci_idx, trap, ctx, i)
+}
+hres := table_psetshortstr(h, str_value(rb), rc)
+if hres != HOK {
+	return #must_tail vm_thread_settabup_finish(L, pc, regs, cl, code, ci_idx, i32(hres), ctx, i)
 }
 `
 		}
@@ -721,7 +768,7 @@ trap = L.frames[ci_idx].u.l.trap
 			terminal = true
 		}
 		if !terminal {body = fmt.tprintf("%s%s", body, dispatch)}
-		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "GETI" || name == "SETTABLE" || name == "SETI" || name == "SELF" || name == "CALL" || name == "LEN" || name == "CONCAT" || name == "MODK" || name == "IDIVK")
+		emit_proc(&b, fmt.tprintf("vm_thread_%s", name), body, name == "RETURN0" || name == "RETURN1" || name == "GETTABUP" || name == "SETTABUP" || name == "GETFIELD" || name == "GETTABLE" || name == "GETI" || name == "SETTABLE" || name == "SETI" || name == "SELF" || name == "CALL" || name == "LEN" || name == "CONCAT" || name == "MODK" || name == "IDIVK")
 	}
 	if transitions != 6 || returns != 4 {fail(fmt.tprintf("unexpected frame transitions: %d, returns: %d", transitions, returns))}
 	emit_proc(&b, "vm_thread_invalid", fmt.tprintf("%s\n%s", dedent(invalid), dispatch))
